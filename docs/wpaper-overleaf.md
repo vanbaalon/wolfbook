@@ -18,6 +18,45 @@ menu shows how this paper is synced now, lets you choose the way (or **Off**),
 and offers what that way needs. The setting behind it is
 `wolfbook.tex.overleafSync` (`git`, `live` or `off`).
 
+## Open a project from the Wolfbook sidebar
+
+Open the **Overleaf** tab in Wolfbook's left panel. Two separate cards make the
+connection choices clear:
+
+- **Browse projects · Live sync:** connect your account using the existing
+  browser-session setup, then choose a project from the list (or **Browse
+  projects…**). The search box filters your projects. Pick a `.tex` file and a
+  parent folder for the local copy. WPaper opens that file against the project's
+  main document, with the project's sources, styles, bibliographies and assets
+  on disk. The existing live connector keeps edits in step with Overleaf.
+- **Open with Git:** paste the project/Git URL, enter an Overleaf Git token and
+  choose a parent folder. Wolfbook clones the project, lets you pick a `.tex`
+  file and opens WPaper. It uses the existing Git sync controls. This does not
+  require connecting the browser-session account.
+
+The first method reuses the real-time connector's one-time opt-in and session
+cookie instructions described below. It remains unsupported by Overleaf. Git
+uses Overleaf's supported integration and needs Git access enabled for the
+project; see its [current documentation](https://docs.overleaf.com/integrations-and-add-ons/git-integration-and-github-synchronization/git-integration).
+
+Both methods add the project as a workspace folder so AI agents edit the same
+local files WPaper uses. Sync settings are stored for that project, so a live
+project and a Git project can use different modes. **Sync settings** changes the
+mode for the current paper.
+
+**Local projects** reopens an existing local copy and offers its `.tex` files;
+opening the same live project again reuses that copy. Initial imports always
+use a new folder and leave existing files intact. Opening a project does not
+push changes. Files explicitly selected from the sidebar join live sync even
+when the main paper does not include them yet. The live connector still offers a choice if a collaborator edited
+files during the initial import. Disconnecting the account keeps local files.
+An expired session is shown as a connection error; use **Replace session**.
+
+In a window without a workspace, VS Code restarts the extension host when its
+first workspace folder is added. Wolfbook saves the opening request and resumes
+WPaper and live sync after activation. Existing workspaces add the project in
+place.
+
 ## Git, every few minutes
 
 1. Connect the paper's repository to the Overleaf project: in the menu,
@@ -226,13 +265,14 @@ The equivalent terminal setup is:
 
 ```bash
 git remote add overleaf https://git@git.overleaf.com/YOUR_PROJECT_ID
-git pull overleaf master --allow-unrelated-histories --no-rebase
-git push overleaf HEAD:master
+git pull overleaf main --allow-unrelated-histories --no-rebase
+git push overleaf HEAD:main
 ```
 
 When Git asks, use `git` as the username and your Overleaf authentication token
-as the password. Overleaf exposes one branch named `master`, even when the local
-branch is named `main`.
+as the password. New Overleaf Git clones use `main`; older repositories may still use
+`master`. Wolfbook follows the cloned/configured branch or discovers the
+remote HEAD when configuring sync.
 
 Before every WPaper push, Wolfbook fetches the remote branch and performs a
 three-way merge. Non-overlapping remote and local edits are kept automatically.
@@ -240,5 +280,5 @@ If the same lines changed on both sides, Git keeps all unambiguous changes and
 WPaper opens the remaining conflicts for review; it never force-pushes over a
 collaborator's work.
 
-Official documentation: [Git integration](https://docs.overleaf.com/integrations-and-add-ons/git-integration-and-github-synchronization/git)
-and [authentication tokens](https://docs.overleaf.com/integrations-and-add-ons/git-integration-and-github-synchronization/git/git-integration-authentication-tokens).
+Official documentation: [Git integration](https://docs.overleaf.com/integrations-and-add-ons/git-integration-and-github-synchronization/git-integration)
+and [authentication tokens](https://docs.overleaf.com/integrations-and-add-ons/git-integration-and-github-synchronization/git-integration/git-integration-authentication-tokens).

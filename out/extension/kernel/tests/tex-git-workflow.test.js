@@ -198,6 +198,7 @@ test('guided Overleaf setup stores the token as a secret and sanitizes the remot
         if (key === 'remote get-url overleaf') return bad('missing');
         if (key === 'remote') return ok('');
         if (key === 'remote add overleaf https://git@git.overleaf.com/project123') return ok();
+        if (key === 'ls-remote --symref overleaf HEAD') return ok('ref: refs/heads/main\tHEAD\n');
         if (key.startsWith('config --local wolfbook.overleaf')) return ok();
         throw new Error(`unexpected git call: ${key}`);
     };
@@ -217,6 +218,7 @@ test('guided Overleaf setup stores the token as a secret and sanitizes the remot
         'remote add overleaf https://git@git.overleaf.com/project123'));
     assert.ok(!JSON.stringify(calls).includes('TOP_SECRET'), 'the token never enters a Git argument');
     assert.strictEqual(stored.get(`wolfbook.tex.overleafToken:${root}:overleaf`), 'TOP_SECRET');
+    assert.ok(calls.some(a => a.join(' ') === 'config --local wolfbook.overleafBranch main'), 'new projects follow Overleaf main');
 });
 
 test('an existing Overleaf Git remote is reported and can be removed safely', async () => {

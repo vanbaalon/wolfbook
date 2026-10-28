@@ -54,12 +54,14 @@ function makeTextDoc(fsPath, text) {
 
 function texStub(docs) {
     const applied = [];
+    const applyCalls = [];
     const stub = makeVscodeStub({
         workspace: {
             textDocuments: docs,
             workspaceFolders: [{ uri: { fsPath: '/proj', path: '/proj' } }],
             getConfiguration: () => ({ get: (_k, d) => d }),
             applyEdit: async (we) => {
+                applyCalls.push(we);
                 for (const e of we._edits) {
                     const doc = docs.find(d => d.uri.fsPath === e.uri.fsPath);
                     if (!doc) return false;
@@ -113,6 +115,7 @@ function texStub(docs) {
         dispose() { this._h = []; }
     };
     stub.__applied = applied;
+    stub.__applyCalls = applyCalls;
     return stub;
 }
 
@@ -384,7 +387,8 @@ async function main() {
         assert.strictEqual(applied.editCount, 2);
         assert.ok(doc.getText().includes('E=7'));
         assert.ok(doc.getText().includes('new concluding sentence'));
-        assert.strictEqual(stub.__applied.length, 1, 'one WorkspaceEdit means one undo step');
+        assert.strictEqual(stub.__applyCalls.length, 1, 'one WorkspaceEdit means one undo step');
+        assert.strictEqual(stub.__applied.length, 2, 'disjoint changes leave intervening reader text untouched');
     });
 
     await test('paper rename_label changes declaration and inbound references together', async () => {
@@ -700,14 +704,15 @@ async function main() {
 
     // ---- registration surface --------------------------------------------
     await test('registerTexSupport wires providers and honours the enable flag', async () => {
-        const doc = makeTextDoc('/proj/p.tex', PAPER);
+        const doc = makeTextDoc('/proj/p.tex', PAPER + '\n%Mathematica\n% 1+1\n%EndMathematica\n');
         const stub = texStub([doc]);
         const registered = [];
+        const lensProviders = [];
         stub.languages = {
             createDiagnosticCollection: () => ({ set() {}, delete() {}, dispose() {} }),
             registerDocumentSymbolProvider: (...a) => { registered.push('symbols'); return { dispose() {} }; },
             registerFoldingRangeProvider: (...a) => { registered.push('folding'); return { dispose() {} }; },
-            registerCodeLensProvider: (...a) => { registered.push('codelens'); return { dispose() {} }; },
+            registerCodeLensProvider: (...a) => { registered.push('codelens'); lensProviders.push(a[1]); return { dispose() {} }; },
             // Reference intelligence: what a \ref/\cite actually points at.
             registerHoverProvider: (...a) => { registered.push('hover'); return { dispose() {} }; },
             registerDefinitionProvider: (...a) => { registered.push('definition'); return { dispose() {} }; },
@@ -735,8 +740,8 @@ async function main() {
             showInputBox: async () => undefined,
             activeTextEditor: undefined,
         };
-        const cmds = [];
-        stub.commands = { registerCommand: (id) => { cmds.push(id); return { dispose() {} }; }, executeCommand: async () => {} };
+        const cmds = [], commandHandlers = new Map();
+        stub.commands = { registerCommand: (id, fn) => { cmds.push(id); commandHandlers.set(id, fn); return { dispose() {} }; }, executeCommand: async () => {} };
         stub.EventEmitter = class { constructor() { this.event = () => ({ dispose() {} }); } fire() {} dispose() {} };
         stub.SymbolKind = new Proxy({}, { get: () => 1 });
         stub.DiagnosticSeverity = { Warning: 1, Information: 2 };
@@ -745,6 +750,11 @@ async function main() {
         const ctx = { subscriptions: [] };
         const api = M.registerTexSupport(ctx);
         assert.ok(api, 'returns its handles');
+        const lenses = await lensProviders[0].provideCodeLenses(doc);
+        assert.ok(!lenses.some(l => ['wolfbook.tex.askAboutObject', 'wolfbook.tex.findReferences',
+            'wolfbook.tex.copyKey'].includes(l.command.command)), 'the unused source links are gone');
+        assert.ok(lenses.some(l => l.command.command === 'wolfbook.tex.explainBlockState'),
+            'managed block status remains useful in the source');
         assert.deepStrictEqual(registered.sort(),
             // TWO lens providers: the outline's, and the review's Keep/Undo.
             ['codelens', 'codelens', 'definition', 'folding', 'hover', 'paste', 'references', 'symbols']);
@@ -756,6 +766,139 @@ async function main() {
         assert.ok(cmds.includes('wolfbook.tex.reviewKeep') && cmds.includes('wolfbook.tex.reviewUndo'),
             'and so are its two verdicts');
         assert.ok(ctx.subscriptions.length > 0, 'everything is disposable');
+
+        // The editor-title logo passes the clicked document URI. It can
+        // belong to an unfocused pane while activeTextEditor names another.
+        const originalViewer = { open:api.viewer.open, syncFromEditor:api.viewer.syncFromEditor, root:api.viewer.root };
+        const originalCoord = { stateFor:api.coord.stateFor, build:api.coord.build };
+        const originalOpen = stub.workspace.openTextDocument;
+        const originalShow = stub.window.showTextDocument;
+        const first = makeTextDoc('/first/main.tex', PAPER), second = makeTextDoc('/second/main.tex', PAPER);
+        const firstEditor = { document:first,viewColumn:1 }, secondEditor = { document:second,viewColumn:2 };
+        const targetDocs = new Map([[first.uri.fsPath,first],[second.uri.fsPath,second]]);
+        const opened = [], builds = [], synced = [], shown = [];
+        const titleOpen = commandHandlers.get('wolfbook.tex.openViewer');
+        stub.window.visibleTextEditors = [firstEditor,secondEditor];
+        stub.window.tabGroups = { all:[
+            { viewColumn:1,isActive:true,activeTab:{ input:{ uri:first.uri } } },
+            { viewColumn:2,isActive:false,activeTab:{ input:{ uri:second.uri } } },
+        ] };
+        stub.workspace.openTextDocument = async uri => {
+            if (!targetDocs.has(uri.fsPath)) throw Error('missing target');
+            return targetDocs.get(uri.fsPath);
+        };
+        stub.window.showTextDocument = async (target,opts) => {
+            shown.push([target,opts]);
+            const editor = target === first ? firstEditor : secondEditor;
+            stub.window.activeTextEditor = editor;
+            for (const group of stub.window.tabGroups.all) group.isActive = group.viewColumn === editor.viewColumn;
+            return editor;
+        };
+        api.viewer.open = async target => { opened.push(target); api.viewer.root = target.uri.fsPath; };
+        api.viewer.syncFromEditor = editor => synced.push(editor.document);
+        api.coord.stateFor = () => ({ generation:null });
+        api.coord.build = async target => { builds.push(target); };
+        try {
+            stub.window.activeTextEditor = firstEditor;
+            await titleOpen(second.uri);
+            assert.equal(opened.at(-1),second,'the logo opens its own tab, including duplicate basenames');
+            assert.equal(builds.at(-1),second,'the clicked document is compiled');
+            assert.equal(synced.at(-1),second,'the previous active pane cannot redirect the initial cursor sync');
+            assert.equal(shown.at(-1)[1].viewColumn,2,'the viewer is paired with the clicked source group');
+            stub.window.activeTextEditor = undefined;
+            await titleOpen(first.uri);
+            assert.equal(opened.at(-1),first,'the title URI works even without an active text editor');
+            stub.window.activeTextEditor = firstEditor;
+            stub.window.tabGroups.all[0].isActive = false;
+            stub.window.tabGroups.all[1].isActive = true;
+            await titleOpen();
+            assert.equal(opened.at(-1),second,'the command palette follows the active tab despite stale editor focus');
+            stub.window.tabGroups.activeTabGroup = stub.window.tabGroups.all[0];
+            stub.window.activeTextEditor = secondEditor;
+            await titleOpen();
+            assert.equal(opened.at(-1),first,'the public activeTabGroup takes precedence over stale editor/group focus');
+            delete stub.window.tabGroups.activeTabGroup;
+            await titleOpen({ root:first.uri.fsPath });
+            assert.equal(opened.at(-1),first,'explicit root options still work for existing callers');
+            const count = opened.length;
+            await assert.rejects(titleOpen(stub.Uri.file('/missing/main.tex')),/missing target/);
+            assert.equal(opened.length,count,'an unavailable explicit file never falls back to another paper');
+
+            // A document load that finishes out of order must not reopen an
+            // older request over the file most recently chosen by its logo.
+            let release;
+            const waiting = new Promise(resolve => { release = resolve; });
+            stub.workspace.openTextDocument = uri => uri.fsPath === first.uri.fsPath ? waiting : Promise.resolve(second);
+            const older = titleOpen(first.uri);
+            await titleOpen(second.uri);
+            release(first); await older;
+            assert.equal(opened.at(-1),second,'the latest click wins over a slow earlier document load');
+
+            stub.workspace.openTextDocument = async uri => targetDocs.get(uri.fsPath);
+            let started, finish;
+            const building = new Promise(resolve => { started = resolve; });
+            api.coord.build = async target => {
+                if (target === first) { started(); await new Promise(resolve => { finish = resolve; }); }
+            };
+            const slowBuild = titleOpen(first.uri);
+            await building;
+            await titleOpen(second.uri);
+            const syncCount = synced.length;
+            finish(); await slowBuild;
+            assert.equal(api.viewer.root,second.uri.fsPath,'a completed old build cannot reopen its paper');
+            assert.equal(synced.length,syncCount,'a completed old build cannot sync the cursor into the new paper');
+        } finally {
+            Object.assign(api.viewer,originalViewer); Object.assign(api.coord,originalCoord);
+            stub.workspace.openTextDocument = originalOpen;
+            stub.window.showTextDocument = originalShow;
+            stub.window.activeTextEditor = undefined; stub.window.visibleTextEditors = [];
+            delete stub.window.tabGroups;
+        }
+
+        // Exercise the registered exporter with real output files. The cached
+        // bytes stand for the compiler output; publication must use this
+        // panel's root and must not save dirty TeX or publish an older PDF.
+        const fs = require('fs'), path = require('path'), os = require('os');
+        const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wpaper-modifier-export-'));
+        try {
+            const root = path.join(directory, 'My paper.tex'), target = path.join(directory, 'My paper.pdf');
+            const cached = path.join(directory, 'cache.pdf');
+            fs.writeFileSync(root, 'Saved source');
+            const current = makeTextDoc(root, PAPER + '\nUnsaved mini-editor text');
+            current.isDirty = true;
+            current.save = () => { throw Error('export must not save source'); };
+            const bytes = Buffer.from('%PDF-1.7\nsettled current paper\n%%EOF\n');
+            const st = { generation: { ok: true, pdfPath: cached }, sourceAhead: false, lastError: null };
+            const builds = [];
+            stub.workspace.openTextDocument = async uri => { assert.equal(uri.fsPath, root); return current; };
+            stub.window.activeTextEditor = { document: doc };
+            stub.window.withProgress = async (_opts, work) => work();
+            stub.ProgressLocation = { Notification: 15 };
+            stub.window.showSaveDialog = () => { throw Error('Cmd+Compile already names its output'); };
+            const errors = [];
+            stub.window.showErrorMessage = message => errors.push(message);
+            api.coord.rootFor = () => root;
+            api.coord.stateFor = () => st;
+            api.coord.build = async (builtDoc, opts) => {
+                assert.equal(builtDoc, current); builds.push(opts);
+                fs.writeFileSync(cached, bytes); return st;
+            };
+            const exportPdf = commandHandlers.get('wolfbook.tex.exportPdf');
+            const result = await exportPdf({ root, target, force: true });
+            assert.equal(result.ok, true);
+            assert.equal(result.target, target);
+            assert.deepStrictEqual(builds, [{ authoritative: true, quiet: true, force: true }]);
+            assert.deepStrictEqual(fs.readFileSync(target), bytes, 'the output PDF is actually written beside its source');
+            assert.equal(fs.readFileSync(root, 'utf8'), 'Saved source', 'unsaved editor text is compiled without a source save');
+            for (const failure of ['compile', 'typing']) {
+                st.lastError = failure === 'compile' ? 'Undefined control sequence' : null;
+                st.sourceAhead = failure === 'typing';
+                fs.writeFileSync(target, 'Existing exported PDF');
+                await exportPdf({ root, target, force: true });
+                assert.equal(fs.readFileSync(target, 'utf8'), 'Existing exported PDF', 'a failed or obsolete build cannot overwrite an export');
+            }
+            assert.equal(errors.length, 2);
+        } finally { fs.rmSync(directory, { recursive: true, force: true }); }
     });
 
     await test('registerTexSupport is a no-op when disabled', async () => {
@@ -828,7 +971,8 @@ async function main() {
             `the paper's own directory is watched (got ${JSON.stringify(dirs)})`);
         assert.ok(!dirs.includes('/proj'),
             'and a paper already inside the workspace is not watched twice');
-        const own = patterns.find(p => p && p.baseUri && p.baseUri.fsPath === '/elsewhere/Nikolay');
+        const own = patterns.find(p => p && p.baseUri && p.baseUri.fsPath === '/elsewhere/Nikolay' && /tex/.test(p.pattern));
+        assert.ok(own, 'the paper directory must have a TeX watcher alongside its asset watcher');
         assert.ok(/tex/.test(own.pattern), `for .tex files: ${own.pattern}`);
     });
 

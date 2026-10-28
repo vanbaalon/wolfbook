@@ -470,10 +470,14 @@ let _cellGlowDeco = null;
 let _followAgentEnabled = false;
 let _followAgentStatus = null;
 let _followAgentRegistered = false;
-let _followPromptInFlight = false;
 let _lastAgentActivity = null;
 let _lastAgentNotebook = null;
-const _followPromptedNotebooks = new Set();
+let _agentControllerProvider = null;
+// One toast per notebook at a time; repeated cell operations are coalesced.
+const _agentNotices = new Map();
+const _agentActivities = new WeakMap();
+const _backgroundEditors = new WeakMap();
+const AGENT_NOTICE_COOLDOWN_MS = 60000;
 
 function _sameNotebook(a, b) {
     return !!a && !!b && a.uri?.toString?.() === b.uri?.toString?.();
@@ -497,9 +501,11 @@ async function _revealAgentCell(editor, cellIndex, takeFocus) {
     let targetEditor = editor;
     if (takeFocus) {
         try {
-            targetEditor = await vscode.window.showNotebookDocument(editor.notebook, { preserveFocus: false });
+            targetEditor = await vscode.window.showNotebookDocument(editor.notebook, { preserveFocus: false, preview: false });
         } catch (_) {}
     }
+    if (!targetEditor.notebook.cellCount) return targetEditor;
+    cellIndex = Math.max(0, Math.min(cellIndex, targetEditor.notebook.cellCount - 1));
     targetEditor.revealRange(new RC(cellIndex, cellIndex + 1),
         vscode.NotebookEditorRevealType.InCenterIfOutsideViewport);
     if (!_cellGlowDeco && vscode.notebooks?.createNotebookEditorDecorationType) {
@@ -514,17 +520,25 @@ async function _revealAgentCell(editor, cellIndex, takeFocus) {
             try { targetEditor.setDecorations(_cellGlowDeco, []); } catch (_) {}
         }, 1800);
     }
+    return targetEditor;
 }
+
+function setAgentControllerProvider(provider) { _agentControllerProvider = provider; }
 
 async function _openAgentNotebook(notebook) {
     if (!notebook) return null;
-    const latest = _lastAgentActivity;
-    if (latest && _sameNotebook(latest.editor?.notebook, notebook)) {
-        await _revealAgentCell(latest.editor, latest.cellIndex, true);
-        return latest.editor;
-    }
     try {
-        return await vscode.window.showNotebookDocument(notebook, { preserveFocus: false });
+        const latest = _agentActivities.get(notebook);
+        const editor = latest
+            ? await _revealAgentCell(latest.editor, latest.cellIndex, true)
+            : await vscode.window.showNotebookDocument(notebook, { preserveFocus: false, preview: false });
+        // The user explicitly opened this notebook. Complete first-time kernel
+        // selection now, so subsequent agent runs can stay in the background.
+        const controller = _agentControllerProvider?.({ notebook: notebook.uri.fsPath });
+        if (controller) {
+            await require('../kernel/association').associateNotebook(controller, notebook, { allowReveal: false });
+        }
+        return editor;
     } catch (_) { return null; }
 }
 
@@ -556,11 +570,8 @@ function registerAgentFollow(context) {
 }
 
 /**
- * Tell the user that an AI agent created or selected a notebook without taking
- * editor focus. The returned promise is deliberately optional: tool callers
- * fire-and-forget it so a toast can never delay an MCP response.
- *
- * @param {{notebook: object|string, kind?: 'created'|'switched'}} event
+ * Notify without opening a tab or holding up an agent response. Navigation is
+ * exclusively the toast action (or the user's explicit Follow Agent command).
  */
 async function notifyAgentNotebookEvent(event) {
     try {
@@ -568,71 +579,56 @@ async function notifyAgentNotebookEvent(event) {
         let notebook = ref?.notebook?.uri ? ref.notebook : (ref?.uri ? ref : null);
         if (!notebook && typeof ref === 'string') notebook = await resolveNotebookDocument(ref);
         if (!notebook) return;
-
         _lastAgentNotebook = notebook;
         _updateFollowStatus();
-        if (_followAgentEnabled) void _openAgentNotebook(notebook);
+        if (_followAgentEnabled) {
+            void _openAgentNotebook(notebook);
+            return;
+        }
+        if (_sameNotebook(vscode.window.activeNotebookEditor?.notebook, notebook)) return;
 
+        const uri = notebook.uri.toString();
+        const previous = _agentNotices.get(uri);
+        if (previous?.pending || (previous && Date.now() - previous.at < AGENT_NOTICE_COOLDOWN_MS)) return;
+        const notice = { pending: true, at: Date.now() };
+        _agentNotices.set(uri, notice);
+        // Bound notice history even if a long-running agent visits many files.
+        if (_agentNotices.size > 100) {
+            for (const [key, entry] of _agentNotices) {
+                if (!entry.pending && key !== uri) { _agentNotices.delete(key); break; }
+            }
+        }
         const name = path.basename(notebook.uri.fsPath);
-        const created = event?.kind === 'created';
-        const message = created
-            ? `Wolfbook AI created "${name}" in the background.`
-            : `Wolfbook AI switched its target to "${name}".`;
-        const choice = await vscode.window.showInformationMessage(
-            `${message} Open it now, or follow the agent's notebook activity.`,
-            'Open Notebook', 'Follow Agent'
-        );
-        if (choice === 'Follow Agent') {
-            _followAgentEnabled = true;
-            _lastAgentNotebook = notebook;
-            _updateFollowStatus();
-            await _openAgentNotebook(notebook);
-        } else if (choice === 'Open Notebook') {
-            await _openAgentNotebook(notebook);
+        const verb = event?.kind === 'created' ? 'created' : event?.kind === 'switched' ? 'selected' : 'is working in';
+        try {
+            const choice = await vscode.window.showInformationMessage(
+                `Wolfbook AI ${verb} "${name}" in the background.`, 'Open Notebook'
+            );
+            if (choice === 'Open Notebook') await _openAgentNotebook(notebook);
+        } finally {
+            notice.pending = false;
         }
     } catch (_) {}
 }
 
-async function flashCell(editor, cellIndex) {    try {
+async function flashCell(editor, cellIndex) {
+    try {
         _lastAgentActivity = { editor, cellIndex };
+        _agentActivities.set(editor.notebook, _lastAgentActivity);
         _lastAgentNotebook = editor.notebook;
         _updateFollowStatus();
-        // Collab mode has always dedicated the right pane to following the
-        // agent, so retain that behaviour without showing an extra prompt.
-        if (_isCollabMode()) {
-            const rightEd = await _ensureCollabEditor(editor.notebook);
-            if (!rightEd) return; // couldn't open right pane — skip flash
-            await _revealAgentCell(rightEd, cellIndex, false);
-            return;
-        }
-
         if (_followAgentEnabled) {
             await _revealAgentCell(editor, cellIndex, true);
             return;
         }
-
-        const activeNotebook = vscode.window.activeNotebookEditor?.notebook;
-        if (_sameNotebook(activeNotebook, editor.notebook)) return;
-        const uri = editor.notebook.uri.toString();
-        if (_followPromptInFlight || _followPromptedNotebooks.has(uri)) return;
-        _followPromptInFlight = true;
-        _followPromptedNotebooks.add(uri);
-        const name = path.basename(editor.notebook.uri.fsPath);
-        // Do not await the toast: an unattended prompt must never hold an MCP
-        // tool response or keep ownership of the kernel.
-        Promise.resolve(vscode.window.showInformationMessage(
-            `Wolfbook AI is working in "${name}" in the background. Follow Agent opens it and tracks cells as they are added or evaluated.`,
-            'Follow Agent', 'Open Once'
-        )).then(async choice => {
-            if (choice === 'Follow Agent') {
-                _followAgentEnabled = true;
-                _updateFollowStatus();
-                const latest = _lastAgentActivity;
-                if (latest) await _revealAgentCell(latest.editor, latest.cellIndex, true);
-            } else if (choice === 'Open Once') {
-                await _revealAgentCell(editor, cellIndex, true);
-            }
-        }).catch(() => {}).finally(() => { _followPromptInFlight = false; });
+        // An existing collaboration pane may follow cells, but agent activity
+        // must never open a new pane or replace the paper the user is reading.
+        if (_isCollabMode()) {
+            const rightEd = vscode.window.visibleNotebookEditors.find(ed =>
+                ed.viewColumn === vscode.ViewColumn.Two && _sameNotebook(ed.notebook, editor.notebook));
+            if (rightEd) await _revealAgentCell(rightEd, cellIndex, false);
+        }
+        void notifyAgentNotebookEvent({ notebook: editor.notebook });
     } catch (_) {}
 }
 
@@ -1031,10 +1027,15 @@ function _allNotebookUris() {
  * @returns {Promise<import('vscode').NotebookDocument|null>}
  */
 async function resolveNotebookDocument(targetName) {
-    const _openWithTimeout = (uri, ms = 8000) => Promise.race([
-        vscode.workspace.openNotebookDocument(uri),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('openNotebookDocument timed out')), ms)),
-    ]);
+    const _openWithTimeout = async (uri, ms = 8000) => {
+        let timer;
+        try {
+            return await Promise.race([
+                vscode.workspace.openNotebookDocument(uri),
+                new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('openNotebookDocument timed out')), ms); }),
+            ]);
+        } finally { clearTimeout(timer); }
+    };
     if (targetName) {
         const norm = String(targetName).trim().toLowerCase();
         for (const [fsPath, uri] of _allNotebookUris()) {
@@ -1059,149 +1060,49 @@ async function resolveNotebookDocument(targetName) {
 }
 
 /**
- * Resolve (and optionally bring to front) a notebook editor.
- * @param {string}  [targetName]          - filename to match (case-insensitive)
- * @param {object}  [opts]
- * @param {boolean} [opts.skipConfirm]    - skip the switch confirmation dialog (e.g. for explicit switch action)
- * @param {string}  [opts.actionDesc]     - human description of what the agent intends to do (shown in dialog)
- * @returns {vscode.NotebookEditor|null}
+ * Supply the document and cell selection expected by editing/evaluation tools
+ * without creating an editor tab. A real visible editor is reused when present.
+ * Background selection is retained between tool calls and has no UI effects.
+ */
+function notebookToolEditor(notebook) {
+    const visible = vscode.window.visibleNotebookEditors.find(ed => _sameNotebook(ed.notebook, notebook));
+    if (visible) return visible;
+    let editor = _backgroundEditors.get(notebook);
+    if (!editor) {
+        const RC = vscode.NotebookRange ?? vscode.NotebookCellRange;
+        editor = {
+            notebook, visibleRanges: [], selections: [new RC(0, Math.min(1, notebook.cellCount || 0))],
+            get selection() { return this.selections[0]; },
+            set selection(value) { this.selections = [value]; },
+            revealRange() {}, setDecorations() {},
+        };
+        _backgroundEditors.set(notebook, editor);
+    }
+    return editor;
+}
+
+/**
+ * Resolve an agent's target without changing the user's active tab. Loading a
+ * document is enough for edits and for evaluation on an associated controller.
+ * `preserveFocus:false` is reserved for callers explicitly requesting navigation.
  */
 async function resolveNotebookEditor(targetName, opts = {}) {
-    const activeUri = vscode.window.activeNotebookEditor?.notebook?.uri?.toString();
-    const preserveFocus = opts.preserveFocus !== false;
-
-    /** Show confirmation dialog before switching; returns true if user accepts. */
-    async function _confirmSwitch(targetFileName) {
-        // Skip dialog when called from MCP (client can't click a VS Code popup)
-        // or when the caller explicitly opts out of the confirmation.
-        if (_mcpCallActive || opts.skipConfirm) return true;
-        const active = vscode.window.activeNotebookEditor?.notebook?.uri?.fsPath?.split('/')?.pop() || 'current notebook';
-        if (targetFileName.toLowerCase() === active.toLowerCase()) return true;  // already active, no dialog
-        const action = opts.actionDesc ? `\"${opts.actionDesc}\" on` : 'work on';
-        const choice = await vscode.window.showInformationMessage(
-            `Agent wants to ${action} "${targetFileName}". Switch away from "${active}"?`,
-            { modal: false },
-            'Switch & Continue',
-            'Cancel'
-        );
-        return choice === 'Switch & Continue';
-    }
-
-    // If a specific notebook is requested, find it among all known tabs/docs
+    let notebook;
     if (targetName) {
-        const normTarget = targetName.trim().toLowerCase();
-        const matchesTarget = fsPath => {
-            const full = String(fsPath || '').toLowerCase();
-            return full === normTarget || path.basename(full) === normTarget;
-        };
-
-        // 1. Check visible editors first (fast path — already loaded)
-        for (const ed of vscode.window.visibleNotebookEditors) {
-            if (matchesTarget(ed.notebook.uri.fsPath)) {
-                if (ed.notebook.uri.toString() !== activeUri) {
-                    if (!await _confirmSwitch(ed.notebook.uri.fsPath.split('/').pop())) return null;
-                }
-                if (_isCollabMode()) {
-                    const collabEd = await _ensureCollabEditor(ed.notebook);
-                    _onNotebookResolved?.(ed.notebook.uri.fsPath.split('/').pop());
-                    return collabEd || ed;
-                }
-                try { await vscode.window.showNotebookDocument(ed.notebook, { preserveFocus }); } catch (_) {}
-                _onNotebookResolved?.(ed.notebook.uri.fsPath.split('/').pop());
-                return ed;
-            }
-        }
-        // 2. Check all in-memory notebook documents (loaded but not visible)
-        for (const doc of vscode.workspace.notebookDocuments) {
-            if (matchesTarget(doc.uri.fsPath)) {
-                if (doc.uri.toString() !== activeUri) {
-                    if (!await _confirmSwitch(doc.uri.fsPath.split('/').pop())) return null;
-                }
-                try {
-                    if (_isCollabMode()) {
-                        const collabEd = await _ensureCollabEditor(doc);
-                        _onNotebookResolved?.(doc.uri.fsPath.split('/').pop());
-                        return collabEd || await vscode.window.showNotebookDocument(doc, { preserveFocus: true });
-                    }
-                    const ed = await vscode.window.showNotebookDocument(doc, { preserveFocus });
-                    _onNotebookResolved?.(doc.uri.fsPath.split('/').pop());
-                    return ed;
-                } catch (_) {}
-            }
-        }
-        // 3. Check background tabs that haven't been loaded into memory yet.
-        //    We must call openNotebookDocument first to load it, then showNotebookDocument.
-        //    Use a timeout — openNotebookDocument can hang if VS Code isn't ready.
-        const _openWithTimeout = (uri, ms = 8000) => Promise.race([
-            vscode.workspace.openNotebookDocument(uri),
-            new Promise((_, rej) => setTimeout(() => rej(new Error('openNotebookDocument timed out')), ms)),
-        ]);
-        const allUris = _allNotebookUris();
-        for (const [fsPath, uri] of allUris) {
-            if (matchesTarget(fsPath)) {
-                if (uri.toString() !== activeUri) {
-                    if (!await _confirmSwitch(fsPath.split('/').pop())) return null;
-                }
-                try {
-                    const doc = await _openWithTimeout(uri);
-                    if (_isCollabMode()) {
-                        const collabEd = await _ensureCollabEditor(doc);
-                        _onNotebookResolved?.(fsPath.split('/').pop());
-                        return collabEd || await vscode.window.showNotebookDocument(doc, { preserveFocus: true });
-                    }
-                    const ed  = await vscode.window.showNotebookDocument(doc, { preserveFocus });
-                    _onNotebookResolved?.(fsPath.split('/').pop());
-                    return ed;
-                } catch (_) {}
-            }
-        }
-        // 4. Not found — return null so the caller can report the error
-        return null;
+        notebook = await resolveNotebookDocument(targetName);
+    } else {
+        notebook = vscode.window.activeNotebookEditor?.notebook
+            || vscode.window.visibleNotebookEditors.find(ed => NB_EXTS.some(ext => ed.notebook.uri.fsPath.endsWith(ext)))?.notebook
+            || vscode.workspace.notebookDocuments.find(doc => NB_EXTS.some(ext => doc.uri.fsPath.endsWith(ext)))
+            || await resolveNotebookDocument();
     }
-
-    // No target specified — use active or first visible
-    // In collab mode prefer the col-1 editor as the "primary" so we always route to col-2.
-    if (_isCollabMode()) {
-        const primaryNb =
-            vscode.window.visibleNotebookEditors.find(ed => ed.viewColumn === vscode.ViewColumn.One)?.notebook
-            || (vscode.window.activeNotebookEditor?.viewColumn !== vscode.ViewColumn.Two
-                ? vscode.window.activeNotebookEditor?.notebook : null)
-            || vscode.window.visibleNotebookEditors[0]?.notebook;
-        if (!primaryNb) return null;
-        _onNotebookResolved?.(primaryNb.uri.fsPath.split('/').pop());
-        return await _ensureCollabEditor(primaryNb);
-    }
-    const active = vscode.window.activeNotebookEditor;
-    if (active) {
-        _onNotebookResolved?.(active.notebook.uri.fsPath.split('/').pop());
-        return active;
-    }
-    // No active notebook editor — auto-switch to first visible or in-memory wolfbook
-    const visibleWb = vscode.window.visibleNotebookEditors.find(
-        ed => /\.(wb|evsnb|vsnb)$/.test(ed.notebook.uri.fsPath)
-    );
-    if (visibleWb) {
-        try { await vscode.window.showNotebookDocument(visibleWb.notebook, { preserveFocus }); } catch (_) {}
-        _onNotebookResolved?.(visibleWb.notebook.uri.fsPath.split('/').pop());
-        return visibleWb;
-    }
-    // Try in-memory wolfbook documents
-    for (const doc of vscode.workspace.notebookDocuments) {
-        if (/\.(wb|evsnb|vsnb)$/.test(doc.uri.fsPath)) {
-            try {
-                const ed = await vscode.window.showNotebookDocument(doc, { preserveFocus });
-                _onNotebookResolved?.(doc.uri.fsPath.split('/').pop());
-                return ed;
-            } catch (_) {}
-        }
-    }
-    const fallback = vscode.window.visibleNotebookEditors[0];
-    if (!fallback) return null;
-    try {
-        await vscode.window.showNotebookDocument(fallback.notebook, { preserveFocus });
-    } catch (_) {}
-    _onNotebookResolved?.(fallback.notebook.uri.fsPath.split('/').pop());
-    return fallback;
+    if (!notebook) return null;
+    const editor = opts.preserveFocus === false
+        ? await vscode.window.showNotebookDocument(notebook, { preserveFocus: false, preview: false })
+        : notebookToolEditor(notebook);
+    _onNotebookResolved?.(path.basename(notebook.uri.fsPath));
+    if (opts.notify !== false) void notifyAgentNotebookEvent({ notebook });
+    return editor;
 }
 
 // ---------------------------------------------------------------------------
@@ -1240,6 +1141,7 @@ module.exports = {
     _isCollabMode,
     _ensureCollabEditor,
     registerAgentFollow,
+    setAgentControllerProvider,
     notifyAgentNotebookEvent,
     flashCell,
     _snapshotViewport,
@@ -1258,6 +1160,7 @@ module.exports = {
     setNotebookResolvedCallback,
     _allNotebookUris,
     resolveNotebookEditor,
+    notebookToolEditor,
     resolveNotebookDocument,
     noEditorMsg,
     setMcpCallActive,

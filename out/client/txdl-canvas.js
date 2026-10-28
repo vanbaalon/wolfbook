@@ -353,6 +353,7 @@ export function createTxdlRenderer(options = {}) {
   const settings = { ...DEFAULTS, ...options };
   const outlines = new BoundedCache(settings.maxOutlines);
   const paths = new BoundedCache(settings.maxPaths);
+  const inkBounds=new WeakMap();
   const requestImage = typeof options.requestImage === 'function' ? options.requestImage : null;
   const images = new BoundedCache(settings.maxImages);
   const imagesInFlight = new Set();
@@ -915,32 +916,79 @@ export function createTxdlRenderer(options = {}) {
    * with ActualText stays one item with that text; a glyph with no known
    * character is U+FFFD. Gaps between glyphs are where the words break.
    */
-  function glyphText(page, fonts = page && page.fonts) {
+  function glyphText(page, fonts = page && page.fonts, {ink=false}={}) {
     const index = fontIndex(fonts);
     const items = [];
-    for (const op of (page && page.ops) || []) {
-      if (op.op !== 'glyphs') continue;
-      const glyphs = op.glyphs || [];
-      if (!glyphs.length) continue;
-      const font = index.get(op.font) || null;
-      const size = font && font.size_sp > 0 ? font.size_sp : 0;
-      const advance = gid => {
-        const outline = outlines.get(key(op.font, gid));
-        return outline && outline.units_per_em ? (outline.advance / outline.units_per_em) * size : size / 2;
-      };
-      if (typeof op.text === 'string' && op.text.length > 0) {
-        const first = glyphs[0], last = glyphs[glyphs.length - 1];
-        items.push({ str: op.text, x: spToPt(first[1]), baseline: spToPt(first[2]),
-          w: spToPt(last[1] - first[1] + advance(last[0])), h: spToPt(size) });
-        continue;
+    let svg=null;
+    const glyphInk=(glyph,font,digest)=>{
+      const outline=outlines.get(key(digest,glyph[0]));
+      if (!ink || !outline || !outline.units_per_em || !(font?.size_sp>0) || typeof document==='undefined') return null;
+      let bounds=inkBounds.get(outline);
+      if (!bounds) {
+        try {
+          if (!svg) {
+            svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+            Object.assign(svg.style,{position:'fixed',visibility:'hidden',pointerEvents:'none',width:'1px',height:'1px'});
+            document.body.appendChild(svg);
+          }
+          const path=document.createElementNS(svg.namespaceURI,'path');path.setAttribute('d',outline.path || '');
+          svg.appendChild(path);const box=path.getBBox();path.remove();
+          bounds={x:box.x,y:box.y,w:box.width,h:box.height};inkBounds.set(outline,bounds);
+        } catch (_) {return null;}
       }
-      for (const [gid, x, y] of glyphs) {
-        const outline = outlines.get(key(op.font, gid));
-        const str = outline && typeof outline.text === 'string' ? outline.text
-          : !op.native && gid < 128 ? String.fromCharCode(gid) : '\uFFFD';
-        items.push({ str, x: spToPt(x), baseline: spToPt(y), w: spToPt(advance(gid)), h: spToPt(size) });
+      const unit=spToPt(font.size_sp)/outline.units_per_em,extend=font.extend ? font.extend/65536 : 1,
+        slant=font.slant ? font.slant/65536 : 0,pad=font.embolden ? font.embolden/65536/2 : 0;
+      const corners=[[bounds.x,bounds.y],[bounds.x+bounds.w,bounds.y],
+        [bounds.x,bounds.y+bounds.h],[bounds.x+bounds.w,bounds.y+bounds.h]];
+      const xs=corners.map(([x,y])=>spToPt(glyph[1])+unit*(extend*x+slant*y)),
+        ys=corners.map(([,y])=>spToPt(glyph[2])-unit*y);
+      const x=Math.min(...xs)-pad,y=Math.min(...ys)-pad;
+      return {x,y,w:Math.max(...xs)+pad-x,h:Math.max(...ys)+pad-y};
+    };
+    try {
+      for (const op of (page && page.ops) || []) {
+        if (op.op !== 'glyphs') continue;
+        const glyphs = op.glyphs || [];
+        if (!glyphs.length) continue;
+        const font = index.get(op.font) || null;
+        const size = font && font.size_sp > 0 ? font.size_sp : 0;
+        const advance = gid => {
+          const outline = outlines.get(key(op.font, gid));
+          return outline && outline.units_per_em ? (outline.advance / outline.units_per_em) * size : size / 2;
+        };
+        if (typeof op.text === 'string' && op.text.length > 0) {
+          const first = glyphs[0], last = glyphs[glyphs.length - 1];
+          // ActualText may describe a whole proportional run. Match it to its
+          // glyphs before exposing character boxes; semantic substitutions with
+          // no one-to-one geometry retain the existing run fallback.
+          let at=0;const charBoxes=[];
+          const chars=ink ? Array.from(op.text) : [];
+          for (let i=0;ink && i<glyphs.length;i++) {
+            const glyph=glyphs[i],outline=outlines.get(key(op.font,glyph[0]));
+            const str=typeof outline?.text==='string' && outline.text ? outline.text
+              : chars.length===glyphs.length ? chars[i] : null;
+            if (!str) {at=-1;break;}
+            while (/\s/.test(op.text[at] || '') && !/^\s/.test(str)) at++;
+            if (!op.text.startsWith(str,at)) {at=-1;break;}
+            const box=glyphInk(glyph,font,op.font);
+            if (box) charBoxes.push({...box,from:at,to:at+str.length});
+            at+=str.length;
+          }
+          items.push({ str: op.text, x: spToPt(first[1]), baseline: spToPt(first[2]),
+            w: spToPt(last[1] - first[1] + advance(last[0])), h: spToPt(size),
+            ...(at>=0 && !op.text.slice(at).trim() && charBoxes.length ? {charBoxes} : {}) });
+          continue;
+        }
+        for (const [gid, x, y] of glyphs) {
+          const outline = outlines.get(key(op.font, gid));
+          const str = outline && typeof outline.text === 'string' ? outline.text
+            : !op.native && gid < 128 ? String.fromCharCode(gid) : '\uFFFD';
+          const box=glyphInk([gid,x,y],font,op.font);
+          items.push({ str, x: spToPt(x), baseline: spToPt(y), w: spToPt(advance(gid)), h: spToPt(size),
+            ...(box ? {charBoxes:[{...box,from:0,to:str.length}]} : {}) });
+        }
       }
-    }
+    } finally {svg?.remove();}
     return items;
   }
 

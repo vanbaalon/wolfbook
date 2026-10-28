@@ -61,3 +61,30 @@ test('a ligature or math letter matches inside its run', async () => {
     const [[xs, xe]] = f.findAll(m.text, 'x');
     assert.deepEqual(f.matchSpans(m, xs, xe), [{ run: 0, from: 9, to: 11 }], '𝑥 is two UTF-16 units');
 });
+
+test('search uses measured proportional glyph widths and printed ink height',async()=>{
+ const f=await load();
+ const items=[{str:'Wide Baxter iii',x:10,y:20,w:150,h:20,charBoxes:[
+  {from:0,to:1,x:10,y:25,w:16,h:14},{from:1,to:2,x:26,y:25,w:4,h:14},
+  {from:2,to:3,x:30,y:25,w:10,h:14},{from:3,to:4,x:40,y:28,w:9,h:11},
+  {from:4,to:5,x:49,y:40,w:6,h:0},{from:5,to:6,x:55,y:25,w:12,h:14},
+  {from:6,to:7,x:67,y:28,w:9,h:11},{from:7,to:8,x:76,y:28,w:9,h:11},
+  {from:8,to:9,x:85,y:26,w:6,h:13},{from:9,to:10,x:91,y:28,w:9,h:11},
+  {from:10,to:11,x:100,y:28,w:6,h:11},{from:11,to:12,x:106,y:40,w:6,h:0},
+  {from:12,to:13,x:112,y:25,w:4,h:14},{from:13,to:14,x:116,y:25,w:4,h:14},{from:14,to:15,x:120,y:25,w:4,h:14}]}];
+ const model=f.pageText(items),[[start,end]]=f.findAll(model.text,'baxter');
+ assert.deepEqual(f.spanRects(items,f.matchSpans(model,start,end)),[{x:55,y:25,w:51,h:14}]);
+ const [[a,z]]=f.findAll(model.text,'axte');
+ assert.deepEqual(f.spanRects(items,f.matchSpans(model,a,z)),[{x:67,y:26,w:33,h:13}]);
+});
+
+test('measured boxes honour UTF-16 spans for ligatures and supplementary math characters',async()=>{
+ const f=await load();
+ const items=[{str:'ﬁ 𝑥',x:0,y:0,w:40,h:15,charBoxes:[
+  {from:0,to:1,x:0,y:3,w:8,h:11},{from:1,to:2,x:8,y:14,w:4,h:0},{from:2,to:4,x:12,y:4,w:9,h:10}]}];
+ const model=f.pageText(items);
+ for(const [query,expected] of [['fi',{x:0,y:3,w:8,h:11}],['x',{x:12,y:4,w:9,h:10}]]){
+  const [[start,end]]=f.findAll(model.text,query);
+  assert.deepEqual(f.spanRects(items,f.matchSpans(model,start,end)),[expected]);
+ }
+});

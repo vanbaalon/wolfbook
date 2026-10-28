@@ -107,7 +107,7 @@ test('every id the client script looks up exists in the shell', () => {
 
 test('the script tag points at the real client module, under a nonce', () => {
     const html = buildHtml();
-    assert.ok(/<script nonce="[^"]+" type="module" src="[^"]*tex-viewer\.js"><\/script>/.test(html),
+    assert.ok(/<script nonce="[^"]+" type="module" src="[^"]*tex-viewer\.js\?v=[^"]+"><\/script>/.test(html),
         'the module script tag is missing or malformed');
     const nonce = /nonce-([^']+)'/.exec(html);
     assert.ok(nonce, 'the CSP declares a nonce');
@@ -155,7 +155,7 @@ test('a stale page has a compact tracing-paused indicator', () => {
     assert.ok(/id="tracelag" hidden/.test(shell), 'the indicator starts out of the way');
     assert.ok(/#tracelag\.compiling::before/.test(shell), 'an in-progress update gets a small spinner');
     assert.ok(/case 'traceState': setTraceState\(msg\)/.test(js), 'the lag state reaches the indicator');
-    assert.ok(/if \(state\.tracePaused && !state\.nativeMapAvailable\) \{\s*vscode.postMessage\(\{ type: 'traceRetry'[^\n]*\n\s*return;/.test(js),
+    assert.ok(/if \(type !== 'editHere' && state\.tracePaused && !state\.nativeMapAvailable\) \{\s*vscode.postMessage\(\{ type: 'traceRetry'[^\n]*\n\s*return;/.test(js),
         'stale pages without an admitted native map request recovery');
 });
 
@@ -250,6 +250,8 @@ test('every message the client posts has a handler in the extension', () => {
 
     const handled = new Set();
     for (const m of viewer.matchAll(/case '([a-zA-Z]+)':/g)) handled.add(m[1]);
+    // Transport/health replies can return before the gesture switch.
+    for (const m of viewer.matchAll(/if\s*\(m\?\.type\s*===\s*'([a-zA-Z]+)'\)/g)) handled.add(m[1]);
 
     const orphans = [...sent].filter(t => !handled.has(t));
     assert.deepStrictEqual(orphans, [],
@@ -302,13 +304,13 @@ test('two explicit outward arrows step across a mini-editor boundary', () => {
     const js = fs.readFileSync(CLIENT_JS, 'utf8');
     const from = js.indexOf("ta.addEventListener('keydown', (ev) => {",
         js.indexOf('function buildEditCard('));
-    const body = js.slice(from, from + 3200);
+    const body = js.slice(from, js.indexOf('const hint =', from));
     assert.ok(/let boundaryArm = null/.test(js), 'the first boundary press only arms navigation');
     assert.ok(/ev\.key === 'ArrowLeft' && ta\.selectionStart === 0/.test(body),
         'left is considered only at the first character');
     assert.ok(/ev\.key === 'ArrowRight' && ta\.selectionEnd === ta\.value\.length/.test(body),
         'right is considered only after the last character');
-    assert.ok(/if \(ev\.repeat\) return/.test(body),
+    assert.ok(/if \(ev\.repeat \|\| e\._extendPending\) return/.test(body),
         'holding an arrow cannot step through paragraphs');
     assert.ok(/if \(boundaryArm === here\)/.test(body) &&
         /step\(ev\.key === 'ArrowLeft' \? -1 : 1\)/.test(body),
@@ -341,7 +343,7 @@ test('a mini-editor deletion cannot send new offsets against old text', () => {
     const body = js.slice(from, from + 3600);
     assert.ok(/type: 'editChange', editId: e\.id, text: ta\.value, caret/.test(body),
         'the changed text and its caret are one ordered host message');
-    assert.ok(/if \(debounce\) return/.test(body),
+    assert.ok(/if \(debounce \|\| e\._extendPending\) return/.test(body),
         'caret-only messages wait while changed text is still debounced');
     assert.ok(/state\.edit\._caretSent = `\$\{caret\.start\}:\$\{caret\.end\}:\$\{caret\.direction\}`/.test(body),
         'the bundled caret is claimed so the textarea does not echo it');
@@ -363,17 +365,49 @@ test('Ctrl+S on the paper saves through the same mini-editor operation', () => {
 
 test('the mini-editor leaves native copy cut and paste intact', () => {
     const js = fs.readFileSync(CLIENT_JS, 'utf8');
-    const from = js.indexOf("ta.addEventListener('keydown', (ev) => {",
-        js.indexOf('function buildEditCard('));
-    const body = js.slice(from, from + 3600);
-    const firstBranch = body.indexOf("if ((ev.metaKey || ev.ctrlKey) && ev.altKey");
-    assert.ok(firstBranch > 0, 'the mini-editor keyboard handler was found');
-    assert.ok(!/ev\.stopPropagation\(\)/.test(body.slice(0, firstBranch)),
-        'ordinary textarea shortcuts reach VS Code native clipboard handling');
-    assert.ok(!/key === ['\"]c['\"]|key === ['\"]x['\"]|key === ['\"]v['\"]/.test(body),
-        'the card does not reinterpret clipboard shortcuts as page actions');
-    assert.ok(/ev\.preventDefault\(\);\s*\n\s*ev\.stopPropagation\(\)/.test(body),
-        'card-owned shortcuts remain contained');
+    const from = js.indexOf("ta.addEventListener('keydown', (ev) => {", js.indexOf('function buildEditCard('));
+    let handler, saves = 0;
+    const context = require('vm').createContext({
+        ta:{ value:'text', selectionStart:4, selectionEnd:4, addEventListener:(type, fn) => { handler = fn; } },
+        e:{ id:11 }, boundaryArm:null, saveCurrent:() => { saves++; },
+    });
+    require('vm').runInContext(js.slice(from, js.indexOf('const hint =',from)), context);
+    for (const pending of [false,true]) {
+        context.e._extendPending = pending ? {} : null;
+        for (const modifier of ['metaKey','ctrlKey']) for (const key of ['c','x','v']) {
+            let prevented = 0, stopped = 0;
+            handler({ key, [modifier]:true, preventDefault:() => { prevented++; }, stopPropagation:() => { stopped++; } });
+            assert.strictEqual(prevented, 0, `${modifier} ${key} keeps its native clipboard action`);
+            assert.strictEqual(stopped, 0, `${modifier} ${key} reaches VS Code`);
+        }
+    }
+    let prevented = 0, stopped = 0;
+    handler({ key:'s', ctrlKey:true, preventDefault:() => { prevented++; }, stopPropagation:() => { stopped++; } });
+    assert.strictEqual(saves, 1);
+    assert.strictEqual(prevented, 1);
+    assert.strictEqual(stopped, 1);
+});
+
+test('mini-editor line comments preserve CRLF, indentation, escaped percent and selected line boundaries', () => {
+    const js = fs.readFileSync(CLIENT_JS, 'utf8');
+    const start = js.indexOf('function miniCommentEdit(');
+    const ctx = require('vm').createContext({});
+    require('vm').runInContext(js.slice(start, js.indexOf('\n/**', start)), ctx);
+    for (const source of ['  first\n    second\n\nlast', '  first\r\n    second\r\n\r\nlast']) {
+        const end = source.indexOf('last');
+        const r = ctx.miniCommentEdit(source, 2, end);
+        const commented = source.slice(0, r.start) + r.insert + source.slice(r.end);
+        assert.equal(commented, source.replace('  first', '  % first').replace('    second', '  %   second'));
+        const undo = ctx.miniCommentEdit(commented, ...r.select);
+        assert.equal(commented.slice(0, undo.start) + undo.insert + commented.slice(undo.end), source);
+    }
+    const src = '\\% literal percent\nlast';
+    const r = ctx.miniCommentEdit(src, 0, 0);
+    assert.equal(r.insert, '% \\% literal percent');
+    assert.equal(r.select[0], 2, 'the caret follows its original text');
+    const blank = ctx.miniCommentEdit('\ntext', 0, 0);
+    assert.equal(blank.start, 0);
+    assert.equal(blank.insert, '% ', 'the first blank line stays the target');
 });
 
 test('typing on the paper opens the mini-editor at the resolved click', () => {
@@ -421,7 +455,7 @@ test('the webview reports the complete restorable WPaper session', () => {
         'Fit exposes a discoverable double-click responsive regime');
     assert.ok(/#fit\[aria-pressed="true"\][\s\S]{0,300}vscode-focusBorder[\s\S]{0,180}box-shadow:inset/.test(shell),
         'responsive Fit remains unmistakably highlighted after the pointer leaves');
-    assert.ok(/function responsiveFit\(\)[\s\S]*requestAnimationFrame[\s\S]*live: true[\s\S]*ResizeObserver\(responsiveFit\)/.test(js),
+    assert.ok(/function responsiveFit\(\)[\s\S]*requestAnimationFrame[\s\S]*live: true[\s\S]*ResizeObserver\(\(\) => \{\s*responsiveFit\(\)/.test(js),
         'responsive Fit tracks the actual reader width with a live preview during separator drags');
     assert.ok(/type:\s*'editView'/.test(js),
         'the mini-editor reports its caret and dragged position');
@@ -493,7 +527,7 @@ test('recompiled paragraph geometry cannot move or replace the active editor', (
     const js = fs.readFileSync(CLIENT_JS, 'utf8');
     const style = { left: '80px', top: '450px', width: '600px' };
     const card = { dataset: { edit: '1' }, style: { ...style }, remove() { throw Error('editor removed'); } };
-    const wrap = { clientWidth: 800, clientHeight: 1000,
+    const wrap = { dataset:{page:'2'},clientWidth: 800, clientHeight: 1000,
         getBoundingClientRect: () => ({ left: 0, right: 800 }), querySelector: () => card };
     const state = { edit: { id: 1, page: 2, fixedGeometry: style,
         rects: [{ page: 3, x: 10, y: 100, w: 400, h: 50 }] }, rendered: new Map([[2, {}]]) };
@@ -503,7 +537,8 @@ test('recompiled paragraph geometry cannot move or replace the active editor', (
         rectToViewport: () => { throw Error('other page must not reposition card'); },
     });
     const start = js.indexOf('function editCardPage('), end = js.indexOf('\nfunction revealEditCard(', start);
-    require('vm').runInContext(js.slice(start, end), context);
+    const anchorHelpers=js.slice(js.indexOf('function editBlockBounds('),js.indexOf('function followEditCardAnchor('));
+    require('vm').runInContext(anchorHelpers+js.slice(start, end), context);
     context.paintEditCard();
     assert.deepEqual(card.style, style);
 });
@@ -530,19 +565,39 @@ test('compile edge glow follows real compile state and does not intercept or mov
     assert.match(host, /type: 'compileState', compiling: !!\(st && st\.compiling && !st\.backgroundCompiling\)/);
 });
 
-test('paused click, right-click and double-click request recovery instead of silently disappearing', () => {
+test('paused navigation requests recovery while right-click still reaches the editing path immediately', async () => {
     const js = fs.readFileSync(CLIENT_JS, 'utf8');
     const start = js.indexOf('function sendClick(');
     const end = js.indexOf("\nel('zoomin')", start);
     const sent = [];
-    const ctx = require('vm').createContext({ state:{tracePaused:true,generation:7},
+    const ctx = require('vm').createContext({ state:{tracePaused:true,generation:7},sourceFocusEpoch:0,proActive:()=>true,
         vscode:{postMessage:m=>sent.push(m)} });
     require('vm').runInContext(js.slice(start,end), ctx);
     for (const [extra,type] of [[{},'click'],[{},'editHere'],[{takeMe:true},'click']]) {
         ctx.sendClick(1,{xBp:10,yTopBp:20},10,20,extra,type);
     }
+    await new Promise(resolve=>setImmediate(resolve));
     assert.equal(sent.length,3);
-    assert.ok(sent.every(m => m.type === 'traceRetry' && m.generation === 7));
+    assert.equal(sent.filter(m=>m.type==='traceRetry' && m.generation===7).length,2);
+    assert.ok(sent.some(m=>m.type==='editHere' && m.generation===7));
+});
+
+test('double-click supersedes single-click PDF extraction still in flight', async () => {
+    const js = fs.readFileSync(CLIENT_JS, 'utf8');
+    const start = js.indexOf('function sendClick('), end = js.indexOf("\nel('zoomin')", start);
+    const sent = [], delayed = [];
+    const ctx = require('vm').createContext({ state: { generation: 7 }, sourceFocusEpoch: 0,
+        clearPaperTypingTarget() {}, pendingPaperTyping: null,
+        wordAtPoint: () => new Promise(resolve => delayed.push(resolve)),
+        vscode: { postMessage: m => sent.push(m) } });
+    require('vm').runInContext(js.slice(start, end), ctx);
+    ctx.sendClick(1, { xBp: 10, yTopBp: 20 }, 10, 20, { pick: true });
+    ctx.sourceFocusEpoch++;
+    ctx.sendClick(1, { xBp: 10, yTopBp: 20 }, 10, 20, { takeMe: true });
+    delayed.forEach(resolve => resolve(null));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].takeMe, true, 'only the editing gesture can finish navigation');
 });
 
 test('compile replay cannot recreate or touch the live mini-editor session', () => {

@@ -30,7 +30,8 @@ see the families, `action:"enable"` to add one to your tool list, or
 | Tool | Use when |
 |------|----------|
 | `wolfbook_getNotebookContext` | **Call first.** Read cells + outputs (`brief`, ranges, `since_revision` for large notebooks) |
-| `wolfbook_newNotebook` | Open or create a `.wb` and make it the session target |
+| `wolfbook_readNotebookFile` | Read an unopened `.nb` or `.wb` virtually: overview, cell ranges, literal search, or ordinary WB JSON; no kernel or disk writes |
+| `wolfbook_newNotebook` | Open/create and bind a `.wb`; `reveal:true` also opens its editor and selects the bound controller |
 | `wolfbook_evaluateExpression` | Evaluate WL in the live kernel; `expect` asserts in the same round trip |
 | `wolfbook_insertCells` / `wolfbook_editCell` / `wolfbook_deleteCell` | Change cells by CellId; code cells evaluate by default on insert |
 | `wolfbook_runCell` | Re-run a cell or a startCell..endCell range |
@@ -41,7 +42,7 @@ see the families, `action:"enable"` to add one to your tool list, or
 | `wolfbook_operationStatus` | Follow any operation ID; `wait_seconds` waits and returns the result |
 | `wolfbook_getResult` | Read more of a result that was cut off |
 | `wolfbook_cancelOperation` / `wolfbook_kernelControl` | Cancel one operation; restart / abort / checkpoint the kernel |
-| `wolfbook_kernelManager` | Kernels and notebook bindings |
+| `wolfbook_kernelManager` / `wolfbook_selectKernel` | List/create kernels and bind notebooks; a recorded binding alone does not prove controller selection |
 | `wolfbook_evaluationJournal` | Recent operations; `action:"digest"` to re-orient after compaction |
 | `wolfbook_list_clients` / `wolfbook_setTarget` | Windows, and the session's default window/notebook |
 | `wolfbook_tools` | Reveal the families below |
@@ -81,6 +82,42 @@ For files and shell commands use your own tools; never write `.wb`/`.evsnb`/`.vs
 - Keep the `undo_token` in the apply receipt. Use
   `paper_applyEdit(action:"history")` for compact session receipts and
   `paper_applyEdit(action:"undo",undo_token:...)` for a hash-guarded undo.
+
+## Collaborating through WPaper comments
+
+- When the user asks you to listen on a named `.tex` file, call
+  `paper_listenComments(action:"start",file:...,agent:"claude-code"|"codex")`.
+  MCP client detection is automatic; set `agent` for clients without metadata.
+  Use `include_existing:true`
+  if they want existing requests handled or you are recovering after a restart.
+- Follow the returned `wakeup` plan. In Claude Code, install its file-bound
+  recurring `CronCreate` job if that tool is available, retain the returned job
+  ID, and use `next(wait_seconds:0)` on each scheduled wake-up. Finish quiet
+  checks once: do not keep polling inside a scheduled turn. Cancel only that job
+  with `CronDelete` when stopping, or if its listener is stopped/expired. Do not
+  restart a stopped listener automatically. Native tasks require a running
+  session and may be delayed, unavailable, or expire.
+- In Codex, use the available native wait/sleep mechanism or bounded
+  `next(wait_seconds:45)` calls while the listening task is active. An existing
+  user-authorized Goal can continue it between turns. Create a Goal only when
+  explicitly requested by the user; an ordinary listen request is insufficient.
+  Without successfully installed native scheduling or an active authorized
+  Goal, keep the listening turn active. Never claim wake-ups are installed just
+  because the listener returned a plan. `waiting` is not completion. No kernel
+  or editor reservation is held during these waits.
+- Each delivery contains the reader's comment, quote, current location, and
+  guarded source identity. Re-read truncated source, make a small guarded edit
+  with `paper_applyEdit(verify:true)`, then call `action:"ack"` with its
+  `delivery_id` and successful `operation_id`. This deletes only unchanged
+  delivered comments; errors and conflicts leave the request available.
+- The reader's open mini-editor has priority. `user-editing` means work on
+  other fragments or wait until they move/close it; never force an overwrite.
+  If unrelated typing invalidates a preview, re-read the target and retry a
+  fresh guarded edit. Keep attribution through the paper tools, so model edits
+  remain visible for revision review and the reader's edits stay their own.
+- Use `release` for a request you cannot safely finish and `stop` when the user
+  stops collaboration; also cancel this listener's native wake-up job if one
+  was installed. Cancellation, release, and stop never discard comments.
 
 ## Notebook safety rules
 
@@ -174,13 +211,19 @@ Grid[{{"Absolute", absoluteResidual},
 - Treat `kernel_id` as an optimistic routing assertion. Read it from
   `wolfbook_list_clients`/`wolfbook_kernelManager`; if Wolfbook reports
   `target-changed`, refresh and explicitly accept the new notebook binding.
-- Use `wolfbook_newNotebook` even when a generic filesystem tool already made
-  the `.wb`: it safely opens existing files without overwriting them and assigns
-  the default kernel only when no binding exists. To change
-  it, call `wolfbook_selectKernel(action:"list")`, then use `action:"select"`
-  with the notebook path and returned `kernel_id`.
+- Use `wolfbook_newNotebook` to create or safely reopen existing notebooks;
+  existing cells are preserved unless `overwrite:true`. Pass `reveal:true`
+  when the notebook must be runnable: it opens the editor and selects the bound
+  controller in the same call. To choose a different available process, list
+  kernels through `wolfbook_selectKernel(action:"list")`, then pass the returned
+  `kernel_id` to `wolfbook_newNotebook` with the exact notebook path.
+  `wolfbook_selectKernel(action:"select",notebook:...,kernel_id:...)` records a
+  binding; use the readiness receipt from `wolfbook_newNotebook` to confirm
+  controller selection before running cells.
 - Kernel IDs are extension-host-lifetime identities, not PIDs or notebook data.
-  Never write them into a notebook. Shared `K1` remains the default.
+  Never write them into a notebook. Prefer a kernel associated with the repository.
+  Explicit reuse across repositories/sessions is allowed; never silently substitute
+  another kernel when a recorded binding becomes unavailable.
 
 - Default timeout = 30 s (single cell) or 120 s (range mode). Use `timeoutSeconds` to increase.
 - For work that is expected to outlive the current turn, pass
@@ -200,6 +243,30 @@ Grid[{{"Absolute", absoluteResidual},
 - Print output, message tags, and any changing `progress_symbol` appear as
   sequence-numbered bounded progress in `wolfbook_operationStatus`.
 - New evaluation calls reject while busy by default and never silently preempt existing work.
+
+## Reading unopened Mathematica notebooks virtually
+
+For reading or summarising an unopened `.nb` (or `.wb`, `.evsnb`, `.vsnb`), use
+`wolfbook_readNotebookFile(file:"/absolute/path/notebook.nb")`. It reads the saved
+file and converts it off the editor thread into an immutable in-memory WB model;
+it does not open a tab, assign a kernel, evaluate cells, or write a converted file.
+
+Start with the default `view:"overview"`. Keep `virtual_notebook_id`, then request
+`view:"cells", startCell:..., limit:...` or `cell_ids:[...]` for relevant parts.
+`view:"search", query:"..."` searches literal text in source and stored text
+outputs. Continue any page with `next_startCell` (1-based; limit at most 100).
+`view:"wb"` returns ordinary `{cells,metadata}` under `notebook` for the selected
+range, so you can reconstruct and inspect the model in memory. Large responses
+may be retrieved with `wolfbook_getResult` when the bridge supplies a handle.
+
+Virtual IDs and `virtualCellId` identify read-only snapshots, not live cells for
+editing/evaluation tools. Follow-up reads by ID keep the same revision even if the
+file changes. If a snapshot expires or you change VS Code windows, pass its `file`
+and ID together to recreate it only if the source is unchanged; omit the ID to
+read a new revision. Conversion warnings, approximate box source, and unrendered
+graphics/dynamic placeholders are evidence of limitations: do not invent their
+contents or treat stored output as a fresh computation. Use normal notebook cell
+tools when the user actually wants a runnable notebook or edits.
 
 ## Large notebook and result reads
 
@@ -262,3 +329,63 @@ be worse.
 ## Kernel checkpoint and restore
 
 Use `wolfbook_kernelControl` with action="checkpoint" before making large destructive changes to kernel state. Use action="restore" to reload the saved state. This is safer than restarting when you only need to roll back recent changes.
+
+### Repository kernel recommendations
+
+For Codex/Claude Code notebook work, declare the absolute `working_directory`
+with `wolfbook_setTarget`. This guides relative paths and recommends associated
+windows/kernels; it is not an access restriction. `wolfbook_list_clients` shows
+all connected windows and kernels, ranking `recommended:true` first. Prefer
+those kernels, but any explicitly chosen available `kernel_id` or `client_id`
+can be used, including a kernel labelled private by another session.
+`sharing` describes the preferred isolation of new kernels, not access rights.
+Existing kernel reuse requires no shared-access acknowledgement or resume token.
+Save `scope.resume_token` if convenient for restoring your exact target.
+
+Create/reopen your notebook with `wolfbook_newNotebook`, an exact path,
+`kernel_id` for reuse, and `reveal:true` for a runnable notebook. This opens the
+editor and selects its bound controller in one call. Check `controller_selected`
+and `evaluation_ready`; if unselected, retry once with the exact path,
+`reveal:true` and returned `kernel_id`. Existing source and binding are preserved.
+Do not ask the user to click Open Notebook or select a kernel manually. If the
+retry still fails, inspect `wolfbook_status` and report the concrete failure.
+
+If a dedicated process is useful, use `isolation:"kernel"` with
+`acknowledge_resource_cost:true` and optional `kernel_label`, or
+`wolfbook_kernelManager(action:"create",acknowledge_resource_cost:true)`.
+`wolfbook.kernels.maximum` is a recommendation, not a creation limit: do not ask
+the user to free a kernel solely because this count is reached. Actual Wolfram
+license/startup failures still need attention. Shared processes share definitions
+and a serial evaluation queue; use a separate context for symbols or a dedicated
+process when kernel-wide isolation matters. Do not abort someone else's running
+work or silently rebind a busy notebook. Workflow: `docs/agent-kernels.md`.
+
+If `wolfbook.kernels.defaultForNewNotebooks` is configured for the workspace,
+new notebooks inherit that durable kernel slot, including agent folder sessions.
+The reader sets it with **Use Wolfram … for new notebooks in this workspace**
+in the kernel status menu. Preserve existing explicit notebook bindings; pass
+`kernel_id` or `isolation:"kernel"` only when deliberately choosing another
+process. Without a configured workspace default, declared agent sessions keep
+their private-isolation default. An unavailable preferred slot requires an
+explicit available choice; never silently replace it or restart another kernel.
+
+## Recovering a stuck kernel
+
+Restart targets only the selected kernel. Its ID and notebook bindings stay the
+same; its session epoch and PID change. Restart waits for replacement
+initialization before reporting success. Definitions in that kernel are lost.
+Other kernels in the window are not stopped or rebound.
+
+If abort is not acknowledged, do not assume a timeout has stopped the work.
+A restart stops new dispatch, verifies the owned process, terminates that process,
+and waits for the native reader and callbacks before closing its link. If safe
+shutdown cannot be confirmed, the tool reports failure and retains the old link
+instead of resetting the window. An older loaded addon may require a safe window
+reload to gain this capability; do not repeatedly restart it.
+
+For reading or summarising saved `.nb` files, prefer
+`wolfbook_readNotebookFile` (overview, selected cells, search or WB JSON). It uses
+no Wolfram kernel. Avoid a batch of `Import[..., "NB"]` followed by serialization
+merely to read notebooks; a Wolfram timeout/abort is not a process watchdog.
+Kernel IDs still have extension-host lifetime: refresh inventory after an actual
+host reconnect rather than treating old IDs as durable notebook data.

@@ -48,10 +48,14 @@ function isConfirmed(state) {
 }
 
 /** Remedy line for the two unconfirmed states (empty string otherwise). */
-function stateRemedy(state, { kernelLabel } = {}) {
+function stateRemedy(state, { kernelLabel, reason } = {}) {
     if (state === CELL_STATE.DISPATCHED_UNCONFIRMED) {
         return `The code was not confirmed to reach ${kernelLabel ? `kernel ${kernelLabel}` : 'the kernel'}. ` +
             'Verify with wolfbook_evaluateExpression (e.g. ValueQ of a symbol the cell defines), or re-run the cell.';
+    }
+    if (state === CELL_STATE.NOT_DISPATCHED && reason === 'not-associated') {
+        return 'The cell was NOT executed because VS Code has not selected this notebook\'s controller. ' +
+            'Call wolfbook_newNotebook with this notebook path, reveal:true and its bound kernel_id to select its controller automatically, then retry; do not ask the user to click Open Notebook.';
     }
     if (state === CELL_STATE.NOT_DISPATCHED) {
         return 'The cell was NOT executed. Re-run it; if this repeats, check the kernel binding ' +

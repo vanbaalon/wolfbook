@@ -25,7 +25,8 @@
 // change without the grouping having any say in the diff.
 
 const { splitLines, refineHunk } = require('./texDiff');
-const { buildComparison, describeSummary } = require('./texCompare');
+const {historyLimits,historyBytes,trimHistory}=require('./reviewHistory');
+const { buildComparison, describeSummary, placeHunk, WHERE } = require('./texCompare');
 
 /** What the reader is being asked about — the agent's verb, not the diff's. */
 const VERB = { ADD: 'add', DEL: 'del', CHANGE: 'change' };
@@ -37,6 +38,8 @@ const VERB = { ADD: 'add', DEL: 'del', CHANGE: 'change' };
  * kind would tell the reader the exact opposite of what happened.
  */
 function verbOf(h) {
+    if (h.contentKind==='add') return VERB.DEL;
+    if (h.contentKind==='del') return VERB.ADD;
     if (h.ourRange.endLine === h.ourRange.startLine) return VERB.DEL;
     if (h.theirRange.endLine === h.theirRange.startLine) return VERB.ADD;
     return VERB.CHANGE;
@@ -77,6 +80,7 @@ class ReviewSession {
         this.batches = [];              // {id, at, source, note, seen}
         this._batchSeq = 0;
         this._current = null;           // the batch new hunks belong to
+        this.gitAuthors = new Map();
         this.firstSeen = new Map();     // hunkId -> batchId
         this.edited = new Set();        // hunkIds the reader has since typed inside
         this.decided = [];              // {id, verb, name, action, at} — recent history
@@ -90,21 +94,26 @@ class ReviewSession {
         this.feedback = [];
         this.feedbackDraft = '';
         this.arrivals = [];
+        Object.assign(this,historyLimits(o));
     }
 
     serialize() {
         return { file: this.file, baseText: this.baseText, openedAt: this.openedAt,
             batches: this.batches, batchSeq: this._batchSeq, current: this._current,
-            firstSeen: [...this.firstSeen], edited: [...this.edited], decided: this.decided,
-            lastText: this._lastText, feedback: this.feedback, feedbackDraft: this.feedbackDraft, arrivals: this.arrivals };
+            gitAuthors:[...this.gitAuthors], firstSeen: [...this.firstSeen], edited: [...this.edited], decided: this.decided,
+            lastText: this._lastText, reviewedObservedHash: this.reviewedObservedHash,
+            feedback: this.feedback, feedbackDraft: this.feedbackDraft, arrivals: this.arrivals };
     }
-    static restore(value) {
-        const s = new ReviewSession(value);
+    static restore(value, options={}) {
+        const s = new ReviewSession({...value,...historyLimits(options)});
         s.openedAt = value.openedAt || s.openedAt;
         s.batches = value.batches || []; s._batchSeq = value.batchSeq || 0; s._current = value.current;
+        s.gitAuthors = new Map(value.gitAuthors || []);
         s.firstSeen = new Map(value.firstSeen || []); s.edited = new Set(value.edited || []);
         s.decided = value.decided || []; s.feedback = value.feedback || []; s.arrivals = value.arrivals || [];
+        trimHistory(s.arrivals,s);
         s.feedbackDraft = value.feedbackDraft || '';
+        s.reviewedObservedHash = value.reviewedObservedHash;
         if (typeof value.lastText === 'string') s.update({ currentText: value.lastText });
         return s;
     }
@@ -115,6 +124,8 @@ class ReviewSession {
         if (previous && previous.after === text) return;
         this.arrivals.push({ at: o.at || this.now(), source: o.source || 'external/unknown',
             author: o.author || null, before: this._lastText ?? this.baseText, after: text });
+        const entry=this.arrivals[this.arrivals.length-1];entry.historyBytes=historyBytes(entry);
+        trimHistory(this.arrivals,this);
     }
     addFeedback(id, comment) {
         const h = this.hunks.find(h => h.id === id);
@@ -210,7 +221,41 @@ class ReviewSession {
         const previous = this.hunks;
         let built;
         try {
-            built = buildComparison({ ourText: currentText, theirText: this.baseText, map: o.map || {} });
+            const neutral=o.readerChanges && this._lastText!=null &&
+                !require('./renderChange').editImpact(currentText,o.readerChanges,this._lastText).renderChanged;
+            if (this._lastText!=null && (neutral || currentText===this._lastText && this.baseText===this._lastBaseText)) {
+                const lines=linesOf(currentText);
+                const starts=lineStarts(currentText);
+                const hunks=this.hunks.map(h=> {
+                    const ourText=sliceLines(lines,h.ourRange.startLine,h.ourRange.endLine).join('\n');
+                    const startOffset=offsetOfLine(starts,h.ourRange.startLine,currentText);
+                    const endOffset=h.ourRange.endLine>h.ourRange.startLine ?
+                        Math.max(startOffset,offsetOfLine(starts,h.ourRange.endLine,currentText)-1) : startOffset;
+                    return {...h,ourText,contextual:false,...placeHunk(o.map || {},{
+                        aStart:h.ourRange.startLine,aEnd:h.ourRange.endLine,contentKind:h.contentKind}),
+                        anchor:{...h.anchor,startOffset,endOffset,beforeHash:require('./texModel').sha256(ourText)}};
+                });
+                const count=w=>hunks.filter(h=>h.where===w).length;
+                built={hunks,sameContent:false,formatting:[],summary:{...this.summary,
+                    onPage:count(WHERE.ROWS),approximate:count(WHERE.OBJECT)+count(WHERE.GAP)+count(WHERE.PAGE),unplaced:count(WHERE.NONE)}};
+            } else {
+            // A review must include every undecided change. The ad-hoc compare
+            // tool's output cap would also hide changes from Keep/Undo and navigation.
+            built = buildComparison({ ourText: currentText, theirText: this.baseText, map: o.map || {},
+                limit: Number.MAX_SAFE_INTEGER });
+            // Follow ignored formatting in the internal baseline, so source
+            // offsets still match for the reader's later typing and Keep/Undo.
+            // Actual content changes remain undecided; no source file is edited.
+            if (built.sameContent) this.baseText=currentText;
+            else if (built.formatting.length) {
+                const lines=linesOf(currentText);
+                for (const h of built.formatting.slice().sort((a,b)=>b.bStart-a.bStart))
+                    this.baseText=spliceLines(this.baseText,h.bStart,h.bEnd,
+                        sliceLines(lines,h.aStart,h.aEnd));
+                built=buildComparison({ourText:currentText,theirText:this.baseText,map:o.map || {},
+                    limit:Number.MAX_SAFE_INTEGER});
+            }
+            }
         } catch (_) {
             return { hunks: this.hunks, summary: this.summary, census: describeSummary(this.summary) };
         }
@@ -241,6 +286,11 @@ class ReviewSession {
             b.startLine < Math.max(a.endLine, a.startLine + 1);
 
         for (const h of hunks) {
+            if (!this.firstSeen.has(h.id) && this.firstSeen.has(h.previousId)) {
+                this.firstSeen.set(h.id,this.firstSeen.get(h.previousId));
+                if (this.edited.has(h.previousId)) this.edited.add(h.id);
+                if (this.gitAuthors.has(h.previousId)) this.gitAuthors.set(h.id,this.gitAuthors.get(h.previousId));
+            }
             if (this.firstSeen.has(h.id)) continue;
             const stood = previous.find(p => !hunks.some(x => x.id === p.id) &&
                 overlaps(p.ourRange, h.ourRange));
@@ -266,8 +316,10 @@ class ReviewSession {
         this.hunks = hunks;
         this.summary = built.summary;
         this._lastText = currentText;
+        this._lastBaseText=this.baseText;
         const g = (o.map || {}).generation;
         this.generation = g == null ? null : g;
+        this.livePages = (o.map || {}).livePages || null;
         return { hunks, summary: built.summary, census: describeSummary(built.summary) };
     }
 
@@ -308,7 +360,14 @@ class ReviewSession {
                 delta += ours - theirs;
             }
         }
-        if (inside) { this.edited.add(inside.id); return false; }
+        if (inside) {
+            // A deleted block may leave a whitespace-only replacement line.
+            // Spaces typed into that seam are not an edit of the removed text.
+            const cosmetic=!require('./renderChange').editImpact(doc.slice(0,at)+text+doc.slice(at+len),
+                [{rangeOffset:at,rangeLength:len,text}],doc).renderChanged;
+            if (!cosmetic) this.edited.add(inside.id);
+            return false;
+        }
 
         const bAt = at - delta;
         if (bAt < 0 || bAt + len > this.baseText.length) return false;
@@ -322,21 +381,12 @@ class ReviewSession {
 
     /** Keep one change: it becomes part of the agreed text. */
     keep(id) {
-        const h = this.hunks.find(x => x.id === id);
-        if (!h) return { ok: false, reason: 'that change is no longer in the list' };
-        if (this._lastText == null) return { ok: false, reason: 'nothing has been compared yet' };
-        const ours = sliceLines(linesOf(this._lastText), h.ourRange.startLine, h.ourRange.endLine);
-        this.baseText = spliceLines(this.baseText, h.theirRange.startLine, h.theirRange.endLine, ours);
-        this._decide(h, 'kept');
-        return { ok: true, baseText: this.baseText };
+        if (!this.hunks.some(h=>h.id===id)) return {ok:false,reason:'that change is no longer in the list'};
+        return this.keepMany([id]);
     }
 
     keepAll() {
-        const ids = this.hunks.map(h => h.id);
-        if (this._lastText == null) return { ok: false, reason: 'nothing has been compared yet' };
-        for (const h of this.hunks) this._decide(h, 'kept');
-        this.baseText = this._lastText;
-        return { ok: true, baseText: this.baseText, kept: ids };
+        return this.keepMany(this.hunks.map(h=>h.id));
     }
 
     /**
@@ -348,10 +398,33 @@ class ReviewSession {
      * dealt with while the ones above it still describe where they are.
      */
     keepMany(ids) {
+        if (this._lastText==null) return {ok:false,reason:'nothing has been compared yet'};
         const want = new Set((ids || []).map(String));
         const mine = this.hunks.filter(h => want.has(h.id));
+        if (!mine.length) return {ok:true,baseText:this.baseText,kept:[]};
         const ordered = mine.slice().sort((a, b) => b.theirRange.startLine - a.theirRange.startLine);
-        for (const h of ordered) this.keep(h.id);
+        if (mine.length && mine.length===this.hunks.length) this.baseText=this._lastText;
+        else if (mine.length) {
+            const base=linesOf(this.baseText),ours=linesOf(this._lastText);
+            for (const h of ordered) base.splice(h.theirRange.startLine-1,
+                h.theirRange.endLine-h.theirRange.startLine,...sliceLines(ours,h.ourRange.startLine,h.ourRange.endLine));
+            this.baseText=joinLines(base);
+        }
+        for (const h of ordered) this._decide(h,'kept');
+        // Approval changes only the baseline. Current source, word ranges,
+        // placements and IDs remain valid; rebase remaining baseline ranges
+        // directly instead of tokenizing/diffing the entire paper again.
+        this.hunks=this.hunks.filter(h=>!want.has(h.id)).map(h=>{
+            const delta=mine.filter(k=>k.theirRange.endLine<=h.theirRange.startLine).reduce((n,k)=>n+
+                k.ourRange.endLine-k.ourRange.startLine-(k.theirRange.endLine-k.theirRange.startLine),0);
+            return delta ? {...h,theirRange:{startLine:h.theirRange.startLine+delta,endLine:h.theirRange.endLine+delta}} : h;
+        });
+        this._lastBaseText=this.baseText;
+        const count=f=>this.hunks.filter(f).length;
+        this.summary={total:this.hunks.length,shown:this.hunks.length,truncated:0,
+            added:count(h=>h.kind==='add'),removed:count(h=>h.kind==='del'),changed:count(h=>h.kind==='change'),
+            onPage:count(h=>h.where===WHERE.ROWS),approximate:count(h=>[WHERE.OBJECT,WHERE.GAP,WHERE.PAGE].includes(h.where)),
+            unplaced:count(h=>h.where===WHERE.NONE)};
         return { ok: true, baseText: this.baseText, kept: mine.map(h => h.id) };
     }
 
@@ -414,6 +487,9 @@ class ReviewSession {
 
     /** Everything the panel draws, in one message — the shape _postDiff uses. */
     payload(o = {}) {
+        const wordCache=this._wordRangesCache ||= new Map();
+        const live=new Set(this.hunks.map(h=>h.id));
+        for(const id of wordCache.keys())if(!live.has(id))wordCache.delete(id);
         const byBatch = new Map();
         for (const h of this.hunks) {
             const b = this.firstSeen.get(h.id) || 'b0';
@@ -429,25 +505,27 @@ class ReviewSession {
                 count: hs.length,
                 hunks: hs.map(h => ({
                     id: h.id,
-                    at: b.at, author: b.author || null, source: b.source,
+                    at: b.at, author: this.gitAuthors.get(h.id) || b.author || null, source: this.gitAuthors.has(h.id) ? 'git' : b.source,
                     verb: h.verb,
-                    where: h.where, confidence: h.confidence, why: h.why,
+                    where: h.where, confidence: h.confidence, why: h.why, contextual:!!h.contextual,
                     page: h.page, rects: h.rects,
                     name: h.object ? h.object.name : null,
                     startLine: h.ourRange.startLine,
+                    beforeLine: h.theirRange.startLine,
                     endLine: h.ourRange.endLine,
                     section: h.section || null,
                     lines: Math.max(h.ourRange.endLine - h.ourRange.startLine,
                         h.theirRange.endLine - h.theirRange.startLine),
                     changedWords: h.changedWords,
                     editedByYou: this.edited.has(h.id),
-                    ourText: h.ourText.slice(0, 4000),
-                    theirText: h.theirText.slice(0, 4000),
+                    ourText: h.ourText,
+                    theirText: h.theirText,
+                    wordContext: h.wordContext,
                     // WHICH WORDS DIFFER, so the panel can show the change
                     // itself rather than two blocks of LaTeX to compare by eye.
                     // Computed here, from the same refineHunk the census
                     // counts with — the webview never grows a second differ.
-                    words: wordRangesOf(h),
+                    words: wordRangesOf(h,wordCache),
                 })),
             };
         }).sort((a, b) => b.lastAt - a.lastAt);
@@ -455,7 +533,7 @@ class ReviewSession {
         return {
             file: this.file,
             pending: this.hunks.length,
-            generation: this.generation,
+            generation: this.generation, livePages:this.livePages || null,
             census: describeSummary(this.summary),
             summary: this.summary,
             groups,
@@ -469,12 +547,15 @@ class ReviewSession {
 }
 
 /** The differing words on each side of a change, for the panel's diff pane. */
-function wordRangesOf(h) {
+function wordRangesOf(h,cache) {
     if (h.verb !== VERB.CHANGE) return null;
-    if ((h.ourText || '').length > 8000 || (h.theirText || '').length > 8000) return null;
+    const context=JSON.stringify(h.wordContext || null),cached=cache?.get(h.id);
+    if(cached && cached.ours===h.ourText && cached.theirs===h.theirText && cached.context===context)return cached.words;
     try {
-        const { aRanges, bRanges } = refineHunk(h.ourText, h.theirText);
-        return { ours: aRanges, theirs: bRanges };
+        const { aRanges, bRanges } = refineHunk(h.ourText, h.theirText, h.wordContext);
+        const words={ours:aRanges,theirs:bRanges};
+        cache?.set(h.id,{ours:h.ourText,theirs:h.theirText,context,words});
+        return words;
     } catch (_) { return null; }
 }
 

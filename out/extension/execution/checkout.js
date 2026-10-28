@@ -11,6 +11,8 @@ const { splitIntoSubexpressions } = require('../utils/wl-parse');
 const runningLines = require('./running-lines');
 const notebookContext = require('../kernel/notebook-context');
 const { findShadowedBuiltins } = require('../syntax/shadow-lint');
+const { saveAfterCleanCell } = require('./auto-save');
+const { cleanPrintPackets } = require('../utils/encoding');
 
 function _operationOutputPreview(cell) {
     const parts = [];
@@ -785,16 +787,7 @@ async function checkoutExecutionQueue(self) {
                 const _nbUri_btl = currentExecution.execution.cell.notebook.uri;
                 const _rawNewHtml = self._processWLLatexBoxes(htmlLines.join(''), btlLogPath, undefined, undefined, undefined, _nbUri_btl);
                 const newHtml = '<div class="wl-print-output">' + _rawNewHtml + '</div>';
-                const newText = decodedTexts.map(text =>
-                    text.split('\x1c').map(t => {
-                        const trimmed = t.trim();
-                        if (trimmed.startsWith('*STR*')) return trimmed.slice(5);
-                        if (trimmed.startsWith('*SVG*')) return '[graphics]';
-                        if (trimmed.startsWith('*HTML*')) return '[info]';
-                        if (trimmed.startsWith('BoxData[')) return '[formula]';
-                        return trimmed;
-                    }).join('')
-                ).join('');
+                const newText = cleanPrintPackets(packets);
                 if (printOutput) {
                     printHtml += newHtml;
                     printText += newText;
@@ -844,17 +837,7 @@ async function checkoutExecutionQueue(self) {
                 const _rawNewHtml = self._processWLLatexBoxes(htmlLines.join(''), btlLogPath, undefined, undefined, undefined, _nbUri_wbp);
                 // wl-wbp-output wrapper used to identify/remove outputs on next cell eval.
                 const newHtml = '<div class="wl-wbp-output"><div class="wl-print-output">' + _rawNewHtml + '</div></div>';
-                const newText = decodedTexts.map(text => {
-                    const content = text.startsWith('*WBP*') ? text.slice(5) : text;
-                    return content.split('\x1c').map(t => {
-                        const trimmed = t.trim();
-                        if (trimmed.startsWith('*STR*')) return trimmed.slice(5);
-                        if (trimmed.startsWith('*SVG*')) return '[graphics]';
-                        if (trimmed.startsWith('*HTML*')) return '[info]';
-                        if (trimmed.startsWith('BoxData[')) return '[formula]';
-                        return trimmed;
-                    }).join('');
-                }).join('');
+                const newText = cleanPrintPackets(packets);
                 // Always replace (not append) — in-place update behaviour for loop progress display.
                 wbpHtml = newHtml;
                 wbpText = newText;
@@ -1493,6 +1476,10 @@ async function checkoutExecutionQueue(self) {
         }
         // anyMessages: mark cell as errored so VS Code shows the Copilot AI-fix button
         self.executionQueue.end(currentExecution.id, !anyAborted && !anyFailed && !anyMessages);
+        await saveAfterCleanCell(currentExecution.execution.cell, {
+            source: code, aborted: _structuredAborted || self.isAborting || currentExecution.execution.token?.isCancellationRequested,
+            failed: _structuredFailed, hasMessages: anyMessages, stale: _cellProvenance?.status === 'stale',
+        }, message => self.writeDebugLog(message));
         self._evalDispatched = false;
         self._evalEndedAt = Date.now();
         // Refresh Global` symbol highlighting once the kernel is idle.

@@ -11,7 +11,8 @@
 // several. Weighting a match by how RARE the line is — a line appearing once or
 // twice is a strong anchor, one appearing eighty times is nearly none — is the
 // patience-diff insight expressed as a score, which lets it reuse the
-// Needleman-Wunsch already in glyphAlign.js instead of adding a second aligner.
+// bounded aligner in glyphAlign.js. Small gaps retain the weighted
+// Needleman-Wunsch score; full-paper comparisons use exact snakes and anchors.
 //
 // MEASURED, on a real pair of Overleaf revisions of a colleague's 793-line
 // paper (`Clean Notes/Clean.tex`, 7821deb..a9db8bb):
@@ -31,6 +32,7 @@
 // rather than by a committed fixture.
 
 const { align } = require('./glyphAlign');
+const { contentTokens, contentKey } = require('./reviewContent');
 
 /** Line-ending normalisation for COMPARISON only — never for offsets. */
 function splitLines(text) {
@@ -86,8 +88,9 @@ function diffLines(aLines, bLines, opts = {}) {
     // did gain or lose a trailing blank line will not report it.
     if (A.length && A[A.length - 1] === '') A = A.slice(0, -1);
     if (B.length && B[B.length - 1] === '') B = B.slice(0, -1);
-    const aKeys = A.map(lineKey);
-    const bKeys = B.map(lineKey);
+    const compareKey = typeof opts.lineKey === 'function' ? opts.lineKey : lineKey;
+    const aKeys = A.map(compareKey);
+    const bKeys = B.map(compareKey);
 
     // How common is each line across BOTH sides? Counting both is what makes a
     // line that is unique in one file but boilerplate in the other score low.
@@ -98,9 +101,9 @@ function diffLines(aLines, bLines, opts = {}) {
     const MISMATCH = -4;      // never pair two different lines
     // ONLY THE MIDDLE IS ALIGNED. Lines the two sides share at the start and
     // at the end pair one to one (as git's diff takes them); the alignment is
-    // quadratic in what is left, and an agent's edit of a long paper leaves
-    // a few lines, where aligning all nineteen thousand of them held the
-    // extension host for most of a second on every change.
+    // weighted alignment usually sees only a few lines. Distant edits can
+    // leave almost the whole paper in this middle; align's work limit and
+    // linear snakes handle that case without a paper-sized traceback.
     let head = 0;
     while (head < aKeys.length && head < bKeys.length && aKeys[head] === bKeys[head]) head++;
     let tail = 0;
@@ -165,42 +168,63 @@ function diffLines(aLines, bLines, opts = {}) {
  *            sameWords:number, totalWords:number}}
  *   `line` is relative to the hunk (0-based), `col` a column in that line.
  */
-function refineHunk(aText, bText) {
-    const A = splitLines(aText);
-    const B = splitLines(bText);
-    const tok = (lines) => {
-        const out = [];
-        for (let i = 0; i < lines.length; i++) {
-            const re = /\S+/g;
-            let m;
-            while ((m = re.exec(lines[i])) !== null) {
-                out.push({ word: m[0], line: i, col: m.index, len: m[0].length });
-            }
-        }
-        return out;
-    };
-    const at = tok(A); const bt = tok(B);
+function refineHunk(aText, bText, opts = {}) {
+    const a = contentTokens(aText,{math:opts.aMath,literal:opts.aLiteral,literalSpaces:opts.aLiteralSpaces}),
+        b = contentTokens(bText,{math:opts.bMath,literal:opts.bLiteral,literalSpaces:opts.bLiteralSpaces});
+    if (contentKey(a) === contentKey(b)) return { aRanges:[],bRanges:[],sameWords:0,totalWords:0 };
+    const at = a.filter(t=>!t.space), bt = b.filter(t=>!t.space);
     if (!at.length && !bt.length) return { aRanges: [], bRanges: [], sameWords: 0, totalWords: 0 };
 
     const counts = new Map();
-    for (const t of at) counts.set(t.word, (counts.get(t.word) || 0) + 1);
-    for (const t of bt) counts.set(t.word, (counts.get(t.word) || 0) + 1);
+    for (const t of at) counts.set(t.key, (counts.get(t.key) || 0) + 1);
+    for (const t of bt) counts.set(t.key, (counts.get(t.key) || 0) + 1);
 
-    const { srcToRen, renToSrc } = align(at.map(t => t.word), bt.map(t => t.word), {
+    const { srcToRen, renToSrc } = align(at.map(t => t.key), bt.map(t => t.key), {
         gap: -1,
         score: (a, b) => (a === b ? rarityScore(counts.get(a) || 1) : -4),
         pair: (a, b) => a === b,
     });
     const aRanges = [];
     const bRanges = [];
+    const aRangeByToken = new Map(), bRangeByToken = new Map();
+    const rangesOf = t => {
+        return (t.parts || [t]).flatMap(part => part.word.split('\n')
+            .map((s,i)=>({line:part.line+i,col:i?0:part.col,len:s.length}))).filter(r=>r.len>0);
+    };
     let same = 0;
     for (let i = 0; i < at.length; i++) {
         if (srcToRen[i] >= 0) { same++; continue; }
-        aRanges.push({ line: at[i].line, col: at[i].col, len: at[i].len });
+        const ranges=rangesOf(at[i]);
+        aRanges.push(...ranges); if (ranges.length===1) aRangeByToken.set(at[i],ranges[0]);
     }
     for (let j = 0; j < bt.length; j++) {
         if (renToSrc[j] >= 0) continue;
-        bRanges.push({ line: bt[j].line, col: bt[j].col, len: bt[j].len });
+        const ranges=rangesOf(bt[j]);
+        bRanges.push(...ranges); if (ranges.length===1) bRangeByToken.set(bt[j],ranges[0]);
+    }
+    // Inside a replacement, keep common characters neutral too. TeX often
+    // puts a whole equation in one whitespace token; changing one subscript
+    // or number should underline that part rather than the entire command.
+    let ai = 0, bi = 0;
+    for (let i = 0; i <= at.length; i++) {
+        if (i < at.length && srcToRen[i] < 0) continue;
+        const j = i < at.length ? srcToRen[i] : bt.length;
+        const left = at.slice(ai, i), right = bt.slice(bi, j);
+        if (left.length === right.length) for (let k = 0; k < left.length; k++) {
+            const a = left[k], b = right[k];
+            if (a.parts || b.parts || a.word.includes('\n') || b.word.includes('\n')) continue;
+            let prefix = 0, suffix = 0;
+            while (prefix < Math.min(a.len, b.len) && a.word[prefix] === b.word[prefix]) prefix++;
+            while (suffix < Math.min(a.len, b.len) - prefix && a.word[a.len - 1 - suffix] === b.word[b.len - 1 - suffix]) suffix++;
+            if (prefix > 0 && /[\uD800-\uDBFF]/.test(a.word[prefix - 1])) prefix--;
+            if (suffix > 0 && /[\uDC00-\uDFFF]/.test(a.word[a.len - suffix])) suffix--;
+            if (prefix + suffix >= Math.min(a.len, b.len)) continue;
+            for (const [ranges, token] of [[aRangeByToken,a], [bRangeByToken,b]]) {
+                const r = ranges.get(token);
+                if (r) { r.col += prefix; r.len -= prefix + suffix; }
+            }
+        }
+        ai = i + 1; bi = j + 1;
     }
     return { aRanges, bRanges, sameWords: same, totalWords: Math.max(at.length, bt.length) };
 }

@@ -112,6 +112,13 @@ function parseSynctexText(text, meta = {}) {
         const rec = parseRecord(line, kind);
         if (!rec) { out.warnings.push(`line ${i + 1}: malformed ${kind}: ${line.slice(0, 60)}`); continue; }
 
+        // XeTeX records coordinates relative to the DVI origin. Consumers
+        // expect page coordinates in scaled points, as pdfTeX writes them.
+        // Header offsets are already scaled points; dimensions use Unit.
+        rec.h = rec.h * out.unit + out.xOffset;
+        rec.v = rec.v * out.unit + out.yOffset;
+        rec.W *= out.unit; rec.H *= out.unit; rec.D *= out.unit;
+
         rec.page = page.page;
         page.records++;
         const parent = stack[stack.length - 1];

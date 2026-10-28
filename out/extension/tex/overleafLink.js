@@ -130,13 +130,17 @@ class OverleafLink {
     }
 
     /** Your Overleaf projects, newest first ([] when they cannot be read). */
-    async projects(base, cookie) {
+    async projects(base, cookie, { strict = false } = {}) {
         try {
             const r = await this.deps.fetch(`${base}/user/projects`, { headers: { Cookie: cookie, Accept: 'application/json' }, redirect: 'manual' });
-            if (!r.ok) return [];
+            if (!r.ok) {
+                if (strict) throw Error([302, 303, 401, 403].includes(r.status) ? 'Your Overleaf session expired or was refused. Replace the session to reconnect.' : `Overleaf could not load your projects (${r.status}).`);
+                return [];
+            }
             const j = await r.json();
+            if (strict && !Array.isArray(j.projects)) throw Error('Overleaf returned an unreadable project list.');
             return (j.projects || []).filter(p => p && p._id && p.accessLevel !== 'readOnly');
-        } catch (_) { return []; }
+        } catch (error) { if (strict) throw error; return []; }
     }
 
     /** The project's text files, by path (`/project/:id/entities`); null when they cannot be read. */
@@ -332,6 +336,7 @@ class OverleafLink {
             project.docs = project.docs.filter(d => this.inside(d.path));
             for (const [id, f] of [...client.files]) if (!this.inside(f.path)) client.files.delete(id);
             this.base = base; this.projectId = projectId; this.cookieHeader = cookie; this.main = link.main || null;
+            this.opened = (link.opened || []).filter(p => typeof p === 'string' && !/[\\:\x00-\x1f]/.test(p) && p.split('/').every(s => s && s !== '.' && s !== '..'));
             this.projectDocs = new Map(project.docs.map(d => [d.path, d.id]));
             const uses = await this.resolveDependencies();
             const differ = [];
@@ -412,7 +417,7 @@ class OverleafLink {
         for (const s of this.subs) { try { s.dispose(); } catch (_) {} }
         this.subs = [];
         this.mirrors.clear(); this.unapplied.clear(); this.echo.clear();
-        this._csrf = null; this.sent = null; this.written = null; this.uses = null; this.projectDocs = null; this.warnedDrift = false;
+        this._csrf = null; this.sent = null; this.written = null; this.uses = null; this.projectDocs = null; this.opened = []; this.warnedDrift = false;
         clearTimeout(this.depsTimer);
         clearTimeout(this.positionTimer); this.positionTimer = null; this.position = null;
         for (const t of (this.pending || new Map()).values()) clearTimeout(t);
@@ -508,6 +513,16 @@ class OverleafLink {
             report = prepareArxiv({ main, read, readBinary, exists, options: { comments: false, draft: false } }).report;
         } catch (_) { report = { tex: [main], figures: [], other: [] }; }
         const out = new Set([main, ...report.tex, ...report.figures, ...report.other]);
+        // Files explicitly opened from the sidebar are editable even when the
+        // main paper does not include them yet. Keep their dependencies too.
+        for (const opened of this.opened || []) {
+            if (!exists(opened) || excluded(opened)) continue;
+            out.add(opened);
+            try {
+                const extra = prepareArxiv({ main: opened, read, readBinary, exists, options: { comments: false, draft: false } }).report;
+                for (const r of [...extra.tex, ...extra.figures, ...extra.other]) out.add(r);
+            } catch (_) { /* the selected file itself remains editable */ }
+        }
         const mainDir = main.includes('/') ? main.slice(0, main.lastIndexOf('/') + 1) : '';
         for (const t of report.tex) {
             const text = read(t) || '';

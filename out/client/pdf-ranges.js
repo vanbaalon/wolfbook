@@ -1,7 +1,7 @@
 // PDF.js range transport over the existing webview message channel.
 (function (root) {
     class PdfRanges {
-        constructor(send, timeoutMs = 30000) { this.send=send; this.timeoutMs=timeoutMs; this.active=new Map(); }
+        constructor(send, timeoutMs = 5000) { this.send=send; this.timeoutMs=timeoutMs; this.active=new Map(); }
         create(pdfjs, descriptor) {
             const owner=this, { token,length }=descriptor;
             if (typeof token !== 'string' || !Number.isSafeInteger(length) || length<=0 || this.active.has(token))
@@ -16,8 +16,16 @@
                 requestDataRange(begin,end) {
                     if (this.closed) return;
                     const request=++this.sequence; this.lastActivity=Date.now();
-                    const timer=setTimeout(() => this.fail(Error('PDF byte request timed out')),owner.timeoutMs);
-                    this.pending.set(request,{ begin,end,timer });
+                    const pending={begin,end,retries:0};
+                    const expired=()=>{
+                        if(this.closed || this.pending.get(request)!==pending)return;
+                        if(pending.retries++ === 0) {
+                            pending.timer=setTimeout(expired,owner.timeoutMs);
+                            owner.send({ type:'pdfRangeRequest',token,request,begin,end });
+                        } else this.fail(Error('PDF byte request timed out'));
+                    };
+                    pending.timer=setTimeout(expired,owner.timeoutMs);
+                    this.pending.set(request,pending);
                     owner.send({ type:'pdfRangeRequest',token,request,begin,end });
                 }
                 receive(message) {

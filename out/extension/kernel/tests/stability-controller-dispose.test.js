@@ -12,7 +12,7 @@
 // Pinned here against the REAL controller, not a mirror of its predicates:
 //   1. every listener the constructor subscribes is released by dispose();
 //   2. a disposed kernel never auto-launches;
-//   3. a live kernel auto-launches only for a notebook it OWNS — an unrelated
+//   3. a live kernel stays dormant even for a notebook it OWNS — an unrelated
 //      tab appearing (e.g. an in-memory notebook getting its first editor) must
 //      not start a never-used isolated kernel or call into a remote owner.
 
@@ -123,7 +123,7 @@ const wolframEditor = { notebook: { notebookType: 'extended-wolfram-notebook', u
     owned = true;
     fire('window.onDidChangeVisibleNotebookEditors');
     await new Promise(r => setTimeout(r, 900));
-    assert.ok(k1Launches >= 1, 'a kernel must still auto-launch for a visible notebook it owns');
+    assert.strictEqual(k1Launches, 0, 'visibility must not start even the owning kernel');
 
     iso.dispose(); k1.dispose();
     assert.strictEqual(liveCount(), baseline, 'all kernels disposed → no listeners left');

@@ -127,7 +127,7 @@ class OverleafLiveClient {
                 walk(f, `${prefix}${f.name}/`);
         };
         walk(r?.project?.rootFolder?.[0], "");
-        this.project = { name: r?.project?.name ?? "Overleaf project", docs };
+        this.project = { name: r?.project?.name ?? "Overleaf project", docs, mainId: r?.project?.rootDoc_id || null };
         if (r?.permissionsLevel && !["owner", "readAndWrite", "review"].includes(r.permissionsLevel))
             throw Error("You can only read this Overleaf project: nothing can be synced");
         return this.project;

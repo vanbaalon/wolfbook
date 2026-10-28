@@ -145,6 +145,10 @@ class WatchPanelProvider {
                 // setImmediate() in resolveWebviewView fires before the <script src="..."> loads,
                 // so any postMessage sent there is dropped. This is the reliable resend point.
                 this._sendCurrentState();
+            } else if (msg.command === 'requestOverleafState') {
+                this._sendOverleafState(!!msg.refresh);
+            } else if (msg.command === 'overleafAction') {
+                this._overleafAction(msg.action, msg.id || msg.root);
             } else if (msg.command === 'requestSkilxivState') {
                 this._sendSkilxivState();
             } else if (msg.command === 'skilxivSetToken') {
@@ -477,6 +481,28 @@ class WatchPanelProvider {
     }
 
     /** Re-send current accumulated state to the webview (called on visibility change). */
+    async _sendOverleafState(refresh = false) {
+        const sequence = this._overleafSequence = (this._overleafSequence || 0) + 1;
+        let state;
+        try { state = await vscode.commands.executeCommand('wolfbook.tex.overleafStatus', { refresh }); if (!state) throw Error('WPaper unavailable'); }
+        catch (_) { state = { account: 'unavailable', detail: 'Enable WPaper in Wolfbook settings to open Overleaf projects.', projects: [], recent: [] }; }
+        if (sequence !== this._overleafSequence || !this._view) return;
+        this._view.webview.postMessage({ command: 'overleafState', state: { ...state, busy: !!(state?.busy || this._overleafBusy) } });
+    }
+
+    async _overleafAction(action, value) {
+        const commands = { connect: 'wolfbook.tex.overleafConnectAccount', disconnect: 'wolfbook.tex.overleafDisconnectAccount',
+            browse: 'wolfbook.tex.overleafOpenProject', git: 'wolfbook.tex.overleafOpenGit',
+            project: 'wolfbook.tex.overleafOpenProject', recent: 'wolfbook.tex.overleafReopenProject', settings: 'wolfbook.tex.overleafMenu' };
+        if (action === 'website') { vscode.env.openExternal(vscode.Uri.parse('https://www.overleaf.com/project')); return; }
+        if (!commands[action] || this._overleafBusy) return;
+        this._overleafBusy = true;
+        this._sendOverleafState();
+        try { await vscode.commands.executeCommand(commands[action], value); }
+        catch (error) { vscode.window.showErrorMessage(`Overleaf: ${error.message}`); }
+        finally { this._overleafBusy = false; this._sendOverleafState(); }
+    }
+
     _sendCurrentState() {
         if (!this._view) return;
         this._view.webview.postMessage({ command: 'setBackground', color: this._bgColor });
@@ -494,6 +520,7 @@ class WatchPanelProvider {
         this._view.webview.postMessage({ command: 'remoteStatus', connected: this._remoteConnected });
         this._sendFairyHistory();
         this._sendSkilxivState();
+        this._sendOverleafState();
         // Show watch list placeholder names immediately (before kernel values arrive)
         if (this._watchList.length > 0) {
             this._view.webview.postMessage({ command: 'initWatchList', names: this._watchList });
@@ -1037,7 +1064,7 @@ class WatchPanelProvider {
   }
   /* ── Tab bar ─────────────────────────────────────────────────────────── */
   #wb-tabs {
-    display: flex; gap: 2px; margin: 2px 0 8px;
+    display: flex; flex-wrap: wrap; gap: 2px; margin: 2px 0 8px;
     border-bottom: 1px solid var(--vscode-panel-border, #444);
   }
   .wb-tab {
@@ -1186,6 +1213,7 @@ class WatchPanelProvider {
 <div id="wb-tabs">
   <button class="wb-tab active" id="tab-btn-watch"  data-tab="watch">Watch</button>
   <button class="wb-tab"        id="tab-btn-agents" data-tab="agents">🧚 Agents</button>
+  <button class="wb-tab"        id="tab-btn-overleaf" data-tab="overleaf">Overleaf</button>
   <button class="wb-tab"        id="tab-btn-skilxiv" data-tab="skilxiv">SkilXiv</button>
 </div>
 
@@ -1263,6 +1291,30 @@ class WatchPanelProvider {
   <div id="fairy-history-empty">No Fairy runs yet. Your prompts, steps &amp; cost will appear here.</div>
   <div id="fairy-history-list"></div>
 </div><!-- /#tab-agents -->
+
+<div id="tab-overleaf" class="tab-panel">
+  <div class="sx-card">
+    <div class="sx-head"><span id="ol-dot" class="sx-dot"></span><strong>Overleaf account</strong><span id="ol-connection" class="sx-status">Checking…</span></div>
+    <div id="ol-detail" class="sx-muted">Loading connection status.</div>
+    <div class="sx-actions"><button id="ol-connect" class="sx-btn">Connect account</button><button id="ol-disconnect" class="sx-btn secondary" hidden>Disconnect</button><button id="ol-refresh" class="sx-btn secondary">Refresh</button></div>
+  </div>
+  <div class="sx-card">
+    <div class="sx-head"><strong>Browse projects · Live sync</strong></div>
+    <div class="sx-muted">Open a project from your account. Your edits and collaborators’ edits stay in step as you type.</div>
+    <div class="sx-actions"><button id="ol-browse" class="sx-btn">Browse projects…</button></div>
+    <input id="ol-filter" type="search" aria-label="Filter Overleaf projects" placeholder="Find a project…" style="box-sizing:border-box;width:100%;margin:8px 0;padding:5px 6px;background:var(--vscode-input-background,#333);color:var(--vscode-input-foreground,#ddd);border:1px solid var(--vscode-input-border,transparent);border-radius:2px;font:inherit;">
+    <div id="ol-projects" class="sx-muted">Connect your account to see projects.</div>
+  </div>
+  <div class="sx-card">
+    <div class="sx-head"><strong>Open with Git</strong></div>
+    <div class="sx-muted">Use a project URL and Git token. Changes sync in batches through Overleaf’s Git integration; Git access must be enabled for the project.</div>
+    <div class="sx-actions"><button id="ol-git" class="sx-btn secondary">Open with Git…</button></div>
+  </div>
+  <div class="sx-card"><div class="sx-head"><strong>Local projects</strong></div><div id="ol-recent" class="sx-muted">Opened projects will appear here.</div></div>
+  <div id="ol-live" class="sx-muted"></div>
+  <div class="sx-muted" style="margin-top:8px;">Both methods open local source files in WPaper, ready for AI agents to edit. Browser-session live sync is not supported by Overleaf.</div>
+  <div class="sx-actions"><button id="ol-settings" class="sx-btn secondary">Sync settings</button><button id="ol-website" class="sx-btn secondary">Overleaf website</button></div>
+</div><!-- /#tab-overleaf -->
 
 <div id="tab-skilxiv" class="tab-panel">
   <div class="sx-card">

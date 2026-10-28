@@ -328,8 +328,7 @@ is intercepted by the Wolfbook extension and never reaches the kernel.";
 Off[Interrupt::dgbgn]; Off[Interrupt::dgend];
 Quiet[Internal`AddHandler["Interrupt", Function[{}, Dialog[]]]];
 
-(* SVG/typesetting pipeline and CodeParser are prewarmed in the background by
-   lifecycle.js via subWhenIdle() after the kernel is declared ready.          *)
+(* Graphics/type-setting services are started only when requested output needs them. *)
 
 $wbLog["init.wl loaded (WSTP mode, no ZMQ)"];
 

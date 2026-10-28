@@ -137,6 +137,7 @@ function scanTex(src, opts = {}) {
     const masked = maskInert(src, warnings, verbatimEnvs);
 
     const envStack = [];
+    let bodyEndOffset = null;
     const sectionStack = [];   // {level, title, line}
     const sectionPath = () => sectionStack.map(s => s.title);
 
@@ -144,11 +145,14 @@ function scanTex(src, opts = {}) {
     // spacing — pervasive inside align and tabular — and its `\[` tail was
     // being read as the start of display math, which then swallowed the rest of
     // the file looking for a `\]` that does not exist. Same story for `\$$`.
-    const RE = /\\(begin|end)\s*\{([^}\n]*)\}|\\(part|chapter|section|subsection|subsubsection|paragraph|subparagraph)\s*\*?\s*(?:\[[^\]]*\])?\s*\{|\\(label|ref|eqref|cite|citep|citet|autoref|input|include|subfile)\s*(?:\[[^\]]*\])?\s*\{([^}\n]*)\}|(?<!\\)\\\[|(?<!\\)\$\$|\\([A-Za-z@]+)/g;
+    const RE = /\\(begin|end)\s*\{([^}\n]*)\}|\\(part|chapter|section|subsection|subsubsection|paragraph|subparagraph)\s*\*?\s*(?:\[[^\]]*\])?\s*\{|\\(label|ref|eqref|pageref|nameref|vref|Vref|cref|Cref|cite|citep|citet|autoref|input|include|subfile)\s*\*?\s*(?:\[[^\]]*\])?\s*\{([^}\n]*)\}|(?<!\\)\\\[|(?<!\\)\$\$|\\([A-Za-z@]+)/g;
 
     let m;
     while ((m = RE.exec(masked)) !== null) {
         const off = m.index;
+        let slashes = 0;
+        for (let i = off - 1; i >= 0 && masked[i] === '\\'; i--) slashes++;
+        if (slashes % 2) continue; // the tail of \\\\label is not a command
         const line = lineAt(off);
 
         if (m[1]) {                                   // \begin{...} / \end{...}
@@ -174,6 +178,7 @@ function scanTex(src, opts = {}) {
                         sectionPath: open.sectionPath, src, file,
                     }));
                 }
+                if (name === 'document') { bodyEndOffset = off; break; }
             }
             continue;
         }
@@ -227,8 +232,10 @@ function scanTex(src, opts = {}) {
                     startLine: line, endLine: line, sectionPath: sectionPath(), src, file,
                 }));
             } else {
-                objects.push(makeObject({
-                    kind: cmd.startsWith('cite') ? 'cite' : 'ref', cmd, target: arg,
+                const targets = ['cref', 'Cref'].includes(cmd) || cmd.startsWith('cite')
+                    ? arg.split(',').map(x => x.trim()).filter(Boolean) : [arg];
+                for (const target of targets) objects.push(makeObject({
+                    kind: cmd.startsWith('cite') ? 'cite' : 'ref', cmd, target,
                     startOffset: off, endOffset: off + m[0].length,
                     startLine: line, endLine: line, sectionPath: sectionPath(), src, file,
                 }));
@@ -291,8 +298,10 @@ function scanTex(src, opts = {}) {
                         sectionPath: sectionPath(), src, file,
                     }));
                 } else {
-                    objects.push(makeObject({
-                        kind: refAct.cmd, cmd: m[6], target: arg, viaMacro: true,
+                    const targets = ['cref', 'Cref'].includes(refAct.via) || refAct.cmd === 'cite'
+                        ? arg.split(',').map(x => x.trim()).filter(Boolean) : [arg];
+                    for (const target of targets) objects.push(makeObject({
+                        kind: refAct.cmd, cmd: m[6], target, viaMacro: true,
                         startOffset: off, endOffset: braceEnd + 1,
                         startLine: line, endLine: lineAt(braceEnd),
                         sectionPath: sectionPath(), src, file,
@@ -351,7 +360,7 @@ function scanTex(src, opts = {}) {
 
     objects.push(...scanParagraphs(src, masked, lineAt, objects, file));
     objects.sort((a, b) => a.startOffset - b.startOffset || a.endOffset - b.endOffset);
-    return { objects, lines, warnings, file };
+    return { objects, lines, warnings, file, bodyEndOffset };
 }
 
 function findMatchingOpen(stack, name) {
@@ -364,7 +373,9 @@ function makeObject(o) {
     const text = src.slice(o.startOffset, o.endOffset);
     return {
         ...rest,
-        text: text.length > 4000 ? text.slice(0, 4000) : text,
+        // The source hash and edit range must describe the SAME complete
+        // bytes. Only presentation helpers may truncate a returned excerpt.
+        text,
         label: o.label ?? undefined,
         opaque: !!o.opaque,
     };
@@ -384,6 +395,17 @@ function maskInert(src, warnings, verbatimEnvs = VERBATIM_ENVS) {
     while (i < n) {
         const c = src[i];
         if (c === '\\') {
+            const inline = /^\\(?:verb|Verb)\*?(?![A-Za-z])([^\s])/.exec(src.slice(i));
+            if (inline) {
+                const body = i + inline[0].length;
+                const close = src.indexOf(inline[1], body), newline = src.indexOf('\n', body);
+                const valid = close >= 0 && (newline < 0 || close < newline);
+                const stop = valid ? close + 1 : newline < 0 ? n : newline;
+                if (!valid) warnings.push(`unterminated inline verbatim at offset ${i}`);
+                for (let k = i; k < stop; k++) out[k] = ' ';
+                i = stop;
+                continue;
+            }
             // A MACRO DEFINITION BODY IS A TEMPLATE, NOT STRUCTURE.
             //
             // Measured on two real arXiv papers, both of which define
@@ -447,10 +469,9 @@ function maskInert(src, warnings, verbatimEnvs = VERBATIM_ENVS) {
 }
 
 /**
- * Paragraphs = runs of body text between blank lines, outside any environment
- * we already emitted and outside the preamble. Deliberately crude: paragraphs
- * are the object class SyncTeX handles WORST, so Spike A needs them present and
- * approximately right rather than perfect.
+ * Prose runs are split at blank lines AND at block objects/headings. Display
+ * math need not be surrounded by blank lines for its neighboring prose to be
+ * addressable. Source ranges always remain exact slices of the original file.
  */
 function scanParagraphs(src, masked, lineAt, objects, file) {
     const docStart = masked.indexOf('\\begin{document}');
@@ -461,10 +482,9 @@ function scanParagraphs(src, masked, lineAt, objects, file) {
 
     // Spans already claimed by a block-level object.
     const blocked = objects
-        .filter(o => ['display-equation', 'figure', 'table', 'theorem', 'verbatim', 'list', 'tabular', 'abstract', 'titlepage', 'environment'].includes(o.kind))
+        .filter(o => ['display-equation', 'section-heading', 'figure', 'table', 'theorem', 'verbatim', 'list', 'tabular', 'abstract', 'titlepage', 'environment'].includes(o.kind))
         .map(o => [o.startOffset, o.endOffset])
         .sort((a, b) => a[0] - b[0]);
-    const isBlocked = (a, b) => blocked.some(([s, e]) => a < e && b > s);
 
     const paras = [];
     const re = /\n[ \t]*\n/g;
@@ -474,10 +494,10 @@ function scanParagraphs(src, masked, lineAt, objects, file) {
     const push = (s, e) => {
         while (s < e && /\s/.test(masked[s])) s++;
         while (e > s && /\s/.test(masked[e - 1])) e--;
-        if (e - s < 40) return;                       // too short to be prose
-        if (isBlocked(s, e)) return;
+        if (e <= s) return;
         const body = masked.slice(s, e);
-        if (!/[A-Za-z]{3}/.test(body)) return;        // no words: not a paragraph
+        const prose = body.replace(/\\(?:label|index)\s*\{[^{}]*\}|\\phantomsection\b/g, '').trim();
+        if (!/[A-Za-z]{3}/.test(prose)) return;       // metadata alone is not prose
         if (/^\s*\\(section|subsection|chapter|part|maketitle|bibliography|appendix|newcommand|def|usepackage)/.test(body)) return;
         paras.push(makeObject({
             kind: 'paragraph', startOffset: s, endOffset: e,
@@ -485,11 +505,22 @@ function scanParagraphs(src, masked, lineAt, objects, file) {
             sectionPath: [], src, file,
         }));
     };
+    const partition = (s, e) => {
+        let cursor = s;
+        for (const [a, b] of blocked) {
+            if (b <= cursor) continue;
+            if (a >= e) break;
+            if (a > cursor) push(cursor, Math.min(a, e));
+            cursor = Math.max(cursor, b);
+            if (cursor >= e) return;
+        }
+        push(cursor, e);
+    };
     while ((m = re.exec(masked)) !== null && m.index < to) {
-        push(start, m.index);
+        partition(start, m.index);
         start = m.index + m[0].length;
     }
-    push(start, to);
+    partition(start, to);
     return paras;
 }
 

@@ -19,6 +19,8 @@ const vscode = require('vscode');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
+const textHash = text => typeof text === 'string' ? crypto.createHash('sha256').update(text).digest('hex') : undefined;
 
 const { ReviewSession } = require('./reviewSession');
 const { refineHunk, splitLines, diffLines } = require('./texDiff');
@@ -73,7 +75,10 @@ function makeDecorations() {
         }),
         // The words that differ, a step stronger than the line wash.
         word: vscode.window.createTextEditorDecorationType({
-            backgroundColor: new vscode.ThemeColor('diffEditor.insertedLineBackground'),
+            backgroundColor: new vscode.ThemeColor('diffEditor.insertedTextBackground'),
+            borderWidth: '0 0 2px 0',
+            borderStyle: 'solid',
+            borderColor: new vscode.ThemeColor('gitDecoration.addedResourceForeground'),
             borderRadius: '2px',
         }),
         // The one being looked at.
@@ -129,6 +134,7 @@ class ReviewUi {
         this._hidden = new Set();
         this._buffers = new Map();
         this._userWriting = new Map();
+        this._readerPending = new Map(); // known user text awaiting VS Code's dirty metadata
 
         // A SURFACE MUST NEVER BE ABLE TO BREAK WHAT IT REPORTS ON. Hosts
         // differ in what they expose (a test stub has no status bar at all),
@@ -158,29 +164,81 @@ class ReviewUi {
      * One place a session is born, so the grouping window is the same wherever
      * a change comes from — the file watcher, the MCP tool, or a merge.
      */
-    _newSession(file, baseText) {
+    _historyOptions(file) {
+        try {
+            const cfg=vscode.workspace.getConfiguration('wolfbook.tex.review',vscode.Uri.file(file));
+            return {historyLimit:cfg.get('historyLimit',20),historyMaxMB:cfg.get('historyMaxMB',20)};
+        } catch (_) {return {};}
+    }
+    _newSession(file, baseText, currentText) {
         let seconds = 60;
         try {
             const cfg = vscode.workspace.getConfiguration('wolfbook.tex.review');
             const v = cfg && cfg.get('groupWindowSeconds', 60);
             if (Number.isFinite(v) && v >= 0) seconds = v;
         } catch (_) { /* no configuration in this host */ }
-        const session = new ReviewSession({ file, baseText, groupWindowMs: seconds * 1000 });
         const previous = this._archived.get(file);
+        let checkpoint;
+        if (previous?.isEmpty && (previous.baseText === currentText ||
+            (previous.reviewedObservedHash && previous.reviewedObservedHash === textHash(baseText)))) {
+            // Keep can approve an unsaved buffer. The disk observation may
+            // still predate that approval when the next host starts.
+            checkpoint = previous.reviewedObservedHash || textHash(baseText);
+            baseText = previous.baseText;
+        }
+        const session = new ReviewSession({ file, baseText, groupWindowMs: seconds * 1000,...this._historyOptions(file) });
+        session.reviewedObservedHash = checkpoint;
         if (previous) { session.feedback = previous.feedback.slice(); session.feedbackDraft = previous.feedbackDraft; session.arrivals = previous.arrivals.slice(); }
         return session;
     }
 
-    sessionFor(file) { return this.sessions.get(file) || null; }
+    sessionFor(file) { this._syncStored(file); return this.sessions.get(file) || null; }
 
-    persist(file, session = this.sessions.get(file) || this._archived.get(file)) {
-        if (!this._store) return;
-        try { this._store.save({ file, observed: this._observed.get(file), session: session?.serialize() || null }); }
-        catch (error) { this.say('Review could not be saved: ' + error.message, 'err'); }
+    _restoreRecord(record) {
+        if (typeof record.observed === 'string') this._observed.set(record.file, record.observed);
+        const s = record.session ? ReviewSession.restore(record.session,this._historyOptions(record.file)) : null;
+        // Another window's approval changes the baseline only. Reuse this
+        // viewer's current map when the stored source still matches, so its
+        // remaining corrections do not become permanently "Preparing".
+        if (s && this._currentText(record.file)===s._lastText) {
+            try { s.update({currentText:s._lastText,map:this.mapView(record.file)}); } catch (_) { /* no current map yet */ }
+        }
+        this.sessions.delete(record.file);
+        if (!s) this._archived.delete(record.file);
+        else {
+            this._archived.set(record.file, s);
+            if (!s.isEmpty) this.sessions.set(record.file, s);
+        }
     }
-    observe(file, text) {
+    _syncStored(file) {
+        if (!this._store) return;
+        try {
+            const record = this._store.changed(file);
+            if (record) this._restoreRecord(record);
+        } catch (error) { this.say('Saved review could not be refreshed: ' + error.message, 'err'); }
+    }
+    _checkpointFinished(file, session) {
+        if (session.isEmpty && session._everHad) session.reviewedObservedHash = textHash(this._observed.get(file));
+    }
+    persist(file, session = this.sessions.get(file) || this._archived.get(file)) {
+        if (!this._store) return true;
+        try {
+            const result = this._store.save({ file, observed: this._observed.get(file), session: session?.serialize() || null });
+            if (result?.conflict) { this._restoreRecord(result.conflict); return false; }
+            return true;
+        } catch (error) { this.say('Review could not be saved: ' + error.message, 'err'); return false; }
+    }
+    observe(file, text, { ownSave = false } = {}) {
         if (typeof text !== 'string') return;
+        this._syncStored(file);
+        const previous = this._archived.get(file);
+        if (ownSave && previous?.isEmpty && text !== previous.baseText) {
+            // A later saved reader edit is a newer cursor. Do not resurrect
+            // the completed review's older checkpoint on a future arrival.
+            previous.reviewedObservedHash = undefined;
+        }
         this._observed.set(file, text); this.persist(file);
+        if (ownSave && this._readerPending.get(file)?.text === text) this._readerPending.delete(file);
     }
     async keepWithComment(file, id, comment) {
         const session = this.sessions.get(file);
@@ -209,11 +267,22 @@ class ReviewUi {
         await vscode.window.showTextDocument(document, { preview: false });
     }
     async exportHistory(file) {
+        this._syncStored(file);
         const s = this.sessions.get(file) || this._archived.get(file);
         const text = (s?.arrivals || []).map((a, i) => `# External arrival ${i + 1} · ${new Date(a.at).toISOString()}\n` +
             `Source: ${a.source} · ${a.author?.name || 'unknown author'}\n\nBEFORE\n${a.before}\n\nAFTER\n${a.after}\n`).join('\n');
         const document = await vscode.workspace.openTextDocument({ language: 'plaintext', content: text || 'No external arrivals recorded yet.' });
         await vscode.window.showTextDocument(document, { preview: false });
+    }
+
+    /** Current source, including a reader edit awaiting dirty metadata. */
+    _currentText(file) {
+        const doc = (vscode.workspace.textDocuments || []).find(d => d.uri.fsPath === file);
+        const text = doc?.getText();
+        const pending = this._readerPending.get(file);
+        if (doc && (doc.isDirty || (pending?.document === doc &&
+            pending.version === doc.version && pending.text === text))) return text;
+        try { return fs.readFileSync(file, 'utf8'); } catch (_) { return text ?? null; }
     }
 
     /**
@@ -225,17 +294,18 @@ class ReviewUi {
     async noteAgentChange(o = {}) {
         const file = o.file;
         if (!file) return null;
+        this._syncStored(file);
+        const current = this._currentText(file);
         this._hidden.delete(file);
         let s = this.sessions.get(file);
         if (!s) {
+            const agreed = this._archived.get(file);
+            if (agreed?.isEmpty && agreed.baseText === current) return agreed;
             if (typeof o.baseText !== 'string') return null;
-            s = this._newSession(file, o.baseText);
+            s = this._newSession(file, o.baseText, current);
             this.sessions.set(file, s);
         }
         s.noteBatch({ source: o.source || 'disk', note: o.note || '', author: o.author || null });
-        let current;
-        const doc = (vscode.workspace.textDocuments || []).find(d => d.uri.fsPath === file);
-        try { current = doc?.isDirty ? doc.getText() : fs.readFileSync(file, 'utf8'); } catch (_) { current = doc?.getText(); }
         if (typeof current === 'string') s.recordArrival({ text: current, source: o.source || 'disk', author: o.author || null });
         await this.refresh(file, { announce: true });
         this.output.appendLine(`review: ${o.source || 'disk'} changed ${path.basename(file)} — ` +
@@ -434,6 +504,7 @@ class ReviewUi {
 
     /** Re-diff and repaint every surface. Never throws. */
     async refresh(file, opts = {}) {
+        this._syncStored(file);
         const s = this.sessions.get(file);
         if (!s) { this.paint(file); this.updateStatus(); this.push(file); return; }
         // WHICH TEXT IS "NOW" — AND THE RACE THAT MADE THE WHOLE FEATURE
@@ -444,25 +515,32 @@ class ReviewUi {
         // moment is still the text from BEFORE the write. Diffing the baseline
         // against it found nothing, the empty session was thrown away, and the
         // pages then quietly changed under the reader with nothing to review —
-        // reported exactly that way. A clean buffer is a copy of the file, so
-        // the file is what to read; only a dirty buffer is ahead of it.
-        let text = null;
-        const doc = (vscode.workspace.textDocuments || []).find(d => d.uri.fsPath === file);
-        if (doc && doc.isDirty) text = doc.getText();
-        if (text == null) {
-            try { text = require('fs').readFileSync(file, 'utf8'); } catch (_) { text = null; }
-        }
-        if (text == null && doc) text = doc.getText();
+        // A known reader WorkspaceEdit can update the source before isDirty
+        // changes. Keep that exact document version through an early compile
+        // refresh instead of comparing against the older saved copy.
+        const text = this._currentText(file);
         if (text == null) return;
+        const placementOnly=opts.placementOnly && text===s._lastText && s.baseText===s._lastBaseText;
         try { s.update({ currentText: text, map: this.mapView(file) }); }
         catch (e) { this.output.appendLine(`review: ${e.message}`); }
+
+        // Page hints do not change decisions, source or history. Avoid writing
+        // and hashing the whole saved review for each discovery batch.
+        if (placementOnly) {
+            this.paint(file); this.updateStatus(); this.push(file); this._lensEmitter.fire();
+            return;
+        }
 
         // A SESSION IS CLOSED BY BEING FINISHED, NOT BY BEING EARLY. It goes
         // when it once had changes and now has none — everything was decided.
         // A session that has never shown one is simply waiting for the buffer
         // to catch up, and throwing it away is what lost the change.
         if (s.hunks.length) s._everHad = true;
-        this.persist(file, s);
+        this._checkpointFinished(file, s);
+        if (!this.persist(file, s)) {
+            this.paint(file); this.updateStatus(); this.push(file); this._lensEmitter.fire();
+            return;
+        }
         this._archived.set(file, s);
         if (s.isEmpty && s._everHad) this.sessions.delete(file);
         this.paint(file);
@@ -470,6 +548,23 @@ class ReviewUi {
         this.push(file);
         this._lensEmitter.fire();
         if (opts.announce) this.announce(file);
+        this._resolveGitAuthors(s);
+    }
+
+    _resolveGitAuthors(s) {
+        const key=textHash(s.baseText)+'/'+textHash(s._lastText);
+        if(s._gitLookupKey===key)return;
+        s._gitLookupKey=key;
+        const eligible=s.hunks.filter(h=>/disk|external|git|overleaf/.test(
+            s.batches.find(b=>b.id===s.firstSeen.get(h.id))?.source || ''));
+        if(!eligible.length)return;
+        const before=s.baseText,after=s._lastText;
+        require('./reviewGit').gitReviewAuthors({file:s.file,before,after,hunks:eligible}).then(result=>{
+            if(!result || s._gitLookupKey!==key || s.baseText!==before || s._lastText!==after ||
+                this.sessionFor(s.file)!==s)return;
+            for(const h of eligible)if(result.authors[h.id])s.gitAuthors.set(h.id,result.authors[h.id]);
+            this.persist(s.file,s);this.push(s.file);this.paint(s.file);
+        }).catch(()=>{});
     }
 
     /**
@@ -493,7 +588,7 @@ class ReviewUi {
         this._placeTimer = setTimeout(() => {
             this._placeTimer = null;
             for (const file of [...this.sessions.keys()]) {
-                this.refresh(file).catch(() => { /* a placement is never fatal */ });
+                this.refresh(file, {placementOnly:true}).catch(() => { /* a placement is never fatal */ });
             }
         }, 60);
     }
@@ -555,6 +650,17 @@ class ReviewUi {
 
     // -------------------------------------------------------------- editor --
 
+    /** Selecting a correction changes only the focus decoration. */
+    paintFocus(file,hunk) {
+        const editors=(vscode.window.visibleTextEditors || []).filter(e=>e.document?.uri.fsPath===file);
+        if(!editors.length)return;
+        for(const editor of editors) {
+            const clamp=line=>Math.max(0,Math.min(line,editor.document.lineCount-1));
+            const from=clamp(hunk.ourRange.startLine-1),to=Math.max(from,clamp(hunk.ourRange.endLine-2));
+            try {editor.setDecorations(this.decor.focus,[{range:new vscode.Range(from,0,to,0)}]);} catch(_) {}
+        }
+    }
+
     /** Every pending change, marked in the editors showing that file. */
     paint(file) {
         const editors = (vscode.window.visibleTextEditors || [])
@@ -576,7 +682,8 @@ class ReviewUi {
             const clamp = (l) => Math.max(0, Math.min(l, doc.lineCount - 1));
             const buckets = { add: [], change: [], del: [], word: [], focus: [] };
             // Who made each change: the agent, or the reader on the page (track my changes).
-            const whoOf = h => (s.batches.find(b => b.id === s.firstSeen.get(h.id))?.source === 'you' ? 'You' : 'The agent');
+            const whoOf = h => s.gitAuthors.get(h.id)?.name || s.batches.find(b => b.id === s.firstSeen.get(h.id))?.author?.name ||
+                (s.batches.find(b => b.id === s.firstSeen.get(h.id))?.source === 'you' ? 'You' : 'External / unknown');
             for (const h of s.hunks) {
                 const from = clamp(h.ourRange.startLine - 1);
                 const to = clamp(h.ourRange.endLine - 2);
@@ -649,13 +756,8 @@ class ReviewUi {
         return { at, ids, page: s.hunks[at] && s.hunks[at].page };
     }
 
-    /**
-     * Move to the next NEARBY undecided change.
-     *
-     * Reviewing is a worklist while changes remain in the reader's current
-     * neighbourhood. Crossing the paper is navigation, not convenience, so a
-     * distant next item waits for an explicit previous/next gesture.
-     */
+    /** Continue the review worklist, regardless of page distance. The viewer
+     * bookmarks the reader's starting position before their first decision. */
     async _advanceAfter(file, plan) {
         if (!plan) return;
         const s = this.sessions.get(file);
@@ -664,15 +766,7 @@ class ReviewUi {
         if (!left.length) return;
         // The one that took its place, else the one before it.
         const next = left[Math.min(plan.at, left.length - 1)];
-        const nextHunk = s.hunks.find(h => h.id === next);
-        const fromPage = Number(plan.page);
-        const toPage = Number(nextHunk && nextHunk.page);
-        // Auto-advance is convenience, not permission to navigate across the
-        // paper. Staying in the local neighbourhood keeps a run of nearby
-        // corrections flowing; a distant or currently unplaced correction is
-        // left for an explicit ‹/› gesture.
-        if (next && Number.isFinite(fromPage) && fromPage > 0 &&
-            Number.isFinite(toPage) && toPage > 0 && Math.abs(toPage - fromPage) <= 1) {
+        if (next) {
             await this.show(file, next);
             return;
         }
@@ -681,44 +775,88 @@ class ReviewUi {
         this.push(file);
     }
 
+    _commitKeep(file, ids, wholeText) {
+        // Persist before yielding. If another host won a write, reapply only
+        // these content-derived IDs against its baseline, preserving both
+        // hosts' decisions rather than saving an old pending snapshot.
+        for (let attempt = 0; attempt < 3; attempt++) {
+            this._syncStored(file);
+            const s = this.sessions.get(file) || this._archived.get(file);
+            if (!s) return { ok:false, reason:'that review is no longer in the list' };
+            const current=this._currentText(file);
+            if (typeof current==='string' && current!==s._lastText) s.update({currentText:current,map:this.mapView(file)});
+            if (ids.length && !s.hunks.some(h=>ids.includes(h.id)))
+                return {ok:false,reason:'that change is no longer in the list'};
+            if (s.hunks.length) s._everHad = true;
+            const all = typeof wholeText === 'string' && wholeText === s._lastText && s.hunks.every(h => ids.includes(h.id));
+            const r = s.keepMany(ids);
+            if (all) s.baseText = wholeText;
+            this._checkpointFinished(file, s);
+            if (this.persist(file, s)) return r;
+        }
+        return { ok:false, reason:'Keep could not be saved; the latest saved review was restored. Please try again.' };
+    }
+
     async keep(file, id) {
+        this._syncStored(file);
         const s = this.sessions.get(file);
         if (!s) return;
+        if (!s.hunks.some(h => h.id === id)) { this.say('that change is no longer in the list', 'warn'); return; }
         const plan = this._afterDeciding(file, id);
-        const r = s.keep(id);
+        const r = this._commitKeep(file, [id]);
         if (!r.ok) { this.say(r.reason, 'warn'); return; }
-        await this.refresh(file);
+        await this._refreshAfterKeep(file);
         await this._advanceAfter(file, plan);
     }
 
     async keepAll(file) {
+        this._syncStored(file);
         const s = this.sessions.get(file);
         if (!s) return;
         const n = s.pendingCount;
-        const r = s.keepAll();
+        const r = this._commitKeep(file, s.hunks.map(h => h.id), s._lastText);
         if (!r.ok) { this.say(r.reason, 'warn'); return; }
-        await this.refresh(file);
+        await this._refreshAfterKeep(file);
         this.say(`kept ${n} change${n === 1 ? '' : 's'}`, 'ok');
     }
 
     async keepBatch(file, batchId) {
+        this._syncStored(file);
         const s = this.sessions.get(file);
         if (!s) return;
-        s.keepBatch(batchId);
-        await this.refresh(file);
+        const ids = s.hunks.filter(h => s.firstSeen.get(h.id) === batchId).map(h => h.id);
+        const plan = this._afterDeciding(file, ids[0]);
+        const r = this._commitKeep(file, ids);
+        if (!r.ok) { this.say(r.reason, 'warn'); return; }
+        await this._refreshAfterKeep(file);
+        await this._advanceAfter(file, plan);
     }
 
     /** Keep a set the reader pointed at as one — a section, a batch, a picking. */
     async keepMany(file, ids) {
+        this._syncStored(file);
         const s = this.sessions.get(file);
         if (!s || !Array.isArray(ids) || !ids.length) return;
-        const r = s.keepMany(ids);
-        await this.refresh(file);
+        const plan = this._afterDeciding(file, s.hunks.find(h => ids.includes(h.id))?.id);
+        const r = this._commitKeep(file, ids);
+        if (!r.ok) { this.say(r.reason, 'warn'); return; }
+        await this._refreshAfterKeep(file);
+        await this._advanceAfter(file, plan);
         const n = (r.kept || []).length;
         if (n) this.say(`kept ${n} change${n === 1 ? '' : 's'}`, 'ok');
     }
 
+    async _refreshAfterKeep(file) {
+        const s=this.sessions.get(file) || this._archived.get(file);
+        // An agent may have written during the decision. That real source
+        // change still needs a normal comparison; approval alone needs none.
+        if (!s || this._currentText(file)!==s._lastText) return this.refresh(file);
+        if (s.isEmpty && s._everHad) this.sessions.delete(file);
+        this.paint(file);this.updateStatus();this.push(file);this._lensEmitter.fire();
+    }
+
     async undo(file, id) {
+        this._syncStored(file);
         const s = this.sessions.get(file);
         if (!s) return;
         const plan = this._afterDeciding(file, id);
@@ -729,6 +867,7 @@ class ReviewUi {
     }
 
     async undoAll(file) {
+        this._syncStored(file);
         const s = this.sessions.get(file);
         if (!s) return;
         const r = s.undoAll();
@@ -782,16 +921,23 @@ class ReviewUi {
     async show(file, id) {
         const s = this.sessions.get(file);
         if (!s) return;
-        const h = s.hunks.find(x => x.id === id);
+        let h = s.hunks.find(x => x.id === id);
         if (!h) return;
         this.focused.set(file, id);
-        this.paint(file);
-        this.push(file);
+        this.paintFocus(file,h);
+        // Reuse the already published text/marks. Rebuilding payload() here
+        // diffs every hunk and sends the entire paper's corrections per click.
+        if(!this.viewer?.selectReviewHunk?.(file,id))this.push(file);
         if (this.viewer && this.viewer.focusReviewHunk) {
             // The page lacks the change (the agent wrote the file after it
             // was built): the full compile first, then the focus, which
             // waits for that PDF (TexViewer.compileForReview).
-            const behind = this.viewer.reviewPageBehind && this.viewer.reviewPageBehind(s.generation);
+            const behind = this.viewer.reviewPageBehind && this.viewer.reviewPageBehind(s.generation, h);
+            if (!behind && !h.rects?.length && this.viewer.ensureReviewPlacement) {
+                await this.viewer.ensureReviewPlacement(file, h);
+                if (this.focused.get(file) !== id) return;
+                h = this.sessions.get(file)?.hunks.find(x => x.id === id) || h;
+            }
             // Behind: no generation, so the focus waits for the placement
             // on the new PDF instead of going to the old page now.
             this.viewer.focusReviewHunk(h, behind ? null : s.generation);
@@ -813,7 +959,9 @@ class ReviewUi {
             if (editor) {
                 editor.revealRange(new vscode.Range(line, 0, line, 0),
                     vscode.TextEditorRevealType.InCenterIfOutsideViewport);
-                this.paint(file);
+                // A newly opened source editor needs its initial decorations.
+                // An already visible editor only changed the focus above.
+                if(!visible)this.paint(file);
             }
         } catch (_) { /* the page marker is the main event */ }
     }
@@ -851,18 +999,22 @@ class ReviewUi {
             if (/\.tex$/i.test(doc.uri.fsPath)) this._buffers.set(doc.uri.fsPath, doc.getText());
         }
         if (vscode.workspace.onDidOpenTextDocument) context.subscriptions.push(vscode.workspace.onDidOpenTextDocument(doc => {
-            if (/\.tex$/i.test(doc.uri.fsPath)) this._buffers.set(doc.uri.fsPath, doc.getText());
+            if (/\.tex$/i.test(doc.uri.fsPath)) {
+                this._syncStored(doc.uri.fsPath);
+                this._buffers.set(doc.uri.fsPath, doc.getText());
+            }
         }));
         if (context.globalStorageUri?.fsPath) {
             try {
                 const { ReviewStore } = require('./reviewStore');
-                this._store = new ReviewStore(path.join(context.globalStorageUri.fsPath, 'paper-reviews'));
-                for (const record of this._store.load()) {
-                    if (typeof record.observed === 'string') this._observed.set(record.file, record.observed);
-                    if (!record.session) continue;
-                    const s = ReviewSession.restore(record.session);
-                    this._archived.set(record.file, s);
-                    if (!s.isEmpty) this.sessions.set(record.file, s);
+                this._store = new ReviewStore(path.join(context.globalStorageUri.fsPath, 'paper-reviews'),file=>this._historyOptions(file));
+                // Histories contain immutable whole-document arrivals and can
+                // be large. Other projects belong on disk, not in every host.
+                // _syncStored restores a file on open/observe/agent arrival.
+                const files = (vscode.workspace.textDocuments || [])
+                    .filter(doc => /\.tex$/i.test(doc.uri.fsPath)).map(doc => doc.uri.fsPath);
+                for (const record of this._store.load(files)) {
+                    this._restoreRecord(record);
                 }
                 if (this._store.errors.length) this.say(`${this._store.errors.length} saved review record(s) could not be read; originals were preserved.`, 'err');
             } catch (error) { this.say('Saved review could not be restored: ' + error.message, 'err'); }
@@ -895,8 +1047,12 @@ class ReviewUi {
             const previous = this._buffers.get(file);
             this._buffers.set(file, e.document.getText());
             const s = this.sessions.get(file);
-            if (!e.contentChanges.length) return;
+            if (!e.contentChanges.length) { this._readerPending.delete(file); return; }
             const userBusy = Date.now() - (this._userWriting.get(file) || 0) < 5000;
+            if (userBusy && !e.document.isDirty) {
+                this._readerPending.set(file, { document:e.document, version:e.document.version,
+                    text:e.document.getText() });
+            } else this._readerPending.delete(file);
             const inEditor = vscode.window.activeTextEditor?.document === e.document;
             const unannouncedExternal = !inEditor && !userBusy && !this._agentWriting.has(file) && !this._applying && e.document.isDirty;
             if (unannouncedExternal && typeof previous === 'string') {
@@ -914,7 +1070,7 @@ class ReviewUi {
             // cannot strand the mirror — it is ignored after a few seconds.
             const writing = this._agentWriting.get(file);
             const agentBusy = writing != null && Date.now() - writing < 5000;
-            if (!this._applying && !agentBusy && e.document.isDirty) {
+            if (!this._applying && !agentBusy && (e.document.isDirty || userBusy)) {
                 // Offsets describe the buffer immediately BEFORE this event,
                 // not the last debounced paint. Rapid typing otherwise compares
                 // keystrokes against an increasingly stale snapshot and turns
@@ -926,7 +1082,7 @@ class ReviewUi {
                     try { s.noteReaderEdit({ offset: c.rangeOffset, length: c.rangeLength, text: c.text }); }
                     catch (_) { /* an unmirrorable edit is not fatal */ }
                 }
-                s.update({ currentText: e.document.getText() });
+                s.update({ currentText: e.document.getText(),readerChanges:e.contentChanges });
             }
             clearTimeout(this._debounce);
             this._debounce = setTimeout(() => { this.refresh(file); }, 250);
@@ -1011,7 +1167,7 @@ function removedHover(h, who = 'The agent') {
 function wordRanges(doc, h, clamp) {
     const out = [];
     try {
-        const { aRanges } = refineHunk(h.ourText, h.theirText);
+        const { aRanges } = refineHunk(h.ourText, h.theirText, h.wordContext);
         const lines = splitLines(h.ourText);
         for (const r of aRanges) {
             if (r.line >= lines.length) continue;

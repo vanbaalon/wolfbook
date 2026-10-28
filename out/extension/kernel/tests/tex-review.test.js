@@ -474,6 +474,19 @@ test('keepMany ignores ids that are not in the list, and an empty set', () => {
     assert.strictEqual(s.hunks.length, 1, 'and nothing was decided');
 });
 
+test('reviews expose all changes beyond the compare tool output limit', () => {
+    const before = Array.from({length:237},(_,i)=>`Original sentence ${i}.\nUnchanged separator ${i}.`).join('\n');
+    const after = before.replaceAll('Original sentence','Revised sentence');
+    const s = fresh(before);
+    s.update({currentText:after});
+    assert.equal(s.pendingCount,237);
+    assert.equal(s.summary.truncated,0);
+    const last=s.hunks.at(-1);
+    assert(s.keep(last.id).ok, 'changes beyond 200 remain individually reviewable');
+    s.update({currentText:after});
+    assert.equal(s.pendingCount,236);
+});
+
 (async () => {
     console.log('the review session, executed\n');
     for (const [name, fn] of tests) {

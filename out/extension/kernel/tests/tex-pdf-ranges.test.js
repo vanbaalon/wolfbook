@@ -61,3 +61,26 @@ test('unanswered range requests time out and release their file', async () => {
     await assert.rejects(transport.failure,/timed out/);
     assert.equal(ranges.active.size,0);
 });
+
+test('a lost byte response is retried once with the same immutable request', async () => {
+    const messages=[],ranges=new PdfRanges(m=>messages.push(m),10);
+    const transport=ranges.create(pdfjs,{token:'retry',length:3});
+    transport.requestDataRange(0,3);
+    await new Promise(resolve=>setTimeout(resolve,13));
+    const requests=messages.filter(m=>m.type==='pdfRangeRequest');
+    assert.equal(requests.length,2);assert.deepEqual(requests[0],requests[1]);
+    ranges.receive({token:'retry',request:requests[1].request,begin:0,data:'YWJj'});
+    await new Promise(resolve=>setTimeout(resolve,13));
+    assert.equal(transport.closed,undefined);assert.deepEqual(transport.delivered,[{begin:0,data:'abc'}]);
+    transport.abort();
+});
+
+test('late duplicate replies and cancellation do not revive or leak retry timers', async () => {
+    const messages=[],ranges=new PdfRanges(m=>messages.push(m),10),transport=ranges.create(pdfjs,{token:'late',length:3});
+    transport.requestDataRange(0,3);await new Promise(resolve=>setTimeout(resolve,13));
+    const response={token:'late',request:1,begin:0,data:'YWJj'};
+    ranges.receive(response);ranges.receive(response);transport.abort();
+    await new Promise(resolve=>setTimeout(resolve,25));
+    assert.equal(messages.filter(m=>m.type==='pdfRangeRequest').length,2);
+    assert.equal(messages.filter(m=>m.type==='pdfRangeRelease').length,1);assert.equal(transport.delivered.length,1);
+});

@@ -16,7 +16,10 @@ function _hasExplicitValue(config, name) {
     }
     return inspected.workspaceFolderValue !== undefined
         || inspected.workspaceValue !== undefined
-        || inspected.globalValue !== undefined;
+        || inspected.globalValue !== undefined
+        || inspected.workspaceFolderLanguageValue !== undefined
+        || inspected.workspaceLanguageValue !== undefined
+        || inspected.globalLanguageValue !== undefined;
 }
 
 function getSetting(name, defaultValue, scope = null) {
@@ -24,7 +27,11 @@ function getSetting(name, defaultValue, scope = null) {
     if (_hasExplicitValue(primary, name)) {
         return primary.get(name, defaultValue);
     }
-    return vscode.workspace.getConfiguration("wolfram", scope).get(name, defaultValue);
+    const legacy = vscode.workspace.getConfiguration("wolfram", scope);
+    if (_hasExplicitValue(legacy, name)) return legacy.get(name, defaultValue);
+    // Registered defaults belong to the current namespace. The legacy default
+    // (or a stale call-site fallback) must not override package.json.
+    return primary.get(name, defaultValue);
 }
 
 async function updateSetting(name, value, configurationTarget, scope = null) {

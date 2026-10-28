@@ -28,7 +28,8 @@ try {
     const invoked = [];
     server._invokeWorker = async (port, name, args) => {
         invoked.push({ port, name, args });
-        return { content: [{ type: 'text', text: JSON.stringify({ transaction_id: 'tx1', applied: false }) }] };
+        return { content: [{ type: 'text', text: JSON.stringify(name === 'paper_listenComments'
+            ? {listener_id:'listener1',state:'listening'} : { transaction_id: 'tx1', applied: false }) }] };
     };
     const preview = await server._dispatchPaper('paper_previewEdit', { file: '/work/paper/main.tex', notebook: '/wrong.wb', kernel_id: 'wrong' }, 'agent');
     assert.equal(preview.structuredContent.routing.client_id, 'B');
@@ -39,6 +40,23 @@ try {
     const mismatch = await server._dispatchPaper('paper_applyEdit', { transaction_id: 'tx1', client_id: 'A' });
     assert.equal(mismatch.structuredContent.code, 'transaction-client-mismatch');
     assert.equal(invoked.length, 2);
+    const listener = await server._dispatchPaper('paper_listenComments', {file:'/work/paper/main.tex',action:'start'});
+    assert.equal(listener.structuredContent.routing.client_id,'B');
+    await server._dispatchPaper('paper_listenComments', {listener_id:'listener1',action:'next',wait_seconds:0});
+    assert.equal(invoked.length,4,'listener-only waits return to the installing worker');
+    const wrongListener = await server._dispatchPaper('paper_listenComments', {listener_id:'listener1',action:'next',client_id:'A'});
+    assert.equal(wrongListener.isError,true);assert.equal(invoked.length,4);
+    server._sessionClientNames=new Map();server._operationFastWaitMs=2000;
+    assert.equal(server._inlineWaitFor({name:'paper_listenComments',arguments:{action:'next'}},'agent').waitMs,47000);
+    server._requestOperations=new Map();server._operations=new Map();
+    const waitId='listen-wait-id';
+    server._requestOperations.set(server._requestKey('agent',4),waitId);
+    server._operations.set(waitId,{id:waitId,name:'paper_listenComments',status:'pending',background:false,
+        params:{arguments:{action:'next',listener_id:'listener1'}}});
+    let kernelCancels=0;server._dispatch=async()=>{kernelCancels++;throw Error('must not cancel a kernel');};
+    await server._cancelManagedRequest('agent',4);
+    assert.equal(kernelCancels,0);assert.equal(invoked.at(-1).args.action,'cancel_wait');
+    assert.equal(invoked.at(-1).args._operationId,waitId);
     server._workers.clear();
     const gone = await server._dispatchPaper('paper_applyEdit', { transaction_id: 'tx1' });
     assert.equal(gone.structuredContent.code, 'transaction-client-unavailable');

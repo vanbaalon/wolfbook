@@ -4,7 +4,34 @@ All notable changes to **Wolfbook** are documented here.
 
 ---
 
-## [Unreleased]
+## [2.10.2] - 2026-10-28
+
+### Fixed
+
+- Kernel slots restore without starting Wolfram processes. Evaluation starts the
+  requested kernel; window shutdown waits for all locally owned sessions.
+- Notebook focus returns after kernel switching so Shift+Enter remains usable.
+- Language-server startup follows actual readiness and handles notebook-cell URIs.
+- Large correction lists reuse source-line placement work, publish page hints in
+  batches, and avoid rewriting unchanged review history.
+- Missing optional WLaTeX stays hidden and quiet while normal LaTeX builds continue.
+- MCP responses retain structured results and provide useful summaries.
+- MCP reads preserve printed numbers, formulas and line breaks, including
+  multi-argument Print and WBPrint output.
+- macOS ARM native addons repair shutdown cancellation and mathematical output
+  spacing, hidden-content layout and function line breaks. Other platform
+  packages retain their existing native binaries pending platform rebuilds.
+
+### Added
+
+- A macOS command opens a separate Wolfram desktop instance without stopping
+  notebook kernels. Automatic graphics warm-ups no longer start hidden front ends.
+
+### Distribution
+
+- Four platform packages: macOS ARM64, macOS x64, Linux x64 and Windows x64.
+- WLaTeX remains a separate, unreleased runtime and is excluded from these packages.
+
 
 ### Fixed
 

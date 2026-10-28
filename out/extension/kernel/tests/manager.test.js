@@ -34,10 +34,13 @@ function controller() {
     assert.strictEqual(manager.list(['/tmp/a.wb'])[1].notebooks.length, 1);
     await manager.unbind('/tmp/a.wb');
     assert.strictEqual(manager.bindingFor('/tmp/a.wb').id, k1.id);
-    await assert.rejects(manager.create(), /limit reached/i);
+    const extra = await manager.create();
+    assert.strictEqual(manager.capacity().above_recommended, true);
+    assert.strictEqual(manager.capacity().hard_limit, null);
+    await manager.stop(extra.id);
     assert.strictEqual(canonicalNotebook('/tmp/a.wb/'), canonicalNotebook('/tmp/a.wb'));
 
-    // Private kernels are a normal bounded capability now; the legacy
+    // Dedicated kernels are a normal capability now; the legacy
     // experimentalIsolation setting no longer makes action=create fail.
     const availableByDefault = new KernelManager(null, { experimental: false, maximum: 2, factory: async () => controller() });
     availableByDefault.addDefault(controller());

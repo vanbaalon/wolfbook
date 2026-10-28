@@ -29,9 +29,12 @@ class KernelArbiter {
         const aborting = !!(ctrl?.isAborting || ctrl?._abortPending);
         const linkBusy = Number(ctrl?._directEvaluationCount || 0) > 0;
         const kernel = ctrl?.kernelStatusString || 'unresolved';
+        // Status remains a pure controller snapshot: only the passive watcher
+        // reads native accessors, never an agent status call.
+        const connectionLost = !!ctrl?._connectionLost;
         let lifecycle = 'offline';
         if (kernel === 'launching') lifecycle = 'launching';
-        else if (kernel === 'resolved') lifecycle = ctrl?._abortUncertain ? 'faulted' : (aborting ? 'aborting' : (this._active || dispatched || linkBusy || queueDepth > 0 ? 'busy' : 'idle'));
+        else if (kernel === 'resolved') lifecycle = (connectionLost || ctrl?._abortUncertain) ? 'faulted' : (aborting ? 'aborting' : (this._active || dispatched || linkBusy || queueDepth > 0 ? 'busy' : 'idle'));
         else if (kernel === 'error') lifecycle = 'faulted';
 
         const active = this._active ? { ...this._active } : null;
@@ -42,7 +45,7 @@ class KernelArbiter {
             kernel_label: ctrl?.kernelIdentity?.label || null,
             lifecycle,
             kernelStatus: kernel,
-            linkHealth: kernel === 'resolved' ? (ctrl?._abortUncertain ? 'uncertain' : 'connected') :
+            linkHealth: kernel === 'resolved' ? (connectionLost ? 'disconnected' : (ctrl?._abortUncertain ? 'uncertain' : 'connected')) :
                 (kernel === 'error' ? 'faulted' : 'disconnected'),
             busy: lifecycle === 'busy' || lifecycle === 'aborting',
             activeOperation: active,

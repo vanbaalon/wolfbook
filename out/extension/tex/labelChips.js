@@ -98,6 +98,59 @@ function tagRows(rows, pageWidth) {
     return [...byBand.values()].sort((a, b) => a.page - b.page || a.y - b.y);
 }
 
+/** LuaTeX collects an align under its end line and unions its number with
+ * the formula. Recover the separate printed numbers from the actual glyphs
+ * rather than treating that wide row as the number of the whole display. */
+function tagRowsFromGlyphs(glyphs, pageWidth) {
+    const W = pageWidth > 0 ? pageWidth : 595.276;
+    const bands = new Map();
+    const explicit = new Map();
+    for (const g of glyphs || []) {
+        if (!g || !Number.isFinite(g.baseline) || !(g.w > 0)) continue;
+        const key = `${g.page}|${Math.round(g.baseline / 2)}`;
+        // Pro identifies EquationNumber nodes directly, including custom tags
+        // whose font slots have no Unicode string and numbers on the left.
+        if (g.kind === 3) {
+            if (!explicit.has(key)) explicit.set(key, []);
+            explicit.get(key).push(g);
+            continue;
+        }
+        if (g.x < W * .7 || (g.lv != null && g.lv !== 0) || typeof g.str !== 'string') continue;
+        if (!bands.has(key)) bands.set(key, []);
+        bands.get(key).push(g);
+    }
+    const tags = [];
+    const add = (run, trusted = false) => {
+        const printed = run.map(g => g.str).join('');
+        if (!trusted && !/^\([A-Za-z0-9]+(?:[.\-][A-Za-z0-9]+)*\)$/.test(printed)) return;
+        const x = Math.min(...run.map(g => g.x)), right = Math.max(...run.map(g => g.x + g.w));
+        const y = Math.min(...run.map(g => g.baseline - g.h));
+        const bottom = Math.max(...run.map(g => g.baseline + g.d));
+        tags.push({ page:run[0].page, x, y, w:right - x, h:bottom - y, printed });
+    };
+    if (explicit.size) {
+        for (const band of explicit.values()) add(band, true);
+        return tags.sort((a,b) => a.page - b.page || a.y - b.y);
+    }
+    for (const band of bands.values()) {
+        let run = [];
+        for (const g of band.sort((a,b) => a.x - b.x)) {
+            const prev = run[run.length - 1];
+            if (prev && g.x - (prev.x + prev.w) > Math.max(3, g.h * .4)) {
+                add(run); run = [];
+            }
+            run.push(g);
+        }
+        add(run);
+    }
+    // Formulae can also contain '(1)'. Printed equation tags end at the same
+    // right margin; retain that column rather than a number inside the body.
+    const right = new Map();
+    for (const t of tags) right.set(t.page, Math.max(right.get(t.page) || 0, t.x + t.w));
+    return tags.filter(t => right.get(t.page) - (t.x + t.w) <= 2)
+        .sort((a,b) => a.page - b.page || a.y - b.y);
+}
+
 /** The rows of a source range, from the injected accessor, flattened. */
 function rowsOver(rowsFor, file, startLine, endLine) {
     const out = [];
@@ -356,7 +409,7 @@ function commandFor(kind, role) {
 function buildLabelChips(deps) {
     const {
         objects = [], rowsFor, boxFor,
-        printedFor = null, citeFor = null, inkFor = null,
+        printedFor = null, citeFor = null, inkFor = null, glyphsFor = null,
         declared = null, file = '', pageWidth = 595.276,
     } = deps || {};
     if (typeof rowsFor !== 'function') return [];
@@ -367,6 +420,25 @@ function buildLabelChips(deps) {
     const fileOf = (o) => (o.sourceRange && o.sourceRange.file) || file;
     const startOf = (o) => (o.sourceRange ? o.sourceRange.startLine : o.startLine);
     const endOf = (o) => (o.sourceRange ? o.sourceRange.endLine : o.endLine);
+    const numberRows = new Map();
+    const numbersOf = (o, rows) => {
+        if (numberRows.has(o)) return numberRows.get(o);
+        const glyphs = [];
+        if (typeof glyphsFor === 'function') {
+            for (let line = Math.max(1, startOf(o)); line <= Math.min(endOf(o), startOf(o) + 400); line++) {
+                try { glyphs.push(...glyphsFor(fileOf(o), line) || []); } catch (_) { /* use row geometry */ }
+            }
+        }
+        const recovered = tagRowsFromGlyphs(glyphs, pageWidth);
+        const tags = recovered.length ? recovered : tagRows(rows, pageWidth);
+        numberRows.set(o, tags);
+        return tags;
+    };
+    const printedTag = (tags, name) => {
+        const printed = printedFor && (printedFor(name) || {}).printed;
+        const key = value => String(value || '').replace(/[()\s]/g, '');
+        return printed ? tags.find(t => t.printed && key(t.printed) === key(printed)) : null;
+    };
 
     // --- declarations ------------------------------------------------------
     //
@@ -396,9 +468,11 @@ function buildLabelChips(deps) {
             // THE ROW THAT CARRIES THE NUMBER is the one a reader looks at for
             // "which equation is this" — and on an `align` there is one per
             // line, so each label stays level with its own.
-            const tags = tagRows(rows, pageWidth);
-            const tag = tags.length ? tags[tags.length - 1] : pickTagRow(stray);
-            row = tag || firstRow(keep) || firstRow(rows);
+            const tags = numbersOf(o, rows);
+            const tag = printedTag(tags, name) || (tags.length ? tags[tags.length - 1] : pickTagRow(stray));
+            const multipleLabels = standalone.filter(l => fileOf(l) === f &&
+                startOf(l) >= startOf(o) && endOf(l) <= endOf(o)).length > 1;
+            row = tag || (multipleLabels ? lastRow(keep) : firstRow(keep)) || firstRow(rows);
             if (!tag) approx = true;
         } else if (kind === 'figure' || kind === 'table') {
             // The caption prints last, and a caption is where a reader looks
@@ -468,7 +542,7 @@ function buildLabelChips(deps) {
         const rows = container
             ? rowsOver(rowsFor, fileOf(container), startOf(container), endOf(container))
             : [];
-        const tags = tagRows(rows, pageWidth);
+        const tags = container ? numbersOf(container, rows) : tagRows(rows, pageWidth);
         const kind = container ? (DECL_KIND[container.kind] || 'other') : 'other';
 
         labels.forEach((o, i) => {
@@ -486,13 +560,14 @@ function buildLabelChips(deps) {
             // what keeps an align's five names from stacking on one spot.
             const wanted = ownName && ownName !== name ? i : tags.length - 1;
             let row = null;
-            if (tags.length && wanted >= 0 && wanted < tags.length) {
-                row = tags[wanted];
-                approx = tags.length !== labels.length + (ownName ? 1 : 0);
+            const exact = printedTag(tags, name);
+            if (exact || (tags.length && wanted >= 0 && wanted < tags.length)) {
+                row = exact || tags[wanted];
+                approx = !exact && tags.length !== labels.length + (ownName ? 1 : 0);
             } else {
                 const own = rowsOver(rowsFor, f, startOf(o), endOf(o));
                 row = firstRow(splitStrayRows(own).keep) || firstRow(own) ||
-                    firstRow(splitStrayRows(rows).keep);
+                    splitStrayRows(rows).keep[i] || firstRow(splitStrayRows(rows).keep);
             }
             if (row) at = inColumn(row, side, blockOf(inkFor, row.page, pageWidth));
             if (!at) return;
@@ -608,5 +683,5 @@ function altFormat(format) {
 
 module.exports = {
     buildLabelChips, splitStrayRows, formatLabelCopy, altFormat,
-    findPrintedInk, rowsOver, isTagRow, tagRows, blockOf, inColumn, CHIP_H, GAP,
+    findPrintedInk, rowsOver, isTagRow, tagRows, tagRowsFromGlyphs, blockOf, inColumn, CHIP_H, GAP,
 };

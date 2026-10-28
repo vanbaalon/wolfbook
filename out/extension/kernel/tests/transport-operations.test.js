@@ -13,6 +13,13 @@ Module._load = originalLoad;
 (async () => {
     const server = new WolframMCPServer(new Map(), [], { waitMs: 20, leaseMs: 20 });
 
+    // Common paper verifications need not return a handle after just 2 s.
+    assert.strictEqual(server._inlineWaitFor({name:'paper_applyEdit',arguments:{}},'paper-session').waitMs,10000);
+    assert.strictEqual(server._inlineWaitFor({name:'paper_applyEdit',arguments:{wait_seconds:6}},'paper-session').waitMs,6000);
+    assert.strictEqual(server._inlineWaitFor({name:'paper_applyEdit',arguments:{wait_seconds:0}},'paper-session').waitMs,20);
+    assert.strictEqual(server._inlineWaitFor({name:'paper_applyEdit',arguments:{wait_seconds:99}},'paper-session').waitMs,45000);
+    assert.strictEqual(server._inlineWaitFor({name:'paper_applyEdit',arguments:{wait_seconds:'bad'}},'paper-session').waitMs,10000);
+
     // Transport expiry only forgets its waiter; it has no abort authority.
     let abortCalled = false;
     server.abort = () => { abortCalled = true; };
@@ -109,8 +116,8 @@ Module._load = originalLoad;
         notebookNotifier: event => notebookNotices.push(event),
     });
     clients.setOwnClientInfo('primary', ['/Tmp/A.wb', '/tmp/a.wb/', '/tmp/B.wb'], 'Primary workspace');
-    // registeredAt must be fresh: _buildClientList now prunes workers whose
-    // heartbeat is stale (dead windows used to stay listed forever).
+    // Registration age is shown to clients; live owner PIDs survive delayed
+    // heartbeats (long calculations, host stalls or system sleep).
     const regAt = Date.now();
     clients._workers.set('worker', {
         port: 31001, pid: process.pid, notebooks: ['C:\\Work\\N.wb', 'c:/work/n.wb'],
@@ -124,12 +131,18 @@ Module._load = originalLoad;
     assert.strictEqual(listed[0].workspace, 'Primary workspace');
     assert.strictEqual(listed[1].workspace, 'Worker workspace');
 
-    // A worker with a stale heartbeat is pruned from the client list.
+    // A live worker with a stale heartbeat remains listed. Unknown owners
+    // still expire, and a definitively dead process is removed immediately.
     clients._workers.set('ghost', {
         port: 31002, pid: process.pid, notebooks: [], generation: 'old', registeredAt: 123
     });
-    assert.strictEqual(clients._buildClientList().some(c => c.clientId === 'ghost'), false);
-    assert.strictEqual(clients._workers.has('ghost'), false);
+    assert.strictEqual(clients._buildClientList().some(c => c.clientId === 'ghost'), true);
+    clients._workers.set('unknown', { port: 31003, registeredAt: 123 });
+    clients._workers.set('dead', { port: 31004, pid: 2147483647, registeredAt: Date.now() });
+    clients._buildClientList();
+    assert.strictEqual(clients._workers.has('unknown'), false);
+    assert.strictEqual(clients._workers.has('dead'), false);
+    clients._workers.delete('ghost');
 
     // Target selection captures the notebook→kernel triple. Rebinding later is
     // observable, so the next routed call can reject rather than silently follow.

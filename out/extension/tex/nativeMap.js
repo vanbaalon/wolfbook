@@ -25,6 +25,10 @@ function originLines(location) {
 }
 
 const fs = require('fs');
+const { commentMask } = require('./texBalance');
+const DEFINING_COMMANDS = new Set(['newcommand','renewcommand','providecommand','DeclareRobustCommand',
+    'DeclareMathOperator','newenvironment','renewenvironment','def','gdef','edef','xdef',
+    'NewDocumentCommand','RenewDocumentCommand','DeclareDocumentCommand']);
 
 /** A file's lines, read once per map (these files do not change under it). */
 function linesOf(cache, file) {
@@ -63,28 +67,55 @@ function insideDefinition(text) {
     const head = /^\\([A-Za-z]+)\*?/.exec(text);
     if (!head) return false;
     let i = head[0].length;
-    const spaces = () => { while (i < text.length && /\s/.test(text[i])) i++; };
-    const controlSequence = () => { i++; if (/[A-Za-z]/.test(text[i] || '')) while (/[A-Za-z]/.test(text[i] || '')) i++; else i++; };
-    let needed;
+    const spaces = () => {
+        while (i < text.length) {
+            if (/\s/.test(text[i])) i++;
+            else if (text[i] === '%') { while (i < text.length && text[i] !== '\n') i++; }
+            else break;
+        }
+    };
+    const controlSequence = () => { i++; if (/[A-Za-z@]/.test(text[i] || '')) while (/[A-Za-z@]/.test(text[i] || '')) i++; else i++; };
+    // Consume one group, preserving nested braces and skipping comments and
+    // escaped delimiters. A ] inside {…} cannot close an optional default.
+    const group = (open, close) => {
+        let depth = 1, braces = 0;
+        i++;
+        while (i < text.length) {
+            const c = text[i++];
+            if (c === '\\') { i++; continue; }
+            if (c === '%') { while (i < text.length && text[i] !== '\n') i++; continue; }
+            if (open === '[') {
+                if (c === '{') braces++;
+                else if (c === '}') braces--;
+                if (braces > 0 || c === '{' || c === '}') continue;
+            }
+            if (c === open) depth++;
+            else if (c === close && --depth === 0) return true;
+        }
+        return false;
+    };
     spaces();
     if (/^[gex]?def$/.test(head[1])) {
         if (text[i] === '\\') controlSequence();
-        needed = 1;
+        while (i < text.length && text[i] !== '{') {
+            if (text[i] === '\\') controlSequence();
+            else { i++; spaces(); }
+        }
     } else {
-        const braced = text[i] !== '\\';
-        if (!braced) controlSequence();
-        needed = (braced ? 1 : 0) + ({ NewDocumentCommand: 2, RenewDocumentCommand: 2, DeclareDocumentCommand: 2,
-            newenvironment: 2, renewenvironment: 2 }[head[1]] || 1);
+        if (text[i] === '{') { if (!group('{','}')) return true; }
+        else if (text[i] === '\\') controlSequence();
+        else return false;
+        spaces();
+        while (text[i] === '[') { if (!group('[',']')) return true; spaces(); }
     }
-    let depth = 0, closed = 0;
-    for (; i < text.length; i++) {
-        const c = text[i];
-        if (c === '\\') { i++; continue; }
-        if (c === '%') { while (i < text.length && text[i] !== '\n') i++; continue; }
-        if (c === '{') depth++;
-        else if (c === '}' && --depth === 0 && ++closed >= needed) return false;
+    const bodies = ['newenvironment','renewenvironment','NewDocumentCommand',
+        'RenewDocumentCommand','DeclareDocumentCommand'].includes(head[1]) ? 2 : 1;
+    for (let n = 0; n < bodies; n++) {
+        spaces();
+        if (text[i] !== '{') return false;
+        if (!group('{','}')) return true;
     }
-    return depth > 0;
+    return false;
 }
 
 class NativeMap extends RenderMap {
@@ -230,6 +261,30 @@ class NativeMap extends RenderMap {
             selected.push(entry);
         }
         return selected.map(e => ({ page:e.page, x:e.x, y:e.y, w:e.w, h:e.boxHeight }));
+    }
+    /** Exact bracket geometry from the admitted view. Displaced origins still
+     * need worker membership; never infer it from their enclosing range. */
+    forwardAtFromMemory(file, line, column) {
+        if (!this.available) return null;
+        const absolute = path.resolve(file);
+        const selected = new Set();
+        let uncertain = false;
+        const before = (a,b) => a.line < b.line || a.line === b.line && a.column_utf16 <= b.column_utf16;
+        const point = {line,column_utf16:column};
+        for (const e of this.glyphsForLine(absolute,line)) {
+            let exact = false, displaced = false;
+            for (const origin of e.hit.mapped_origins || []) {
+                if (this._absolute(origin.source.file) !== absolute) continue;
+                const loc = origin.source.location;
+                if (!before(loc.start,point) || before(loc.end,point)) continue;
+                if (loc.accuracy === 'Exact') exact = true;
+                else displaced = true;
+            }
+            if (exact) selected.add(e);
+            else if (displaced) uncertain = true;
+        }
+        if (uncertain || !selected.size) return null;
+        return [...selected].map(e => ({page:e.page,x:e.x,y:e.y,w:e.w,h:e.boxHeight}));
     }
     async forwardRange(file, start, end, { isCurrent = () => true } = {}) {
         const current = () => this.available && isCurrent();
@@ -579,29 +634,34 @@ class NativeMap extends RenderMap {
         return this._inDefinition(defined) && !this._inDefinition(called) ? called : preferred;
     }
 
-    /**
-     * Whether a source position is inside a macro definition — the body of a
-     * `\newcommand`, `\def`, `\DeclareMathOperator`, … (the command on its
-     * line or up to eight lines above, its braces still open there) — or in a
-     * package or class file. Not the rest of a preamble: `\title{…}` and
-     * `\author{…}` are typed there and print where `\maketitle` puts them.
-     */
+    /** Whether the current position is in a definition, wherever it was
+     * declared. Cache all defining commands, including several on one line;
+     * checking only the first command or eight previous lines missed valid
+     * definitions. Titles and author arguments remain their own source text. */
     _inDefinition(source) {
         const file = path.resolve(this.projectDir, source.file);
         if (!/\.(tex|ltx)$/i.test(file)) return true;
         const relative = path.relative(this.projectDir, file).split(path.sep).join('/');
-        const lines = (this.source?.files?.get?.(relative)?.text ?? (linesOf(this._files, file) || []).join('\n')).split('\n');
-        const { line, column_utf16: column } = source.location.start;
-        const DEFINES = /\\(?:(?:re)?newcommand|providecommand|DeclareRobustCommand|DeclareMathOperator|(?:re)?newenvironment|[gex]?def|NewDocumentCommand|RenewDocumentCommand|DeclareDocumentCommand)\b/;
-        for (let first = line - 1; first >= Math.max(0, line - 9); first--) {
-            const at = (lines[first] || '').replace(/(^|[^\\])%.*$/, '$1').search(DEFINES);
-            if (at < 0) continue;
-            const span = first === line - 1
-                ? (lines[first] || '').slice(at, Math.max(at, column))
-                : [(lines[first] || '').slice(at), ...lines.slice(first + 1, line - 1), (lines[line - 1] || '').slice(0, column)].join('\n');
-            if (insideDefinition(span)) return true;
+        const text = this.source?.files?.get?.(relative)?.text ?? (linesOf(this._files, file) || []).join('\n');
+        const cache = (this._definitionCache ||= new Map());
+        let index = cache.get(file);
+        if (!index || index.text !== text) {
+            const comments = commentMask(text), offsets = [0], definitions = [];
+            for (let i = 0; i < text.length; i++) if (text[i] === '\n') offsets.push(i + 1);
+            // Tokenise control sequences so an escaped \\newcommand or a
+            // commented example cannot be read as a defining command.
+            for (const match of text.matchAll(/\\(?:[A-Za-z@]+|[^])/g))
+                if (!comments[match.index] && DEFINING_COMMANDS.has(match[0].slice(1))) definitions.push(match.index);
+            index = { text, offsets, definitions, positions:new Map() };
+            cache.set(file, index);
         }
-        return false;
+        const { line, column_utf16:column } = source.location.start;
+        if (!Number.isInteger(line) || line < 1 || line > index.offsets.length || !Number.isInteger(column) || column < 0) return false;
+        const at = index.offsets[line - 1] + column;
+        if (index.positions.has(at)) return index.positions.get(at);
+        const inside = index.definitions.some(start => start <= at && insideDefinition(text.slice(start, at)));
+        index.positions.set(at, inside);
+        return inside;
     }
 
     _sourceOf(glyph, page, x, y) {
@@ -637,6 +697,20 @@ class NativeMap extends RenderMap {
             xs:r.xs.sort((a,b)=>a-b), glyphs:r.ids.size })).sort((a,b)=>a.page-b.page || a.y-b.y || a.x-b.x);
     }
     lineRows(file, line) { return this._rows(this.glyphsForLine(file, line)); }
+    /** Error-only hint against the ink retained after a failed build.
+     * Stale geometry is explicitly approximate and never admitted for editing. */
+    diagnosticLocation(file, line) {
+        const absolute = path.resolve(file);
+        for (let distance = 0; distance <= 20; distance++) {
+            for (const matchedLine of distance ? [line - distance, line + distance] : [line]) {
+                if (matchedLine < 1) continue;
+                const rows = this._rows(this._lines.get(`${absolute}\0${matchedLine}`) || []);
+                if (rows.length) return { rects:rows, matchedLine,
+                    exact:distance === 0 && this.available && !this.displaced };
+            }
+        }
+        return null;
+    }
     rangeRows(file, start, end) {
         const entries = [];
         for (let line=start; line<=end; line++) entries.push(...this.glyphsForLine(file,line));

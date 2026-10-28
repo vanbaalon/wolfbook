@@ -172,6 +172,53 @@ test('save snapshots distinguish delayed own-save notifications from external wr
     watch.dispose();
 });
 
+test('the persisted version can be between will-save text and newer dirty text', () => {
+    const watch = new DiskWatch();
+    watch.beginSaving('/paper.tex', 'Before formatting  ');
+    watch.noteSaveCandidate('/paper.tex', 'After formatting');
+    watch.noteSaveCandidate('/paper.tex', 'After formatting and more typing');
+    assert.equal(watch.finishSaving('/paper.tex', 'After formatting', 'After formatting and more typing', true), true);
+    assert.equal(watch.isOwnSave('/paper.tex', 'Before formatting  '), false, 'save intent was not the written version');
+    assert.equal(watch.isOwnSave('/paper.tex', 'After formatting and more typing'), false, 'newer unsaved text is not confirmed');
+    const oldNow = Date.now;
+    const then = oldNow();
+    try {
+        Date.now = () => then + 31000;
+        assert.equal(watch.isOwnSave('/paper.tex', 'After formatting'), true, 'confirmed disk bytes do not expire with save intent');
+        assert.equal(watch.isOwnSave('/paper.tex', 'After formatting and more typing'), false, 'unsaved text is not a completed save');
+    } finally { Date.now = oldNow; }
+    watch.dispose();
+});
+
+test('an unrelated disk write during saving cannot become a confirmed own save', () => {
+    const watch = new DiskWatch();
+    watch.beginSaving('/paper.tex', 'My edit');
+    watch.noteSaveCandidate('/paper.tex', 'My edit extended');
+    assert.equal(watch.finishSaving('/paper.tex', 'Their separate edit', 'My edit extended', true), false);
+    assert.equal(watch.isOwnSave('/paper.tex', 'Their separate edit'), false);
+    const r = watch.classify('/paper.tex', { diskText: 'Their separate edit', docText: 'My edit extended', isDirty: true });
+    assert.equal(r.verdict, VERDICT.CONFLICT);
+    assert.equal(r.repeat, false);
+    watch.dispose();
+});
+
+test('a failed save transaction cannot classify later unsaved edits as saves', () => {
+    const watch = new DiskWatch(), oldNow = Date.now, then = oldNow();
+    try {
+        watch.beginSaving('/paper.tex', 'Save intent');
+        Date.now = () => then + 31000;
+        watch.noteSaveCandidate('/paper.tex', 'Much later unsaved text');
+        assert.equal(watch.isOwnSave('/paper.tex', 'Much later unsaved text'), false);
+        assert.equal(watch.isOwnSave('/paper.tex', 'Save intent'), false);
+    } finally { Date.now = oldNow; watch.dispose(); }
+});
+
+test('ordinary typing does not read or hash the whole buffer for save tracking', () => {
+    const watch = new DiskWatch();
+    watch.noteSaveCandidate('/paper.tex', () => { throw Error('no save transaction needs this text'); });
+    watch.dispose();
+});
+
 console.log('not losing somebody else\'s work\n');
 results.forEach(r => console.log(r));
 console.log(`\n${pass} passed, ${fail} failed`);

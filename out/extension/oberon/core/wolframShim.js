@@ -543,23 +543,23 @@ async function runNotebook(nbPath, opts) {
         return _runNotebookFallback(nbPath, opts);
     }
 
-    // 2. Show the notebook in an editor tab to force the wolfbook controller to be
-    // associated BEFORE we call createNotebookCellExecution.  Without this, newly-
-    // created notebooks (e.g. clean.wb written by the harness) trigger the 'not
-    // associated' error inside execute().  The re-association dance there takes
-    // ≥2000ms, which races with our 500ms poll → false allClean:true with no output.
-    // preserveFocus:true avoids stealing the user's cursor.
-    try {
-        await vscode.window.showNotebookDocument(nbDoc, {
-            viewColumn: vscode.ViewColumn.Active,
-            preserveFocus: true,
-        });
-    } catch (_) { /* non-fatal — proceed anyway */ }
+    // 2. Notify about agent work without replacing the user's active paper.
+    void require('../../tools/shared').notifyAgentNotebookEvent({ notebook: nbDoc });
 
     // 3. Get the wolfbook controller — prefer silent (agent-mode) execution.
     const status = kernelStatus();
     const ctrl = status.available ? status.controller : null;
     const useSilent = !!(ctrl && typeof ctrl.execute === 'function');
+
+    if (useSilent && !ctrl.selectedNotebooks.has(nbDoc)) {
+        const assoc = await associateNotebook(nbDoc);
+        if (!assoc?.associated) {
+            const error = 'Notebook controller is not selected. Click Open Notebook in the Wolfbook AI notification, then retry.';
+            return { allClean: false, cellCount: 0, allResults: [], usedFallback: false,
+                failures: [{ cellIndex: null, cellId: null, output: null, messages: null, error }],
+                reason: 'not-associated' };
+        }
+    }
 
     let fairyLease = null;
     if (useSilent) {
@@ -784,19 +784,17 @@ function _snapshotViewport() { return null; }
  *   recovery in execute() times out, the cell is silently skipped, and
  *   evalInNotebook returns { ok: true, value: null }.
  *
- * Fix: show the document with preserveFocus:true (so it becomes the active
- * editor without stealing keyboard focus), then call notebook.selectKernel
- * with our specific id/extension — the silent, no-picker form that reliably
- * triggers onDidChangeSelectedNotebooks for the now-active notebook.
+ * Hidden, unassociated notebooks require an explicit user open. The shared
+ * helper records affinity but never replaces the user's tab for agent work.
  */
 async function associateNotebook(nbDoc) {
     // Thin wrapper — the shared implementation lives in kernel/association.js
     // (extracted 2026-08-18 so the MCP cell pipeline uses the same fix).
     const ks = kernelStatus();
-    if (!ks.available) return;
+    if (!ks.available) return { associated: false, method: 'no-controller' };
     const { associateNotebook: assoc } = require('../../kernel/association');
-    // Oberon shows the working notebook deliberately — keep it active.
-    await assoc(ks.controller, nbDoc, { restoreActive: false });
+    void require('../../tools/shared').notifyAgentNotebookEvent({ notebook: nbDoc });
+    return await assoc(ks.controller, nbDoc, { allowReveal: false });
 }
 
 // ── Agent-view side channel (Oberon-only, on-demand) ─────────────────────────
@@ -908,7 +906,11 @@ async function evalInNotebook(nbDoc, code, opts = {}) {
     // updateNotebookAffinity(Preferred) is the VS Code-blessed way to auto-select
     // a controller for a notebook without showing the kernel picker.
     if (!ctrl.selectedNotebooks.has(nbDoc)) {
-        await associateNotebook(nbDoc);
+        const assoc = await associateNotebook(nbDoc);
+        if (!assoc?.associated) {
+            return { ok: false, kind: 'not_associated', value: null, durationMs: Date.now() - t0,
+                messages: 'Click Open Notebook in the Wolfbook AI notification to select its kernel, then retry.', prints: null };
+        }
     }
 
     // Build cells: optional reflection on previous probe, optional note title, then code cell.

@@ -24,10 +24,13 @@ async function main() {
     const map = { available: true, exact: true, lineRows: () => [],
         objectAtLine: () => heading,
         objectRenderBoxes: () => ({ exact: false, rects: [{ page: 1, y: 100 }] }) };
-    const compare = v._compareMap({ map }, '/paper.tex');
+    let compare = v._compareMap({ map }, '/paper.tex');
     assert.deepEqual(compare.rowsFor(3), ink);
     assert.deepEqual(compare.objectRects(heading), ink);
     v._lineInkRects = () => [];
+    // Geometry is memoized within a placement pass. A refreshed map starts
+    // the next pass, as ReviewUi.refresh does when page geometry changes.
+    compare = v._compareMap({ map }, '/paper.tex');
     assert.deepEqual(compare.objectRects(heading), [], 'unmatched heading must not highlight its neighbour');
     delete v._lineInkRects;
     v.panel = {}; v.followMode = 'scroll'; v._post = m => messages.push(m);
@@ -175,7 +178,7 @@ async function main() {
         w.root = '/paper.tex'; w._openedGeneration = 4; w.status = () => {};
         w.coord = { roots: new Map([['/paper.tex', st]]), liveOverlay: () => null, isCurrent: () => current };
         stub.workspace.openTextDocument = async () => ({ uri: { fsPath: '/paper.tex' } });
-        w.refresh = async () => {};
+        w.refresh = async options => { assert.ok(!options?.force, 'a review build does not force a duplicate PDF open'); };
         w._post = () => {};
         w.coord.build = (_doc, o) => { rebuilt++; assert.equal(o.priority, true, 'a build the reader waits for, on the paper\'s own lane'); assert.ok(!o.force, 'not latexmk'); return new Promise(r => { release = r; }); };
         assert.equal(w.reviewPageBehind(4), true, 'the text moved on since the page was built');
@@ -212,27 +215,35 @@ async function main() {
         assert.equal(placed, 1, 'the review is re-placed on the page shown');
         assert.equal(replayed, 1);
     }
-    // An agent's change: the waited-for build, one per burst, and one more
-    // for a change that lands while it runs.
+    // Agent notifications delegate immediately to the shared external queue;
+    // they no longer create a second priority-build timer in the viewer.
     {
+        const w = Object.create(TexViewer.prototype), queued = [];
+        w.root = '/paper.tex'; w.panel = {};
+        w.coord = { rootFor: () => '/paper.tex', scheduleExternal: doc => queued.push(doc.uri.fsPath) };
+        w.compileWaited = () => { throw Error('agent edits must not force separate builds'); };
+        w.compileForAgent('/paper.tex'); w.compileForAgent('/sections/a.tex');
+        assert.deepEqual(queued, ['/paper.tex', '/paper.tex']);
+        assert.equal(w._agentCompileTimer, undefined);
+        w.coord.rootFor = () => '/other.tex'; w.compileForAgent('/other/x.tex');
+        assert.equal(queued.length, 2, 'another paper cannot queue this one');
+    }
+    // An agent notification can arrive during a build that already captured
+    // its bytes. Only a still-stale snapshot needs a follow-up build.
+    for (const caughtUp of [true, false]) {
         const w = Object.create(TexViewer.prototype);
-        const statuses = []; let builds = 0; const releases = [];
-        w.root = '/paper.tex'; w.panel = {}; w.status = t => statuses.push(t); w._post = () => {}; w.refresh = async () => {};
-        w.coord = { rootFor: () => '/paper.tex', build: (_d, o) => { builds++; assert.equal(o.priority, true); return new Promise(r => releases.push(r)); } };
-        w.compileForAgent('/paper.tex'); w.compileForAgent('/sections/a.tex'); w.compileForAgent('/paper.tex');
-        await new Promise(r => setTimeout(r, 450));
-        assert.equal(builds, 1, 'a burst of writes is one build');
-        assert.ok(statuses.some(t => /agent changed the paper/.test(t)), 'and the reader is told why the page glows');
-        w.compileForAgent('/paper.tex');
-        await new Promise(r => setTimeout(r, 450));
-        assert.equal(builds, 1, 'not two at once');
-        releases[0](); await new Promise(r => setTimeout(r, 20));
-        assert.equal(builds, 2, 'the change that landed meanwhile gets its build after');
-        releases[1](); await new Promise(r => setTimeout(r, 20));
-        w.coord.rootFor = () => '/other.tex';
-        w.compileForAgent('/other/x.tex');
-        await new Promise(r => setTimeout(r, 450));
-        assert.equal(builds, 2, 'another paper\'s change does not compile this one');
+        const st = { generation:{ generation:1 }, map:{}, files:[], sourceAhead:true };
+        let builds = 0, release;
+        w.root = '/paper.tex'; w.panel = {}; w.status = () => {}; w._post = () => {}; w.refresh = async () => {};
+        w.coord = { roots:new Map([[w.root,st]]), liveOverlay:() => null, isCurrent:() => caughtUp,
+            build:() => { builds++; return builds === 1 ? new Promise(resolve => { release = resolve; }) : Promise.resolve(st); } };
+        const first = w.compileWaited('agent edit');
+        await new Promise(resolve => setImmediate(resolve));
+        w.compileWaited('another agent edit', { again:true });
+        st.sourceAhead = !caughtUp;
+        release(st); await first;
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(builds, caughtUp ? 1 : 2, 'only source not included in the completed build compiles again');
     }
     console.log('Review navigation, real PDF selection geometry, and copy-path menu: OK');
 }

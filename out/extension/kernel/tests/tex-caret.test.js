@@ -247,6 +247,9 @@ console.log('resolution column vs caret column');
 const Module = require('module');
 const stubVscode = require('./_stub-vscode').makeVscodeStub();
 // The shared stub has no Selection/Range — _onEditCaret builds one.
+stubVscode.Range = class {
+    constructor(start, end) { this.start = start; this.end = end; }
+};
 if (!stubVscode.Selection) {
     stubVscode.Selection = class {
         constructor(anchor, active) {
@@ -470,6 +473,7 @@ function flatDoc(fsPath = '/x.tex') {
         uri: { fsPath, toString: () => `file://${fsPath}` },
         positionAt: (n) => ({ line: 0, character: n }),
         offsetAt: (pos) => pos.character,
+        getText: (range) => range ? 'x'.repeat(400).slice(range.start.character, range.end.character) : 'x'.repeat(400),
         lineCount: 1,
         lineAt: () => ({ text: 'x'.repeat(400) }),
     };

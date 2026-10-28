@@ -43,6 +43,12 @@ function workshopReplica(file, { exists = fs.existsSync, read = f => fs.readFile
     return null;
 }
 
+function overleafConfiguration(vscode, file) {
+    const uri = file && vscode.Uri?.file(file);
+    return { config: vscode.workspace.getConfiguration('wolfbook.tex', uri),
+        scope: uri && vscode.workspace.getWorkspaceFolder?.(uri) ? vscode.ConfigurationTarget?.WorkspaceFolder : vscode.ConfigurationTarget?.Global };
+}
+
 class OverleafLive {
     constructor({ vscode, context, target, log = () => {}, deps = null }) {
         this.vscode = vscode;
@@ -56,7 +62,7 @@ class OverleafLive {
         if (this.status) this.status.command = 'wolfbook.tex.overleafMenu';
     }
 
-    mode() { return this.vscode.workspace.getConfiguration('wolfbook.tex').get('overleafSync', 'git'); }
+    mode(file = this.target()) { return overleafConfiguration(this.vscode, file).config.get('overleafSync', 'git'); }
     accepted() { return this.context.globalState?.get(ACCEPTED_KEY) === true; }
     installed() { return !!this.vscode.extensions?.getExtension?.(WORKSHOP_ID); }
 
@@ -78,8 +84,8 @@ class OverleafLive {
      */
     async configurationChanged() {
         if (this.mode() === 'live' && !(await this.acceptRisks())) {
-            await this.vscode.workspace.getConfiguration('wolfbook.tex')
-                .update('overleafSync', 'git', this.vscode.ConfigurationTarget.Global);
+            const { config, scope } = overleafConfiguration(this.vscode, this.target());
+            await config.update('overleafSync', 'git', scope);
         }
         if (this.mode() !== 'live') this.link.disconnect();
         this.refresh();
@@ -89,8 +95,8 @@ class OverleafLive {
     async start() {
         if (!(await this.acceptRisks())) return false;
         if (this.mode() !== 'live') {
-            await this.vscode.workspace.getConfiguration('wolfbook.tex')
-                .update('overleafSync', 'live', this.vscode.ConfigurationTarget.Global);
+            const { config, scope } = overleafConfiguration(this.vscode, this.target());
+            await config.update('overleafSync', 'live', scope);
         }
         const file = this.target();
         if (!file) { this.vscode.window.showInformationMessage('Open the paper\'s .tex file first.'); return false; }
@@ -157,4 +163,4 @@ async function parseBase(url) {
     try { return require('./overleafClient').parseProjectUrl(url).base; } catch (_) { return null; }
 }
 
-module.exports = { OverleafLive, workshopReplica, LIVE_RISKS, WORKSHOP_ID, ACCEPTED_KEY };
+module.exports = { OverleafLive, workshopReplica, LIVE_RISKS, WORKSHOP_ID, ACCEPTED_KEY, overleafConfiguration };

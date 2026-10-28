@@ -119,6 +119,7 @@ async function waitForCompletion(ctrl, cell, before, { deadline, token, provenan
  * outputs.  Success is never inferred from mere absence of activity.
  */
 async function runCellViaPipeline(ctrl, editor, idx, options = {}) {
+    await require('../kernel/ensure-ready').ensureKernelReady(ctrl);
     if (!ctrl || typeof ctrl.execute !== 'function' || ctrl.kernelStatusString !== 'resolved') {
         throw new Error('Wolfram kernel is not running.');
     }

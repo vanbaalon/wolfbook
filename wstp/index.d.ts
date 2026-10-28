@@ -144,6 +144,19 @@ export class WstpSession {
     evaluate(expr: string, opts?: EvalOptions): Promise<EvalResult>;
 
     /**
+     * Auto-routing evaluator that transparently chooses the best evaluation
+     * path based on the kernel's current state.
+     *
+     * - Idle: runs immediately via `subWhenIdle` (lowest-priority queue).
+     * - Busy: runs inside the next `Dialog[]` cycle (via the timer thread's
+     *   auto-interrupt mechanism — no JS round-trip needed).
+     *
+     * @param expr  Wolfram Language expression string to evaluate.
+     * @returns     Promise that resolves with the WExpr result.
+     */
+    subAuto(expr: string): Promise<WExpr>;
+
+    /**
      * Exit the currently-open Dialog[] subsession.
      *
      * Sends `Return[retVal]` as `EnterTextPacket` — the interactive-context
@@ -186,8 +199,30 @@ export class WstpSession {
      */
     interrupt(): boolean;
 
-    /** True while a Dialog[] subsession is open on this link. */
+    /**
+     * Unconditionally reset all dialog state on the Node.js side.
+     *
+     * Drains the internal dialog queue, immediately rejecting every pending
+     * dialogEval() and exitDialog() promise with an error — no callers are
+     * left waiting forever.  Clears `isDialogOpen` to `false`.
+     *
+     * This does *not* send any packet to the kernel — it only fixes Node-side
+     * bookkeeping. Use it in error-recovery paths, before abort(), or
+     * whenever you need to guarantee clean dialog state.
+     *
+     * @returns  true if `isDialogOpen` was true before the call.
+     */
+    closeAllDialogs(): boolean;
+
+    /**
+     * True while a Dialog[] subsession is open on this link.
+     */
     readonly isDialogOpen: boolean;
+
+    /**
+     * True if the WSTP link is dead or has encountered a fatal error.
+     */
+    readonly isLinkDead: boolean;
 
     /**
      * True when the session is fully ready to accept a new evaluation:
@@ -274,10 +309,19 @@ export class WstpSession {
     createSubsession(kernelPath?: string): WstpSession;
 
     /**
-     * Send Quit[] to the kernel, close the link, and release all resources.
-     * Subsequent calls to evaluate() will reject immediately.
+     * Stop accepting work and close an idle session. Returns false while a
+     * native reader or its completion callbacks are active; the link is retained.
+     * For isolated shutdown, beginClose(), verify the owned PID, terminate(),
+     * await canClose, then close(). Never free a busy native session.
      */
-    close(): void;
+    close(): boolean;
+
+    /** Stop accepting/dispatching new work without touching WSTP. */
+    beginClose(): void;
+    /** Force-terminate only this session's kernel process; never closes WSTP. */
+    terminate(): boolean;
+    /** True only once native readers AND completion callbacks have drained. */
+    readonly canClose: boolean;
 
     /** True while the link is open and the kernel is running. */
     readonly isOpen: boolean;
@@ -294,6 +338,28 @@ export class WstpSession {
      * it in cleanup paths.
      */
     readonly kernelPid: number;
+
+    /**
+     * Multi-dimensional kernel state snapshot as a human-readable string.
+     *
+     * Returns a space-separated list of `dimension=value` pairs covering
+     * five independent state dimensions:
+     *
+     * | Dimension  | Values                                        |
+     * |------------|-----------------------------------------------|
+     * | `activity` | `Idle`, `Eval`, `SubIdle`, `WhenIdle`          |
+     * | `dialog`   | `None`, `UserDialog`, `DynDialog`              |
+     * | `sub`      | `None`, `DynExpr`, `SubBusy`                   |
+     * | `abort`    | `None`, `Aborting`                             |
+     * | `link`     | `Alive`, `Dead`                                |
+     *
+     * Example: `"activity=Eval dialog=DynDialog sub=DynExpr abort=None link=Alive"`
+     *
+     * Dimensions are independent — e.g. `activity=Eval` and `dialog=DynDialog`
+     * can be active simultaneously.  Every transition is logged via `setDiagHandler`
+     * with the `[State:<dim>]` category tag.
+     */
+    readonly kernelState: string;
 
     // ── Dynamic eval API ────────────────────────────────────────────────────
 
@@ -431,21 +497,10 @@ export class WstpReader {
 export function setDiagHandler(fn: ((msg: string) => void) | null | undefined): void;
 
 /**
- * Pure C++ structural syntax checker — no kernel required.
+ * Addon version string — mirrors the `version` field in `package.json`.
  *
- * Checks bracket / brace / paren matching, unclosed string literals, and
- * unclosed (possibly nested) `(* ... *)` comments.  Runs synchronously on
- * the calling thread; there is no async overhead.
- *
- * Returns a JSON string in the same format as the WL `VsCodeSyntaxCheck`
- * function so existing error-display code needs no changes:
- *
- * ```json
- * {"errors":[]}
- * {"errors":[{"message":"Unclosed '['","line":3,"column":5}]}
- * ```
- *
- * @param code  Wolfram Language source text (UTF-8).
- * @returns     JSON string `{"errors":[...]}`.
+ * @example
+ * const { version } = require('./build/Release/wstp.node');
+ * console.log(version);  // "0.6.2"
  */
-export function syntaxCheck(code: string): string;
+export declare const version: string;

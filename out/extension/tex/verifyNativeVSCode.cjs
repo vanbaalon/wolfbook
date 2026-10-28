@@ -30,6 +30,20 @@ exports.run = async function() {
     const context = { extensionUri:vscode.Uri.file(path.resolve(__dirname, '../../..')),
         workspaceState:memento(), globalState:memento(), subscriptions:[] };
     const viewer = new TexViewer(context, coord, projection);
+    // macOS suspends animation frames in an isolated/occluded test window.
+    // PDF.js service checks still need to finish canvas rendering there. Use
+    // a controlled frame clock in this harness only; it does not establish
+    // physical frame timing or visual acceptance for the product.
+    const buildHtml = viewer._html.bind(viewer);
+    viewer._html = () => {
+        const html = buildHtml();
+        const nonce = /<script nonce="([^"]+)"/.exec(html)?.[1];
+        assert.ok(nonce, 'the test must use the real webview CSP');
+        return html.replace('<body>', `<body><script nonce="${nonce}">
+window.requestAnimationFrame = callback => setTimeout(() => callback(performance.now()), 16);
+window.cancelAnimationFrame = id => clearTimeout(id);
+</script>`);
+    };
     let subscription, messagesSubscription;
     let workerCrashRecovered = false;
     let liveClickVerified = false;
@@ -258,6 +272,33 @@ exports.run = async function() {
             await until(() => viewer._openedPdfHash === st.generation.pdfHash &&
                 viewer._openedGeneration === st.generation.generation, 'rebuilt conventional PDF');
             await assert.rejects(fs.access(path.join(folder,'.wlatex')), { code:'ENOENT' });
+
+            // Exercise the same mini-editor protocol with the conventional
+            // map. A step opens the source block without requiring native ink.
+            const lines = doc.getText().split(/\r?\n/);
+            const line = lines.findIndex(text => text.startsWith('Alpha')) + 1;
+            const block = viewer._blockAt(doc, lines, doc.uri.fsPath, line);
+            await viewer._openBlockSession(doc, doc.uri.fsPath, block, st);
+            const card = viewer._edit;
+            assert.equal(card.native, false);
+            const before = card.lastText.replace(/\r\n?/g, '\n');
+            const typed = before.slice(0, 1) + '\nNext ' + before.slice(1);
+            assert.equal(await viewer._applyEditChange({ editId: card.id, text: typed,
+                beforeText: before, operation: { before, start: 1, end: 1, text: '\nNext ' } }), true);
+            assert.equal(doc.eol, eol === 'crlf' ? vscode.EndOfLine.CRLF : vscode.EndOfLine.LF);
+            assert.ok(card.lastText.includes(eol === 'crlf' ? '\r\nNext ' : '\nNext '));
+            await viewer._onEditCaret({ editId: card.id, start: 2, end: 6 });
+            assert.equal(editor.selection.start.line, line);
+            assert.equal(editor.selection.start.character, 0);
+            assert.equal(editor.selection.end.character, 4);
+            const oldText = card.lastText;
+            await editor.edit(builder => builder.insert(doc.positionAt(card.startOffset + 1), 'EXTERNAL'));
+            await until(() => card.lastText !== oldText, 'standard card observes source edits');
+            const source = doc.getText();
+            assert.equal(await viewer._applyEditChange({ editId: card.id, text: oldText + 'stale',
+                beforeText: oldText }), false);
+            assert.equal(doc.getText(), source, 'a stale card cannot overwrite the source in standard mode');
+            await viewer._closeEditSession({ editId: card.id });
         }
         if (mode === 'native') {
             // THE TIKZ TOOLBAR, as the webview drives it (tikzResolve,
@@ -356,17 +397,19 @@ exports.run = async function() {
         }
         await fs.writeFile(path.join(folder, '../vscode-acceptance.json'), JSON.stringify({
             result:'PASS', vscode:vscode.version, node:process.version,
-            platform:process.platform, arch:process.arch, mode, eol, multiline_card_verified:mode === 'native', native_preview:mode === 'native', mini_editor_precise_edit:mode === 'native', mini_editor_conflict_rejected:mode === 'native', unchanged_canvas_reused:mode === 'native',
+            platform:process.platform, arch:process.arch, mode, eol, multiline_card_verified:true, native_preview:mode === 'native', mini_editor_precise_edit:true, mini_editor_conflict_rejected:true, unchanged_canvas_reused:mode === 'native',
             default_without_wlatex:mode === 'default', unavailable_wlatex_fallback:mode === 'missing',
             conventional_unsaved_rebuild:mode !== 'native', authoritative_native_handoff:mode === 'native',
             real_pdfjs_opened:true, unsaved_source_edit:true, translated_inverse_navigation:mode === 'native',
             actual_source_worker_crash_recovered:workerCrashRecovered, live_page_click_verified:liveClickVerified, keystroke_to_preview_ms:keystrokeToPreviewMs, edit_applied_ms:editAppliedMs, tikz_toolbar_edit_verified:tikzEditVerified, native_pdf_range_transport:mode === 'native', native_pdf_handles_released:mode === 'native', unchanged_page_text_reused:mode === 'native',
             pointer_gestures_verified:false, visual_acceptance_verified:false,
+            animation_clock:'controlled test timer; physical frame timing not verified',
         }, null, 2));
     } catch (error) {
         await fs.writeFile(path.join(folder, '../vscode-acceptance.json'), JSON.stringify({
             result:'FAIL', error:error.stack || String(error), vscode:vscode.version, node:process.version,
             messages:messages.map(m => m.type === 'timing' ? `timing:${m.kind || 'marks'}:${m.worker || ''}` : m.type),
+            viewer_errors:messages.filter(m => m.type === 'viewerError'),
         }, null, 2));
         throw error;
     } finally {

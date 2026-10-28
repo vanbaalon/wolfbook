@@ -128,11 +128,13 @@ const stub = {
 
 const origLoad = Module._load;
 Module._load = function (req, ...rest) { return req === 'vscode' ? stub : origLoad.call(this, req, ...rest); };
-for (const m of ['../../tex/reviewUi', '../../tex/reviewBus']) {
+const texDir = process.env.WPAPER_EXT_ROOT
+    ? path.join(process.env.WPAPER_EXT_ROOT,'out/extension/tex') : path.resolve(__dirname,'../../tex');
+for (const m of [path.join(texDir,'reviewUi'), path.join(texDir,'reviewBus')]) {
     try { delete require.cache[require.resolve(m)]; } catch (_) { /* first run */ }
 }
-const { ReviewUi, describeHunk } = require('../../tex/reviewUi');
-const busMod = require('../../tex/reviewBus');
+const { ReviewUi, describeHunk } = require(path.join(texDir,'reviewUi'));
+const busMod = require(path.join(texDir,'reviewBus'));
 Module._load = origLoad;
 
 // --- the paper ---------------------------------------------------------------
@@ -172,7 +174,7 @@ function makeUi(o = {}) {
         viewer, output: { appendLine() {} },
         mapView: o.mapView || (() => ({})),
     });
-    ui.register({ subscriptions: [] });
+    ui.register({ subscriptions: [], globalStorageUri: o.storage ? { fsPath:o.storage } : undefined });
     return { ui, viewer, posted, revisionComments };
 }
 
@@ -331,7 +333,8 @@ test('DECIDING THE LAST CHANGE DOES NOT LEAVE THE FOCUS NOWHERE', async () => {
     assert.strictEqual(ui.sessionFor(FILE), null, 'and deciding the last one ends the review');
 });
 
-test('DECIDING A CHANGE NEVER AUTO-SCROLLS TO A DISTANT PAGE', async () => {
+test('KEEP AND UNDO ADVANCE TO A DISTANT CHANGE', async () => {
+    for (const decision of ['keep','undo']) {
     const TWO = AGENT.replace('A second paragraph nobody is arguing about.',
         'A second paragraph somebody is arguing about.');
     const mapView = () => ({
@@ -346,11 +349,12 @@ test('DECIDING A CHANGE NEVER AUTO-SCROLLS TO A DISTANT PAGE', async () => {
     const [first, second] = ui.sessionFor(FILE).hunks.map(h => h.id);
     await ui.show(FILE, first);
     posted.length = 0;
-    await ui.keep(FILE, first);
-    assert.strictEqual(ui.focused.has(FILE), false,
-        'the next distant correction is left for an explicit navigation gesture');
-    assert.ok(!posted.some(p => p && p.focus === second),
-        'the viewer was not told to jump across the paper');
+    await ui[decision](FILE, first);
+    assert.strictEqual(ui.focused.get(FILE), second,
+        'the next correction is selected regardless of page distance');
+    assert.ok(posted.some(p => p && p.focus === second),
+        'the viewer is told to navigate across the paper');
+    }
 });
 
 test('KEEP removes exactly that change and leaves the document alone', async () => {
@@ -363,6 +367,37 @@ test('KEEP removes exactly that change and leaves the document alone', async () 
     assert.strictEqual(DOC.getText(), text, 'keeping changes no text');
     assert.strictEqual(ui.sessionFor(FILE), null, 'and the review is over');
     assert.strictEqual(editsApplied.length, 0, 'no edit was applied');
+});
+
+test('approval uses existing placements without a fresh comparison or a compile',async()=>{
+    const TWO=AGENT.replace('A second paragraph nobody is arguing about.','A second paragraph somebody is arguing about.');
+    const {ui,viewer,posted}=makeUi({docText:TWO,mapView:movableMap({generation:7,y0:20})});
+    await ui.noteAgentChange({file:FILE,baseText:BASE});
+    const [first,second]=ui.sessionFor(FILE).hunks;
+    const refresh=ui.refresh,mapView=ui.mapView;
+    ui.refresh=()=>{throw Error('approval must not recompare the file');};
+    ui.mapView=()=>{throw Error('approval must not request another map');};
+    viewer.reviewPageBehind=g=>{assert.equal(g,7);return false;};
+    viewer.compileForReview=()=>{throw Error('approval must not compile');};
+    await ui.keep(FILE,first.id);
+    assert.equal(ui.sessionFor(FILE).hunks[0].id,second.id);
+    assert.ok(posted.some(p=>p?.focus===second.id));
+    assert.equal(DOC.getText(),TWO);assert.equal(editsApplied.length,0);
+    ui.refresh=refresh;ui.mapView=mapView;
+    ui.dispose();
+});
+
+test('another window can approve without losing this window\'s current placements',async()=>{
+    const storage=fs.mkdtempSync(path.join(DIR,'placed-keep-'));
+    const TWO=AGENT.replace('A second paragraph nobody is arguing about.','A second paragraph somebody is arguing about.');
+    const mapView=movableMap({generation:7,y0:20});
+    const {ui:first}=makeUi({storage,docText:TWO,mapView});
+    await first.noteAgentChange({file:FILE,baseText:BASE});const ids=first.sessionFor(FILE).hunks.map(h=>h.id);
+    const {ui:second}=makeUi({storage,docText:TWO,mapView});
+    await first.keep(FILE,ids[0]);const remaining=second.sessionFor(FILE);
+    assert.equal(remaining.generation,7);assert.equal(remaining.hunks.length,1);
+    assert.ok(remaining.hunks[0].rects.length);assert.equal(remaining.hunks[0].id,ids[1]);
+    first.dispose();second.dispose();
 });
 
 test('ACCEPT + COMMENT enters the shared paper comment stream before the hunk leaves', async () => {
@@ -440,6 +475,61 @@ test('AN EDIT FROM THE MCP TOOL IS REVIEWABLE — the bus carries it', async () 
     assert.strictEqual(s.pendingCount, 1);
 });
 
+test('mini-editor edits are accepted before the dirty flag, then survive save, compile and reload without hiding agent edits', async () => {
+    const storage = fs.mkdtempSync(path.join(DIR, 'reader-dirty-transition-'));
+    const active = stub.window.activeTextEditor;
+    const { ui } = makeUi({ storage });
+    try {
+        stub.window.activeTextEditor = undefined; // The mini-editor is a webview.
+        ui.observe(FILE, AGENT);
+        await ui.noteAgentChange({ file:FILE, baseText:BASE, source:'disk' });
+        const before = DOC.getText();
+        const from = 'A second paragraph nobody is arguing about.';
+        const to = 'My own mini-editor sentence.';
+        busMod.announceAgentEdit({ file:FILE, origin:'user', source:'wpaper.viewer', phase:'begin' });
+        DOC._setText(before.replace(from, to));
+        DOC.isDirty = false; // applyEdit updates text before VS Code updates this flag.
+        for (const fn of changeHandlers) fn({ document:DOC, contentChanges:[{
+            rangeOffset:before.indexOf(from), rangeLength:from.length, text:to,
+        }] });
+        busMod.announceAgentEdit({ file:FILE, origin:'user', source:'wpaper.viewer', phase:'end' });
+        const session = ui.sessionFor(FILE);
+        assert.equal(session.baseText, BASE.replace(from,to), 'accept the reader at the first event');
+        await ui.refresh(FILE); // A build/placement can finish before the dirty metadata event.
+        assert.equal(session.pendingCount,1, 'a clean-looking buffer must not undo the accepted reader baseline');
+        assert.equal(session._lastText,DOC.getText(), 'the new mini-editor source wins over the older disk copy');
+        DOC.isDirty = true;
+        for (const fn of changeHandlers) fn({ document:DOC,contentChanges:[] });
+        await new Promise(r => setTimeout(r,280));
+        assert.equal(ui.sessionFor(FILE).pendingCount,1, 'the delayed review refresh contains only the original agent edit');
+        const saved = DOC.getText();
+        fs.writeFileSync(FILE,saved); DOC.isDirty = false;
+        ui.observe(FILE,saved,{ ownSave:true });
+        ui.refreshPlacement();
+        await new Promise(r => setTimeout(r,90));
+        ui.dispose();
+        const { ui:reloaded } = makeUi({ storage,docText:saved,diskText:saved });
+        try {
+            await reloaded.refresh(FILE);
+            assert.equal(reloaded.sessionFor(FILE).pendingCount,1);
+            assert.equal(reloaded.sessionFor(FILE).baseText,BASE.replace(from,to));
+            assert.ok(reloaded.sessionFor(FILE).undo(reloaded.sessionFor(FILE).hunks[0].id).ok,
+                'the remaining agent change is still reviewable and undoable');
+            const next = saved.replace('both allowed sectors in the strip.', 'both new sectors in the strip.');
+            fs.writeFileSync(FILE,next); DOC._setText(next);
+            for (const fn of changeHandlers) fn({ document:DOC,contentChanges:[{
+                rangeOffset:0,rangeLength:saved.length,text:next,
+            }] });
+            await reloaded.noteAgentChange({ file:FILE,baseText:saved,source:'github' });
+            assert.equal(reloaded.sessionFor(FILE).pendingCount,1);
+            assert.ok(reloaded.sessionFor(FILE).hunks[0].ourText.includes('new sectors'),
+                'a later collaborator change remains pending');
+            assert.ok(!reloaded.sessionFor(FILE).hunks[0].ourText.includes('My own'),
+                'the accepted reader sentence is excluded from the later revision');
+        } finally { reloaded.dispose(); }
+    } finally { stub.window.activeTextEditor = active; ui.dispose(); }
+});
+
 test('AN MCP EDIT THROUGH THE BUFFER IS REVIEWABLE, NOT MIRRORED AWAY', async () => {
     // paper_applyEdit writes through the OPEN BUFFER, so the change event it
     // provokes is indistinguishable from typing — and the review mirrors the
@@ -477,6 +567,36 @@ test('AN MCP EDIT THROUGH THE BUFFER IS REVIEWABLE, NOT MIRRORED AWAY', async ()
     assert.ok(s.hunks.every(h => !s.edited.has(h.id)),
         'and neither change is marked as something the reader typed');
     assert.ok(s.hunks.every(h => s.undo(h.id).ok), 'so both can be undone');
+});
+
+test('a reader dirty-transition marker cannot suppress the next external buffer edit', async () => {
+    const active = stub.window.activeTextEditor;
+    const { ui } = makeUi();
+    try {
+        stub.window.activeTextEditor = undefined;
+        await ui.noteAgentChange({ file:FILE,baseText:BASE,source:'disk' });
+        const before = DOC.getText(), from = 'nobody', to = 'the reader';
+        busMod.announceAgentEdit({ file:FILE,origin:'user',source:'wpaper.viewer',phase:'begin' });
+        DOC._setText(before.replace(from,to));
+        DOC.isDirty = false;
+        for (const fn of changeHandlers) fn({ document:DOC,contentChanges:[{
+            rangeOffset:before.indexOf(from),rangeLength:from.length,text:to,
+        }] });
+        busMod.announceAgentEdit({ file:FILE,origin:'user',source:'wpaper.viewer',phase:'end' });
+        const own = DOC.getText(), at = own.indexOf('\\end{document}');
+        const insert = 'An external agent added this paragraph.\n';
+        DOC._setText(own.slice(0,at)+insert+own.slice(at));
+        DOC.isDirty = true;
+        for (const fn of changeHandlers) fn({ document:DOC,contentChanges:[{
+            rangeOffset:at,rangeLength:0,text:insert,
+        }] });
+        await new Promise(r => setTimeout(r,20));
+        const session = ui.sessionFor(FILE);
+        assert.equal(session.pendingCount,2, 'both external changes remain pending');
+        assert.equal(session.baseText,BASE.replace(from,to), 'only the reader edit is accepted');
+        assert.ok(session.hunks.some(h => h.ourText.includes('external agent')));
+        assert.equal(ui._readerPending.has(FILE),false,'the newer document event invalidates the reader snapshot');
+    } finally { stub.window.activeTextEditor = active; ui.dispose(); }
 });
 
 test('TRACK MY CHANGES: page edits are the reader\'s own changes in the review, to keep or undo', async () => {
@@ -621,7 +741,9 @@ test('KEEPING A SECTION DECIDES ITS CHANGES AND LEAVES THE REST', async () => {
     assert.strictEqual(ui.sessionFor(FILE).pendingCount, 1, 'only the other one is left');
     assert.ok(ui.sessionFor(FILE).baseText.includes('in the strip.'), 'that one is agreed to');
     assert.ok(!ui.sessionFor(FILE).baseText.includes('rewrote as well'), 'the other is not');
-    assert.strictEqual(posted[posted.length - 1].pending, 1, 'and the panel is told');
+    assert.ok(posted.some(p=>p?.pending===1), 'and the panel is told');
+    assert.strictEqual(ui.focused.get(FILE),ui.sessionFor(FILE).hunks[0].id,
+        'approving a section continues at the next remaining correction');
 });
 
 test('keeping a group of nothing does nothing at all', async () => {
@@ -837,6 +959,129 @@ test('a paper that will not compile has no placement, and says so rather than gu
     assert.strictEqual(last.generation, null, 'no render, no generation');
     assert.strictEqual(last.groups[0].hunks[0].rects.length, 0, 'and no boxes to be wrong about');
     assert.strictEqual(last.pending, 1, 'the change is still on the list');
+});
+
+test('approved buffer changes do not return when the saved disk observation predates Keep', async () => {
+    const storage = fs.mkdtempSync(path.join(DIR, 'reload-'));
+    const TWO = AGENT.replace('A second paragraph nobody is arguing about.',
+        'A second paragraph somebody is arguing about.');
+    for (const how of ['all', 'one', 'section']) {
+        const folder = path.join(storage, how);
+        const { ui } = makeUi({ docText:TWO, diskText:BASE, dirty:true, storage:folder });
+        ui.observe(FILE, BASE);
+        await ui.noteAgentChange({ file:FILE, baseText:BASE, source:'paper_applyEdit' });
+        assert.equal(ui.sessionFor(FILE).pendingCount, 2);
+        if (how === 'all') await ui.keepAll(FILE);
+        else if (how === 'section') await ui.keepMany(FILE, ui.sessionFor(FILE).hunks.map(h => h.id));
+        else for (const id of ui.sessionFor(FILE).hunks.map(h => h.id)) await ui.keep(FILE, id);
+        assert.equal(ui.sessionFor(FILE), null);
+        ui.dispose();
+        // The buffer is saved, then the host exits before its watcher can
+        // update the disk cursor. The accepted baseline was already durable.
+        const { ui:reloaded } = makeUi({ docText:TWO, storage:folder });
+        assert.equal(reloaded.sessionFor(FILE), null, 'restoring the verdict itself works');
+        await reloaded.noteAgentChange({ file:FILE, baseText:reloaded._observed.get(FILE), source:'external/reopen' });
+        assert.equal(reloaded.sessionFor(FILE)?.pendingCount || 0, 0, how + ': startup cannot turn the older disk cursor into a new review');
+        // A later external edit must still be reviewed, against the accepted
+        // text rather than the pre-approval cursor.
+        reloaded.dispose();
+        const NEW = TWO.replace('\\end{document}', 'A newly arrived paragraph.\n\\end{document}');
+        const { ui:changed } = makeUi({ docText:NEW, storage:folder });
+        await changed.noteAgentChange({ file:FILE, baseText:changed._observed.get(FILE), source:'external/reopen' });
+        assert.equal(changed.sessionFor(FILE).baseText, TWO);
+        assert.equal(changed.sessionFor(FILE).pendingCount, 1, 'only the new arrival needs approval');
+        changed.dispose();
+    }
+});
+
+test('a stale second window cannot resurrect approvals during a placement refresh', async () => {
+    const storage = fs.mkdtempSync(path.join(DIR, 'two-windows-'));
+    const { ui:first } = makeUi({ storage });
+    first.observe(FILE, AGENT);
+    await first.noteAgentChange({ file:FILE, baseText:BASE, source:'disk' });
+    const { ui:second } = makeUi({ storage });
+    assert.equal(second.sessionFor(FILE).pendingCount, 1);
+    await first.keepAll(FILE);
+    // Recompiling any paper refreshes restored sessions in the other host.
+    await second.refresh(FILE);
+    assert.equal(second.sessionFor(FILE)?.pendingCount || 0, 0, 'the old window adopts the durable verdict');
+    first.dispose(); second.dispose();
+    const { ui:reloaded } = makeUi({ storage });
+    assert.equal(reloaded.sessionFor(FILE), null, 'reload cannot find the stale pending baseline');
+    reloaded.dispose();
+});
+
+test('two windows keeping different changes preserve both decisions', async () => {
+    const storage = fs.mkdtempSync(path.join(DIR, 'two-keeps-'));
+    const TWO = AGENT.replace('A second paragraph nobody is arguing about.',
+        'A second paragraph somebody is arguing about.');
+    const { ui:first } = makeUi({ storage, docText:TWO });
+    first.observe(FILE, TWO);
+    await first.noteAgentChange({ file:FILE, baseText:BASE, source:'disk' });
+    const ids = first.sessionFor(FILE).hunks.map(h => h.id);
+    const { ui:second } = makeUi({ storage, docText:TWO });
+    await first.keep(FILE, ids[0]);
+    await second.keep(FILE, ids[1]);
+    first.dispose(); second.dispose();
+    const { ui:reloaded } = makeUi({ storage, docText:TWO });
+    assert.equal(reloaded.sessionFor(FILE), null, 'both changes stay approved after reload');
+    assert.equal(reloaded._archived.get(FILE).baseText, TWO);
+    reloaded.dispose();
+});
+
+test('a saved reader edit after approval becomes the baseline for a later external arrival', async () => {
+    const storage = fs.mkdtempSync(path.join(DIR, 'reader-after-keep-'));
+    const { ui } = makeUi({ storage, dirty:true, diskText:BASE });
+    ui.observe(FILE, BASE);
+    await ui.noteAgentChange({ file:FILE, baseText:BASE, source:'paper_applyEdit' });
+    await ui.keepAll(FILE);
+    const MINE = AGENT.replace('A second paragraph nobody is arguing about.', 'My replacement paragraph.');
+    ui.observe(FILE, MINE, { ownSave:true });
+    ui.dispose();
+    const NEW = MINE.replace('\\end{document}', 'New external paragraph.\n\\end{document}');
+    const { ui:reloaded } = makeUi({ storage, docText:NEW });
+    await reloaded.noteAgentChange({ file:FILE, baseText:reloaded._observed.get(FILE), source:'external/reopen' });
+    assert.equal(reloaded.sessionFor(FILE).baseText, MINE, 'the completed review cannot undo the later reader baseline');
+    assert.equal(reloaded.sessionFor(FILE).pendingCount, 1);
+    reloaded.dispose();
+});
+
+test('a watcher updating the disk cursor before announcing a new arrival still preserves earlier approvals', async () => {
+    const storage = fs.mkdtempSync(path.join(DIR, 'watcher-order-'));
+    const { ui } = makeUi({ storage, dirty:true, diskText:BASE });
+    ui.observe(FILE, BASE);
+    await ui.noteAgentChange({ file:FILE, baseText:BASE, source:'paper_applyEdit' });
+    await ui.keepAll(FILE);
+    const NEW = AGENT.replace('\\end{document}', 'New external paragraph.\n\\end{document}');
+    DOC._setText(NEW); DOC.isDirty=false; fs.writeFileSync(FILE, NEW);
+    ui.observe(FILE, NEW);
+    await ui.noteAgentChange({ file:FILE, baseText:BASE, source:'disk' });
+    assert.equal(ui.sessionFor(FILE).baseText, AGENT);
+    assert.equal(ui.sessionFor(FILE).pendingCount, 1, 'only the new paragraph is pending');
+    ui.dispose();
+});
+
+test('a competing Keep while a verdict is being saved is retried against the newer baseline', async () => {
+    const storage = fs.mkdtempSync(path.join(DIR, 'keep-race-'));
+    const TWO = AGENT.replace('A second paragraph nobody is arguing about.', 'A second paragraph somebody is arguing about.');
+    const { ui:first } = makeUi({ storage, docText:TWO });
+    first.observe(FILE, TWO);
+    await first.noteAgentChange({ file:FILE, baseText:BASE, source:'disk' });
+    const ids=first.sessionFor(FILE).hunks.map(h=>h.id);
+    const { ui:second } = makeUi({ storage, docText:TWO });
+    const save=first._store.save.bind(first._store);
+    let otherKeep;
+    first._store.save=record=>{
+        if (!otherKeep) otherKeep=second.keep(FILE, ids[1]);
+        return save(record);
+    };
+    await first.keep(FILE, ids[0]); await otherKeep;
+    first.dispose(); second.dispose();
+    const { ui:reloaded } = makeUi({ storage, docText:TWO });
+    assert.equal(reloaded.sessionFor(FILE), null);
+    assert.equal(reloaded._archived.get(FILE).baseText, TWO);
+    assert.equal(reloaded._archived.get(FILE).decided.filter(d=>d.action==='kept').length, 2);
+    reloaded.dispose();
 });
 
 (async () => {

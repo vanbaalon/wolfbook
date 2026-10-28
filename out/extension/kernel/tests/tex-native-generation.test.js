@@ -147,3 +147,113 @@ test('the settled build is kept for the next session: its first build and first 
         assert.equal(seeds[2], null);
     } finally { fs.rmSync(directory, { recursive:true, force:true }); }
 });
+
+test('native lane preserves timeout classification from failed session events', async () => {
+    const lane = Object.create(NativeBuildLane.prototype);
+    const root = path.join(os.tmpdir(), 'paper-timeout.tex');
+    const failure = Object.assign(Error('live preview made no progress'), {producer:true, fatal:true});
+    Object.assign(lane, {root, projectDir:path.dirname(root), buildNumber:0, interactiveWarm:true,
+        _interactiveOverlays:() => new Map(), _syncInteractiveSources:async () => {}, _auxiliaryTexts:() => ({}),
+        session:{interactive:{}, build:() => ({cancel() {},
+            async *events() { yield {event:'failed', error:failure.message, producer:true, fatal:true}; },
+            get report() { return Promise.reject(failure); }
+        })} });
+    const result = await lane.interactiveBuild();
+    assert.equal(result.ok, false);
+    assert.equal(result.fatal, true);
+    assert.equal(result.diagnostics[0].producer, true, 'a runtime timeout cannot become a TeX source error');
+});
+
+test('a cold document error keeps the source worker and seed, reports its location, and permits correction', async t => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'native-document-error-'));
+    t.after(() => fs.rmSync(directory, { recursive:true, force:true }));
+    const root = path.join(directory, 'paper.tex'); fs.writeFileSync(root, 'Alpha');
+    fs.writeFileSync(path.join(directory, 'paper.pdf'), 'PDF fixture');
+    const files = new Map(), published = [];
+    const good = { success:true, pdf:path.join(directory, 'paper.pdf'), diagnostics:[],
+        build:{ source_bindings:[], page_count:1, pages:[], passes:[], pdf_hash:'good' } };
+    const source = { files, open:async (file,text) => files.set(file,{text}),
+        capture:async () => ({}), publish:async report => published.push(report), readPages:async () => ({}) };
+    let report = good;
+    const lane = Object.create(NativeBuildLane.prototype);
+    Object.assign(lane, { root, projectDir:directory, buildNumber:0, version:0, edits:Promise.resolve(),
+        source, compiler:{ compile:async () => report } });
+    await lane.compile({});
+    report = { success:false, timed_out:false, diagnostics:[
+        {severity:'error',file:'paper.tex',line:17,message:'Undefined control sequence.'},
+        {severity:'error',producer:true,message:'Native compiler exited with exit status: 1'},
+        {severity:'warning',message:'A warning'}] };
+    const failed = await lane.compile({});
+    assert.equal(failed.ok,false);
+    assert.equal(failed.errors,1,'the exit status is a consequence, not a second TeX error');
+    assert.equal(failed.diagnostics[0].file,root);
+    assert.equal(failed.diagnostics[0].line,17);
+    assert.equal(failed.warnings,1);
+    assert.equal(lane.source,source);
+    assert.equal(lane.coldReport,good,'the last working artifact/seed remains published');
+    assert.deepEqual(published,[good]);
+    // Infrastructure failures remain visible and cannot be mislabeled as
+    // harmless document errors, even if a TeX error precedes the timeout.
+    report = {...report,timed_out:true};
+    await assert.rejects(lane.compile({}),/Native compiler exited/);
+    report = {success:false,diagnostics:[{severity:'error',producer:true,message:'Native compiler exited with exit status: 1'}]};
+    await assert.rejects(lane.compile({}),/Native compiler exited/);
+    report = good;
+    const recovered = await lane.compile({});
+    assert.equal(recovered.ok,true);
+    assert.equal(lane.source,source);
+    assert.deepEqual(published,[good,good]);
+});
+
+test('live mapping binds an external disk replacement and keeps an unsaved reader buffer', async t => {
+    const dir=fs.mkdtempSync(path.join(os.tmpdir(),'native-live-bind-'));
+    t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+    const root=path.join(dir,'main.tex'), include=path.join(dir,'part.tex');
+    const old='Before 😀 sentence. After.', next='Before 😃 sentence. After.';
+    fs.writeFileSync(root,next); fs.writeFileSync(include,'saved include');
+    const files=new Map([['main.tex',{text:old}],['part.tex',{text:'saved include'}]]), changes=[];
+    const lane=Object.create(NativeBuildLane.prototype);
+    Object.assign(lane,{root,projectDir:dir,version:0,edits:Promise.resolve(),source:{files,
+        async edit(file,start,end,text) {
+            changes.push({file,start,end,text});
+            const before=files.get(file).text;
+            files.set(file,{text:before.slice(0,start)+text+before.slice(end)});
+        }}});
+    const options={sourceFiles:[root,include],overlay:new Map([[include,'reader typing']])};
+    const overlays=lane._interactiveOverlays(options);
+    assert.equal(overlays.has('main.tex'),false,'saved text is not sent as an engine overlay');
+    await lane._syncInteractiveSources(options,overlays);
+    assert.equal(files.get('main.tex').text,next);
+    assert.equal(files.get('part.tex').text,'reader typing');
+    assert.deepEqual(changes[0],{file:'part.tex',start:0,end:13,text:'reader typing'});
+    assert.deepEqual(changes[1],{file:'main.tex',start:7,end:9,text:'😃'},'minimal edit preserves whole surrogate pairs');
+    changes.length=0;
+    await lane._syncInteractiveSources(options,overlays);
+    assert.equal(changes.length,0,'unchanged text does not invalidate a current map');
+});
+
+test('a preview queued behind source work cannot overwrite a newer reader edit',async t=>{
+    const dir=fs.mkdtempSync(path.join(os.tmpdir(),'native-live-race-'));
+    t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+    const root=path.join(dir,'main.tex');fs.writeFileSync(root,'disk replacement');
+    let release;
+    const lane=Object.create(NativeBuildLane.prototype), files=new Map([['main.tex',{text:'original'}]]);
+    Object.assign(lane,{root,projectDir:dir,version:0,edits:new Promise(resolve=>{release=resolve;}),
+        source:{files,edit:async()=>{throw Error('stale synchronization edited the buffer');}}});
+    const pending=lane._syncInteractiveSources({},new Map());
+    // Let disk I/O finish while the source queue is still held.
+    await new Promise(resolve=>setTimeout(resolve,20));
+    lane.version++;files.set('main.tex',{text:'new reader text'});release();
+    await assert.rejects(pending,{name:'AbortError'});
+    assert.equal(files.get('main.tex').text,'new reader text');
+});
+
+test('live-map publication reports the requested page failure and tolerates a failed neighbour',async()=>{
+    const lane=Object.create(NativeBuildLane.prototype), reads=[];
+    Object.assign(lane,{session:{ensureLiveMaps:async()=>({ready:[2],failed:[{page:1,error:'unknown text digest'}]})},
+        source:{livePublished:true,readPages:async pages=>{reads.push(pages);return {pages};}}});
+    await assert.rejects(lane.liveView([1,2],{requiredPage:1}),error=>
+        error.name==='LiveMapUnavailable' && error.page===1 && /unknown text digest/.test(error.message));
+    assert.deepEqual(await lane.liveView([1,2],{requiredPage:2}),{pages:[2]});
+    assert.deepEqual(reads,[[2]]);
+});

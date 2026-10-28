@@ -107,22 +107,32 @@ export function matchSpans(model, start, end) {
 }
 
 /**
- * Boxes to highlight for spans, in the runs' units: each run's width shared
- * out evenly over its characters (runs carry no per-character advances), and
- * boxes that touch on one line merged (a live page's runs are single glyphs).
+ * Boxes to highlight, using measured character ink when available. Uniform
+ * subdivision is only the fallback for a run without character geometry.
  */
 export function spanRects(items, spans) {
     const out = [];
     for (const { run, from, to } of spans) {
         const it = items[run];
         const n = Math.max(1, String(it.str || '').length);
-        const r = { x: it.x + it.w * (from / n), y: it.y, w: it.w * ((to - from) / n), h: it.h };
+        let offset=0;
+        const chars=Array.from(String(it.str || ''));
+        const boxes=(it.charBoxes || []).filter((box,i)=>{
+            const start=box.from ?? offset,end=box.to ?? start+(chars[i]?.length || 1);offset=end;
+            return end>from && start<to && box.w>0 && (box.h ?? it.h)>0;
+        });
+        const r=boxes.length ? (()=>{
+            const x=Math.min(...boxes.map(b=>b.x)),y=Math.min(...boxes.map(b=>b.y ?? it.y));
+            return {x,y,w:Math.max(...boxes.map(b=>b.x+b.w))-x,
+                h:Math.max(...boxes.map(b=>(b.y ?? it.y)+(b.h ?? it.h)))-y};
+        })() : { x: it.x + it.w * (from / n), y: it.y, w: it.w * ((to - from) / n), h: it.h };
         const last = out[out.length - 1];
         if (last && Math.abs(last.y - r.y) < 0.2 * r.h && Math.abs(last.h - r.h) < 0.2 * r.h
             && r.x - (last.x + last.w) < 0.3 * r.h && r.x + r.w > last.x) {
             const right = Math.max(last.x + last.w, r.x + r.w);
-            last.y = Math.min(last.y, r.y);
-            last.h = Math.max(last.h, r.h);
+            const bottom=Math.max(last.y+last.h,r.y+r.h);
+            last.x=Math.min(last.x,r.x);last.y = Math.min(last.y, r.y);
+            last.h = bottom-last.y;
             last.w = right - last.x;
         } else out.push(r);
     }

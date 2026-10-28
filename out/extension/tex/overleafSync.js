@@ -16,7 +16,7 @@
 // separately installed Overleaf Workshop extension (overleafLive.js); "off"
 // leaves Git alone.
 
-const { workshopReplica } = require('./overleafLive');
+const { workshopReplica, overleafConfiguration } = require('./overleafLive');
 
 const IDLE_MS = 20000;          // no auto-commit in the middle of a sentence
 const TICK_MS = 30000;
@@ -48,7 +48,7 @@ class OverleafAutoSync {
     }
 
     config() {
-        const cfg = this.vscode.workspace.getConfiguration('wolfbook.tex');
+        const cfg = overleafConfiguration(this.vscode, this.target()).config;
         const mode = cfg.get('overleafSync', 'git');
         const minutes = Math.max(1, Math.min(120, Number(cfg.get('overleafSyncMinutes', 5)) || 5));
         return { mode, everyMs: minutes * 60000 };
@@ -191,8 +191,8 @@ class OverleafAutoSync {
     }
 
     async _turnOff() {
-        await this.vscode.workspace.getConfiguration('wolfbook.tex')
-            .update('overleafSync', 'off', this.vscode.ConfigurationTarget.Global);
+        const { config, scope } = overleafConfiguration(this.vscode, this.target());
+        await config.update('overleafSync', 'off', scope);
         this._hide();
     }
 

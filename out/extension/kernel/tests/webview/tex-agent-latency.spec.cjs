@@ -1,0 +1,20 @@
+const spec=require('./tex-webview-bugs.spec.cjs');
+const fixtureTex=spec.fixtureTex.replace('\\end{document}',Array.from({length:9},(_,i)=>`\\newpage\nPreviously visited page ${i+2}.`).join('\n')+'\n\\end{document}');
+module.exports={fixtureTex,tests:[{id:'offscreen-does-not-block',name:'previously visited offscreen pages cannot delay the visible PDF acknowledgement',async run(t){
+ await t.post({type:'highlight',page:8,rects:[{page:8,x:72,y:72,w:20,h:20}],reveal:true});
+ await t.waitFor(()=>!!document.querySelector('.page[data-page="8"] canvas'),null,{what:'previously visited page 8'});
+ await t.eval(()=>{document.querySelector('main').scrollTop=0;}); await t.sleep(100);
+ await t.eval(async base64=>{const p=await import('/pdfjs/pdf.min.mjs');const worker=p.PDFWorker.create({port:p.GlobalWorkerOptions.workerPort});const doc=await p.getDocument({data:Uint8Array.from(atob(base64),c=>c.charCodeAt(0)),worker}).promise;const proto=Object.getPrototypeOf(await doc.getPage(1));await doc.destroy();const original=proto.render;
+ window.__blockOffscreen=true; window.__offscreenBlocked=false;
+ proto.render=function(options){if(this.pageNumber!==8||!window.__blockOffscreen)return original.call(this,options);
+ window.__offscreenBlocked=true;return {promise:new Promise(resolve=>{window.__releaseOffscreen=resolve;}).then(()=>original.call(this,options).promise)};};},t.fixture.base64);
+ await t.clear(); const started=Date.now();
+ await t.post({type:'open',base:`${t.origin}/pdfjs`,pdfBase64:t.fixture.base64,generation:2});
+ await t.waitPosted('opened',m=>m.generation===2,2500);
+ t.assert(Date.now()-started<2500,'the visible PDF acknowledges without waiting for page 8');
+ t.assert(!await t.eval(()=>window.__offscreenBlocked),'an offscreen page is not eagerly redrawn');
+ await t.eval(()=>{document.querySelector('main').scrollTop=document.querySelector('.page[data-page="8"]').offsetTop;});
+ await t.waitFor(()=>window.__offscreenBlocked,null,{what:'on-demand redraw of page 8'});
+ await t.eval(()=>{window.__blockOffscreen=false;window.__releaseOffscreen();});
+ await t.sleep(150);
+}}]};

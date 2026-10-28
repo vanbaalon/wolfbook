@@ -45,6 +45,7 @@ function makeViewer(gen) {
     const coord = { roots: new Map([[root, { generation: gen, compiling: false }]]) };
     const v = new TexViewer({ extensionUri: { fsPath: EXT } }, coord, {});
     v.root = root;
+    v._webviewReady = true; // The fake panel has completed the ready handshake.
     v.panel = {
         title: '',
         webview: {
@@ -72,6 +73,21 @@ async function main() {
         pdfPath, generation: 1, pageCount: 3, pdfHash: 'HASH-A', live: true,
     };
 
+    await test('a compiler setup failure stays visible instead of being replaced by press Compile', async () => {
+        const message='latexmk was not found on PATH. WPaper cannot compile this paper.';
+        const diagnostics=[{severity:'error',kind:'dependency',file:baseGen.root,message}];
+        const {v,posted,coord}=makeViewer({...baseGen,ok:false,pdfPath:null,diagnostics});
+        const state=coord.roots.get(baseGen.root);
+        state.lastError=message;state.dependencyIssue={summary:message};
+        state.compileDiagnostics={revision:0,at:Date.now(),sequence:1,list:diagnostics};
+        await v.refresh();
+        const status=posted.filter(m=>m.type==='status').at(-1);
+        assert.strictEqual(status.text,message);assert.strictEqual(status.kind,'err');
+        assert.ok(posted.some(m=>m.type==='errorAnnotations' && m.items.some(item=>item.messages.includes(message))),
+            'a missing compiler is a visible error banner even without a PDF or mapped source line');
+        assert.ok(!posted.some(m=>m.type==='status' && /press Compile/.test(m.text)));
+    });
+
     await test('the first refresh always ships a document', async () => {
         const { v, posted } = makeViewer({ ...baseGen });
         await v.refresh();
@@ -80,11 +96,12 @@ async function main() {
         assert.strictEqual(v.shownPdfHash, 'HASH-A');
     });
 
-    await test('native preview status does not claim one-pass reference lag or background work', async () => {
+    await test('native PDF status names pending references without warning about ordinary edits', async () => {
         const { v, posted } = makeViewer({ ...baseGen, runner:'wlatex', rerunWanted:true });
         await v.refresh();
         const statuses = posted.filter(m => m.type === 'status').map(m => m.text);
-        assert.ok(statuses.some(text => /WLaTeX preview/.test(text) && /Save or Compile/.test(text)));
+        assert.ok(statuses.some(text => /WLaTeX PDF ready/.test(text) && /references need another pass/.test(text)));
+        assert.ok(!posted.some(m => m.type === 'status' && m.kind === 'warn'));
         assert.ok(!statuses.some(text => /one pass behind|refreshing in the background/.test(text)));
     });
 
@@ -156,6 +173,22 @@ async function main() {
         assert.strictEqual(opens(posted).length, 2, 'a second open message');
         assert.strictEqual(v.shownGeneration, 2);
         assert.strictEqual(v.shownPdfHash, 'HASH-B');
+    });
+
+    await test('overlapping render-state notifications ship each PDF only once', async () => {
+        const { v, posted, coord } = makeViewer({ ...baseGen });
+        let release;
+        const hold = new Promise(resolve => { release = resolve; });
+        v._captureReaderView = () => hold;
+        const first = v.refresh();
+        const second = v.refresh();
+        const third = v.refresh();
+        release();
+        await Promise.all([first, second, third]);
+        assert.strictEqual(opens(posted).length, 1, 'concurrent paints must not reopen the same PDF');
+        coord.roots.get(v.root).generation = { ...baseGen, generation: 2, pdfHash: 'HASH-B' };
+        await Promise.all([v.refresh(), v.refresh()]);
+        assert.strictEqual(opens(posted).length, 2, 'the changed PDF is also shipped once');
     });
 
     await test('force is the escape hatch, whatever the hashes say', async () => {

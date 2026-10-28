@@ -41,10 +41,11 @@ const {
     readAuxLabels, readTocNumbers, sectionNumbersForObjects,
 } = require('./auxLabels');
 const { readClipboardImage } = require('./texClipboard');
-const { decideFollow } = require('./viewerFollow');
+const { decideFollow, tabUri } = require('./viewerFollow');
 const { OverleafAutoSync } = require('./overleafSync');
 const { OverleafLive } = require('./overleafLive');
 const { overleafMenu } = require('./overleafMenu');
+const { OverleafConnector } = require('./overleafConnector');
 
 const TEX_SELECTOR = [
     { language: 'latex', scheme: 'file' },
@@ -335,28 +336,8 @@ function makeCodeLensProvider(projection, emitter) {
         provideCodeLenses(doc) {
             const cfg = vscode.workspace.getConfiguration('wolfbook.tex');
             if (!cfg.get('codeLens', true)) return [];
-            const { model, mma } = projection.get(doc);
+            const { mma } = projection.get(doc);
             const lenses = [];
-            const at = (o) => new vscode.Range(
-                doc.positionAt(o.sourceRange.startOffset),
-                doc.positionAt(o.sourceRange.startOffset));
-
-            for (const o of model.objects) {
-                if (!ADDRESSABLE.has(o.kind) || o.kind === 'paragraph') continue;
-                if (o.kind === 'section-heading') continue;
-                const arg = [{ file: doc.uri.fsPath, selector: o.label || o.stableKey }];
-                lenses.push(new vscode.CodeLens(at(o), {
-                    title: '$(comment-discussion) Ask', command: 'wolfbook.tex.askAboutObject', arguments: arg,
-                }));
-                if (o.label) {
-                    lenses.push(new vscode.CodeLens(at(o), {
-                        title: '$(references) Find refs', command: 'wolfbook.tex.findReferences', arguments: arg,
-                    }));
-                }
-                lenses.push(new vscode.CodeLens(at(o), {
-                    title: '$(json) Copy key', command: 'wolfbook.tex.copyKey', arguments: arg,
-                }));
-            }
 
             // A managed block's state is the most useful thing to say about it.
             for (const b of mma.blocks) {
@@ -936,6 +917,9 @@ function registerTexSupport(context, deps = {}) {
     const cfg = () => vscode.workspace.getConfiguration('wolfbook.tex');
     if (!cfg().get('enable', true)) return null;
 
+    const updateWlatexAvailability = () => vscode.commands.executeCommand('setContext', 'wolfbook.wlatexAvailable',
+        require('./nativeRuntime').hasNativeRuntime(cfg().get('wlatexDirectory', '') || process.env.WLATEX_HOME || ''));
+    updateWlatexAvailability();
     const projection = new Projection();
     context.subscriptions.push({ dispose: () => projection.dispose() });
 
@@ -1042,6 +1026,10 @@ function registerTexSupport(context, deps = {}) {
         }),
         vscode.workspace.onDidChangeTextDocument((e) => {
             if (!isTex(e.document)) return;
+            if (!e.contentChanges?.length) {
+                viewer.noteSourceSaved(e.document);
+                return;
+            }
             projection.schedule(e.document);
         }),
         projection.onDidChange(refresh),
@@ -1156,9 +1144,12 @@ function registerTexSupport(context, deps = {}) {
 
     const viewer = new TexViewer(context, coord, projection, deps);
     // An agent's edit through the paper tools (a WorkspaceEdit, no disk event):
-    // the same waited-for build as its disk writes get.
+    // the same external batch as its disk writes get. Reader edits share
+    // this bus for review attribution, but follow the live-preview/idle-build
+    // schedule. Treating their end event as an agent write forced a glowing
+    // full build after every mini-editor or page-typing keystroke.
     context.subscriptions.push(require('./reviewBus').onAgentEdit(ev => {
-        if (ev && ev.phase !== 'begin') viewer.compileForAgent?.(ev.file);
+        if (ev && ev.origin !== 'user' && ev.phase !== 'begin') viewer.compileForAgent?.(ev.file);
     }));
     const gitWorkflow = new GitWorkflow(vscode, context);
 
@@ -1203,11 +1194,28 @@ function registerTexSupport(context, deps = {}) {
         log: line => output.appendLine(line) });
     context.subscriptions.push(overleafLive);
     const onConfig = vscode.workspace.onDidChangeConfiguration?.(e => {
+        if (e.affectsConfiguration('wolfbook.tex.wlatexDirectory')) updateWlatexAvailability();
         if (e.affectsConfiguration('wolfbook.tex.overleafSync')) overleafLive.configurationChanged().catch(() => {});
+        if (coord.configurationChanged(e)) {
+            viewer._inkClear();
+            viewer._resetLiveMap();
+            viewer._postEngine(viewer.root && coord.roots.get(viewer.root));
+            if (viewer.root) vscode.workspace.openTextDocument(vscode.Uri.file(viewer.root))
+                .then(doc => coord.build(doc, { priority: true, quiet: true }))
+                .then(() => viewer.refresh({ force: true }))
+                .catch(error => output.appendLine(`WPaper engine setting change: ${error.message}`));
+        }
     });
     const onEditor = vscode.window.onDidChangeActiveTextEditor?.(() => overleafLive.refresh());
     for (const d of [onConfig, onEditor]) if (d) context.subscriptions.push(d);
     overleafLive.refresh();
+    const overleafConnector = new OverleafConnector({ vscode, context, live: overleafLive, git: gitWorkflow });
+    reg('wolfbook.tex.overleafStatus', options => overleafConnector.status(options));
+    reg('wolfbook.tex.overleafConnectAccount', () => overleafConnector.connectAccount());
+    reg('wolfbook.tex.overleafDisconnectAccount', () => overleafConnector.disconnectAccount());
+    reg('wolfbook.tex.overleafOpenProject', id => overleafConnector.openLive(id));
+    reg('wolfbook.tex.overleafOpenGit', () => overleafConnector.openGit());
+    reg('wolfbook.tex.overleafReopenProject', root => overleafConnector.reopen(root));
     reg('wolfbook.tex.overleafLive', () => overleafLive.start());
     reg('wolfbook.tex.overleafMenu', () => overleafMenu({ vscode, sync: overleafSync, live: overleafLive, git: gitWorkflow, target: gitTarget }));
     reg('wolfbook.tex.overleafMenuConnected', () => overleafMenu({ vscode, sync: overleafSync, live: overleafLive, git: gitWorkflow, target: gitTarget }));
@@ -1294,10 +1302,13 @@ function registerTexSupport(context, deps = {}) {
         return byKey;
     };
 
-    /** The INNERMOST sectioning unit a line is in — \subsection over \section. */
+    /** Review groups stop at subsubsection; paragraph headings stay inside it. */
     const sectionAt = (file, line) => {
         let best = null;
         for (const sp of sectionsFor(file)) {
+            // Scanner levels: part=0, chapter=1, section=2, subsection=3,
+            // subsubsection=4, paragraph=5, subparagraph=6.
+            if (sp.level < 1 || sp.level > 4) continue;
             if (line < sp.startLine || line > sp.endLine) continue;
             if (!best || sp.level > best.level || sp.startLine > best.startLine) best = sp;
         }
@@ -1462,14 +1473,21 @@ async function offerReload(doc, diskText, output, viewer = null) {
     // is not what differs from disk, it is WHAT THEY CHANGED, and answering it
     // needs the text from before the write.
     const lastSeen = new Map();
-    const rememberText = (fsPath, text) => {
+    const rememberText = (fsPath, text, ownSave = false) => {
         if (typeof text !== 'string') return;
         const saved = review._observed?.get(fsPath);
         if (!lastSeen.has(fsPath) && typeof saved === 'string' && saved !== text) {
             review.noteAgentChange({ file: fsPath, baseText: saved, source: 'external/reopen' }).catch(e => output.appendLine(e.message));
         }
         lastSeen.set(fsPath, text);
-        review.observe?.(fsPath, text);
+        review.observe?.(fsPath, text, { ownSave });
+    };
+    const rememberDisk = (doc) => {
+        // A restored dirty buffer is ahead of disk. Using its unsaved text as
+        // the disk baseline made an unchanged Dropbox/mtime event look like
+        // somebody else rewrote the file, complete with a conflict modal.
+        try { rememberText(doc.uri.fsPath, fs.readFileSync(doc.uri.fsPath, 'utf8')); }
+        catch (_) { /* no disk baseline until the file exists */ }
     };
     context.subscriptions.push(coord.onDidChange(() => {
         for (const st of coord.roots.values()) for (const file of st.files || []) {
@@ -1478,17 +1496,24 @@ async function offerReload(doc, diskText, output, viewer = null) {
         }
     }));
     for (const d of vscode.workspace.textDocuments) {
-        if (isTex(d)) rememberText(d.uri.fsPath, d.getText());
+        if (isTex(d)) rememberDisk(d);
     }
     context.subscriptions.push(
         vscode.workspace.onWillSaveTextDocument((e) => {
-            if (isTex(e.document)) diskWatch.noteSaving(e.document.uri.fsPath, e.document.getText());
+            if (isTex(e.document)) diskWatch.beginSaving(e.document.uri.fsPath, e.document.getText());
         }),
-        vscode.workspace.onDidOpenTextDocument((d) => { if (isTex(d)) rememberText(d.uri.fsPath, d.getText()); }),
+        vscode.workspace.onDidChangeTextDocument((e) => {
+            if (isTex(e.document)) diskWatch.noteSaveCandidate(e.document.uri.fsPath, () => e.document.getText());
+        }),
+        vscode.workspace.onDidOpenTextDocument((d) => { if (isTex(d)) rememberDisk(d); }),
         vscode.workspace.onDidSaveTextDocument((d) => {
             if (isTex(d)) {
-                diskWatch.noteSaving(d.uri.fsPath, d.getText());
-                rememberText(d.uri.fsPath, d.getText());
+                let diskText = null;
+                try { diskText = fs.readFileSync(d.uri.fsPath, 'utf8'); } catch (_) { /* deleted during save */ }
+                if (diskWatch.finishSaving(d.uri.fsPath, diskText, d.getText(), d.isDirty)) {
+                    rememberText(d.uri.fsPath, diskText, true);
+                    diskWatch.accept(d.uri.fsPath, diskText);
+                }
             }
         }),
     );
@@ -1519,12 +1544,10 @@ async function offerReload(doc, diskText, output, viewer = null) {
             // layout after that reload burst settles; this is independent of
             // whether live compiling itself is enabled.
             try { viewer.preserveViewerLayoutAfterExternalChange?.(); } catch (_) { /* layout is optional */ }
-            // scheduleLive, not build: it is debounced per root, it obeys
-            // `liveRender` and `compile: off`, and it arms the authoritative
-            // pass behind itself. A buffer reload that also reaches
-            // onDidChangeTextDocument therefore coalesces into this one timer
-            // rather than compiling twice.
-            try { coord.scheduleLive(like); } catch (_) { /* the next edit will */ }
+            // Watcher and clean-buffer reload events share the coordinator's
+            // external batch. Queue it before slow review processing; one Git
+            // operation must not pay for a live build and a priority build too.
+            try { coord.scheduleExternal(like); } catch (_) { /* the next edit will */ }
         };
         const watcher = vscode.workspace.createFileSystemWatcher('**/*.{tex,bib}');
         const onExternal = async (uri) => {
@@ -1535,16 +1558,16 @@ async function offerReload(doc, diskText, output, viewer = null) {
             try { diskText = fs.readFileSync(fsPath, 'utf8'); } catch (_) { diskText = null; }
             if (!doc) {
                 const before = lastSeen.get(fsPath) ?? review._observed?.get(fsPath);
-                if (/\.tex$/i.test(fsPath) && typeof before === 'string' && diskText != null && before !== diskText) {
-                    await review.noteAgentChange({ file: fsPath, baseText: before, source: 'disk' });
-                    viewer.compileForAgent?.(fsPath);
+                if (diskText != null && before === diskText) {
+                    diskWatch.accept(fsPath, diskText);
+                    return;
                 }
+                coord.invalidate(fsPath);
+                if (diskText != null) rebuildAfterExternal(fsPath);
+                if (/\.tex$/i.test(fsPath) && typeof before === 'string' && diskText != null && before !== diskText)
+                    await review.noteAgentChange({ file: fsPath, baseText: before, source: 'disk' });
                 if (diskText != null) rememberText(fsPath, diskText);
                 diskWatch.accept(fsPath, diskText);
-                coord.invalidate(fsPath);
-                // No buffer means no reload event either, so this path is the
-                // only thing that can ask for the rebuild.
-                if (diskText != null) rebuildAfterExternal(fsPath);
                 return;
             }
             // OUR OWN REBASE IS NOT SOMEBODY ELSE'S EDIT. Merging a disk change
@@ -1553,12 +1576,19 @@ async function offerReload(doc, diskText, output, viewer = null) {
             // the whole thing again.
             if (review.isMerging && review.isMerging(fsPath)) return;
 
+            if (diskText != null && diskText !== lastSeen.get(fsPath) && !diskWatch.isOwnSave(fsPath, diskText)) {
+                if (await diskWatch.settleSave(fsPath)) {
+                    try { diskText = fs.readFileSync(fsPath, 'utf8'); } catch (_) { diskText = null; }
+                    if (doc.isClosed) return;
+                }
+            }
+
             // A delayed notification for our save can arrive AFTER another
             // keystroke makes the buffer dirty again. Compare with the saved
             // snapshot, not with that newer buffer. No external review, rebase
             // or navigation should run for our own write or an mtime-only echo.
             if (diskText != null && (diskText === lastSeen.get(fsPath) || diskWatch.isOwnSave(fsPath, diskText))) {
-                rememberText(fsPath, diskText);
+                rememberText(fsPath, diskText, diskWatch.isOwnSave(fsPath, diskText));
                 diskWatch.accept(fsPath, diskText);
                 return;
             }
@@ -1586,7 +1616,6 @@ async function offerReload(doc, diskText, output, viewer = null) {
                 // agreeing to the one before it.
                 if (verdict !== VERDICT.DELETED && typeof before === 'string' && typeof diskText === 'string' && before !== diskText) {
                     await review.noteAgentChange({ file: fsPath, baseText: before, source: 'disk' });
-                    viewer.compileForAgent?.(fsPath);
                 }
                 return;
             }
@@ -1619,7 +1648,13 @@ async function offerReload(doc, diskText, output, viewer = null) {
             }
             await offerReload(doc, diskText, output, viewer);
         };
-        const onGone = (uri) => { diskWatch.forget(uri.fsPath); coord.invalidate(uri.fsPath); };
+        const onGone = (uri) => {
+            const root = coord.rootOf.get(uri.fsPath);
+            diskWatch.forget(uri.fsPath); coord.invalidate(uri.fsPath);
+            // A removed include/bibliography belongs to the same Git batch.
+            // Rebuild its surviving main file, never the deleted file itself.
+            if (root && root !== uri.fsPath && fs.existsSync(root)) rebuildAfterExternal(uri.fsPath);
+        };
         const wire = (w) => {
             context.subscriptions.push(w, w.onDidChange(onExternal), w.onDidCreate(onExternal),
                 w.onDidDelete(onGone));
@@ -1632,18 +1667,26 @@ async function offerReload(doc, diskText, output, viewer = null) {
         // .sty or a new data table changes the paper as surely as its .tex:
         // rebuild the paper on screen when one inside its folder changes.
         // (The paper's own exported PDF is not a figure of it.)
-        const assetWatcher = vscode.workspace.createFileSystemWatcher(
-            '**/*.{sty,cls,bst,bbx,cbx,def,cfg,png,jpg,jpeg,pdf,eps,csv,dat,tikz,pgf,txt}');
+        const assetPattern = '**/*.{sty,cls,bst,bbx,cbx,def,cfg,png,jpg,jpeg,pdf,eps,ps,svg,gif,webp,bmp,csv,dat,tikz,pgf,txt,PNG,JPG,JPEG,PDF,EPS}';
+        const assetWatcher = vscode.workspace.createFileSystemWatcher(assetPattern);
         const onAsset = (uri) => {
             const root = viewer.isOpen && viewer.isOpen() ? viewer.root : null;
             if (!root) return;
             const relative = path.relative(path.dirname(root), uri.fsPath);
             if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return;
             if (uri.fsPath === root.replace(/\.tex$/i, '.pdf')) return;
-            try { coord.scheduleLive({ uri: { fsPath: root } }); } catch (_) { /* the next edit will */ }
+            try {
+                coord.rootFor({ uri: { fsPath: root } });
+                coord.invalidateAsset(root, uri.fsPath);
+                // The incremental preview can resume from a text checkpoint
+                // containing the old image. Settle a fresh PDF instead; the
+                // normal debounce still coalesces an agent's write burst.
+                coord.scheduleExternal({ uri: { fsPath: root } });
+            } catch (_) { /* the next edit will */ }
         };
-        context.subscriptions.push(assetWatcher, assetWatcher.onDidChange(onAsset),
-            assetWatcher.onDidCreate(onAsset), assetWatcher.onDidDelete(onAsset));
+        const wireAssets = (w) => context.subscriptions.push(w, w.onDidChange(onAsset),
+            w.onDidCreate(onAsset), w.onDidDelete(onAsset));
+        wireAssets(assetWatcher);
 
         // A PAPER IS USUALLY NOT IN THE WORKSPACE FOLDER.
         //
@@ -1658,10 +1701,21 @@ async function offerReload(doc, diskText, output, viewer = null) {
         // A RelativePattern over a Uri watches a real directory, workspace or
         // not. One per directory, created as papers are opened.
         const watchedDirs = new Set();
+        const assetDirs = new Set();
         const inWorkspace = (dir) => (vscode.workspace.workspaceFolders || [])
             .some(f => dir === f.uri.fsPath || dir.startsWith(f.uri.fsPath + path.sep));
+        const ensureAssetsWatched = (root) => {
+            const dir = root && path.dirname(root);
+            if (!dir || assetDirs.has(dir) || inWorkspace(dir) || typeof vscode.RelativePattern !== 'function') return;
+            try {
+                wireAssets(vscode.workspace.createFileSystemWatcher(
+                    new vscode.RelativePattern(vscode.Uri.file(dir), assetPattern)));
+                assetDirs.add(dir);
+            } catch (e) { output.appendLine(`could not watch figures in ${dir}: ${e.message}`); }
+        };
         const ensureWatched = (fsPath) => {
             if (!fsPath) return;
+            ensureAssetsWatched(fsPath);
             const dir = path.dirname(fsPath);
             if (!dir || watchedDirs.has(dir) || inWorkspace(dir)) return;
             watchedDirs.add(dir);
@@ -1677,6 +1731,7 @@ async function offerReload(doc, diskText, output, viewer = null) {
         for (const d of vscode.workspace.textDocuments) if (isTex(d)) ensureWatched(d.uri.fsPath);
         context.subscriptions.push(
             vscode.workspace.onDidOpenTextDocument((d) => { if (isTex(d)) ensureWatched(d.uri.fsPath); }),
+            coord.onDidChange((st) => ensureAssetsWatched(st.root)),
         );
     }
 
@@ -1775,29 +1830,49 @@ async function offerReload(doc, diskText, output, viewer = null) {
         }),
         vscode.workspace.onDidChangeTextDocument((e) => {
             if (!isTex(e.document)) return;
+            if (!e.contentChanges?.length) {
+                coord.noteChange(e); // Finish a viewer edit's pending dirty-flag transition.
+                return; // A save's metadata is not another keystroke.
+            }
             if (e.contentChanges?.length) overleafSync.noteEdit();
             // Keep translating line positions for gutters and diagnostics;
             // the page tracer itself pauses below until the new PDF arrives.
-            coord.noteChange(e);
+            const file = e.document.uri.fsPath;
+            const readerEdit = viewer._miniApplyingFile === file;
+            const agentEdit = review._agentWriting?.has(file);
+            const sourceFocused = !viewer.panel?.active && vscode.window.activeTextEditor?.document === e.document;
+            const origin = readerEdit ? 'mini-editor' : agentEdit ? 'agent' :
+                !e.document.isDirty && !sourceFocused ? 'external-reload' : 'editor';
+            const impact=coord.noteChange(e, { origin });
             // The compiled page is now behind even when the edit changed no
             // line count. Clear its old trace immediately; the matching build
             // will explicitly resume it after the new page is visible.
-            viewer.noteSourceChanged(e.document);
+            viewer.noteSourceChanged(e.document,{renderChanged:impact?.renderChanged!==false});
             status.update();
             // Keep the page view up with the buffer, not with the file: a
             // rebuild is queued from the unsaved text once typing pauses.
-            if (viewer.isOpen && viewer.isOpen()) coord.scheduleLive(e.document);
+            if ((impact?.renderChanged!==false || impact.pendingRendering) && viewer.isOpen && viewer.isOpen()) {
+                if (origin === 'external-reload' || origin === 'agent') coord.scheduleExternal(e.document);
+                else coord.scheduleLive(e.document);
+            }
         }),
         vscode.workspace.onDidSaveTextDocument(async (doc) => {
             if (!isTex(doc)) return;
             viewer.noteSourceSaved(doc);
             const mode = cfg().get('compile', 'onSave');
             if (mode !== 'onSave') return;
+            const automatic = viewer.isAutomaticSourceSave(doc);
+            if (automatic && cfg().get('liveRender', true)) {
+                // The edit already scheduled live rendering and convergence.
+                // Persisting it must not restart those builds or show progress.
+                coord.ensureLiveRefresh(doc);
+                return;
+            }
             // AUTHORITATIVE: a live build may have stopped after one pass, and
             // its snapshot hash matches the saved bytes — so without this the
             // save would see "already current" and leave the paper's
             // cross-references a pass behind.
-            await coord.build(doc, { authoritative: true });
+            await coord.build(doc, { authoritative: true, quiet: automatic });
             paintRender();
         }),
     );
@@ -1813,7 +1888,7 @@ async function offerReload(doc, diskText, output, viewer = null) {
             catch (_) { /* fall through to the warning */ }
         }
         if (!isTex(doc)) { vscode.window.showWarningMessage('Open a .tex file first.'); return; }
-        const st = await coord.build(doc, { force: true });
+        const st = await coord.build(doc, { force: true, firstPass: true });
         paintRender();
         // Dependency failures already produced the richer, once-per-session
         // setup notification from RenderCoordinator. Do not immediately put a
@@ -1832,8 +1907,11 @@ async function offerReload(doc, diskText, output, viewer = null) {
     // THE PDF LIVES IN A CACHE; THIS PUTS A COPY WHERE THE READER WANTS IT.
     // A page behind the buffer, or a build that is only a preview pass, is
     // brought up to date first so the file is the settled paper.
-    reg('wolfbook.tex.exportPdf', async () => {
-        let doc = vscode.window.activeTextEditor?.document;
+    reg('wolfbook.tex.exportPdf', async (opts = {}) => {
+        // A toolbar export belongs to its panel's paper, even when the source
+        // editor has another .tex active. Explicit target skips the Save dialog.
+        let doc = opts.root ? await vscode.workspace.openTextDocument(vscode.Uri.file(opts.root))
+            : vscode.window.activeTextEditor?.document;
         if (!isTex(doc) && viewer.root) {
             try { doc = await vscode.workspace.openTextDocument(vscode.Uri.file(viewer.root)); }
             catch (_) { /* fall through to the warning */ }
@@ -1844,17 +1922,20 @@ async function offerReload(doc, diskText, output, viewer = null) {
         // SyncTeX asked for after the last native build was made: build again.
         const wantSynctex = vscode.workspace.getConfiguration('wolfbook.tex').get('synctex', false);
         const missingSynctex = wantSynctex && g0 && g0.runner === 'wlatex' && !g0.exportSynctexPath;
-        if (!g0 || !g0.ok || !g0.pdfPath || st.sourceAhead || g0.rerunWanted || g0.passesLimited || missingSynctex) {
+        if (opts.force || !g0 || !g0.ok || !g0.pdfPath || st.sourceAhead || g0.rerunWanted || g0.passesLimited || missingSynctex) {
             st = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification,
-                title: 'WPaper: building the PDF to export' }, () => coord.build(doc, { authoritative: true, quiet: true }));
+                title: 'WPaper: building the PDF to export' }, () => coord.build(doc, {
+                    authoritative: true, quiet: true, ...(opts.force ? { force: true } : {}),
+                }));
         }
         const g = st && st.generation;
-        if (!g || !g.ok || !g.pdfPath || !fs.existsSync(g.pdfPath)) {
+        if (!g || !g.ok || !g.pdfPath || st.lastError || st.sourceAhead || !fs.existsSync(g.pdfPath)) {
             vscode.window.showErrorMessage(`No PDF to export${st && st.lastError ? `: ${st.lastError}` : ''}.`);
             return;
         }
         const root = coord.rootFor(doc);
-        const target = await vscode.window.showSaveDialog({
+        const target = typeof opts.target === 'string' && path.isAbsolute(opts.target) ? vscode.Uri.file(opts.target)
+            : await vscode.window.showSaveDialog({
             defaultUri: vscode.Uri.file(path.join(path.dirname(root), `${path.basename(root, '.tex')}.pdf`)),
             filters: { PDF: ['pdf'] } });
         if (!target) return;
@@ -1866,6 +1947,7 @@ async function offerReload(doc, diskText, output, viewer = null) {
             synctexNote = ' with SyncTeX';
         }
         vscode.window.setStatusBarMessage(`$(pass) Exported ${path.basename(target.fsPath)}${synctexNote}`, 5000);
+        return { ok: true, root, target: target.fsPath };
     });
 
     // PREPARE FOR ARXIV (arxivPack.js, arxivCheck.js): the paper as one .zip
@@ -1984,11 +2066,8 @@ async function offerReload(doc, diskText, output, viewer = null) {
         const directory = vscode.workspace.getConfiguration('wolfbook.tex').get('wlatexDirectory', '') || process.env.WLATEX_HOME || '';
         let runtime = null;
         try { runtime = require('./nativeRuntime').resolveNativeRuntime(directory); }
-        catch (error) { vscode.window.showErrorMessage(`WLaTeX: ${error.message}`); return; }
-        if (!runtime) {
-            vscode.window.showWarningMessage('WLaTeX is not installed: set wolfbook.tex.wlatexDirectory to it first.');
-            return;
-        }
+        catch (_) { return; }
+        if (!runtime) return;
         const sdk = require(runtime.sdk);
         if (typeof sdk.installLicense !== 'function') {
             vscode.window.showWarningMessage('This WLaTeX does not take licences.');
@@ -2127,9 +2206,29 @@ async function offerReload(doc, diskText, output, viewer = null) {
         vscode.window.setStatusBarMessage('Copied WPaper source file path', 2500);
     });
 
-    reg('wolfbook.tex.openViewer', async () => {
-        const doc = vscode.window.activeTextEditor?.document;
+    let viewerOpenRequest = 0;
+    reg('wolfbook.tex.openViewer', async (options = {}) => {
+        const request = ++viewerOpenRequest;
+        // editor/title supplies its own URI, even when a different pane is
+        // still active. The logo belongs to that tab, not activeTextEditor.
+        const groups = vscode.window.tabGroups;
+        const activeTab = groups?.activeTabGroup?.activeTab || groups?.all?.find(g => g.isActive)?.activeTab;
+        const uri = options?.root ? vscode.Uri.file(options.root)
+            : typeof options?.fsPath === 'string' ? options : tabUri(activeTab?.input);
+        const doc = uri ? await vscode.workspace.openTextDocument(uri) : vscode.window.activeTextEditor?.document;
+        if (request !== viewerOpenRequest) return;
         if (!isTex(doc)) { vscode.window.showWarningMessage('Open a .tex file first.'); return; }
+        // Beside and the viewer's follow pairing use the source group. Focus
+        // the clicked tab in its existing group before opening the paper.
+        if (vscode.window.activeTextEditor?.document?.uri.fsPath !== doc.uri.fsPath) {
+            const editor = vscode.window.visibleTextEditors?.find(e => e.document.uri.fsPath === doc.uri.fsPath);
+            const group = groups?.all?.find(g => tabUri(g.activeTab?.input)?.fsPath === doc.uri.fsPath);
+            const column = editor?.viewColumn ?? group?.viewColumn;
+            if (column != null) {
+                await vscode.window.showTextDocument(doc, { viewColumn:column, preserveFocus:false, preview:false });
+                if (request !== viewerOpenRequest) return;
+            }
+        }
         // THE PANEL FIRST, THE COMPILE SECOND.
         //
         // Awaiting the build before creating the panel means the reader stares
@@ -2138,17 +2237,20 @@ async function offerReload(doc, diskText, output, viewer = null) {
         // and the build's own onDidChange drives the refresh when it lands.
         const t0 = Date.now();
         await viewer.open(doc);
+        if (request !== viewerOpenRequest) return;
         output.appendLine(`viewer panel opened in ${Date.now() - t0} ms`);
+        // viewer.open starts the first build in the background. A second
+        // awaited build here used to make reopening depend on compilation.
         const st = coord.stateFor(doc);
-        if (!st || !st.generation) {
-            const t1 = Date.now();
-            await coord.build(doc);
-            output.appendLine(`  build for Page mode took ${Date.now() - t1} ms`);
+        if ((!st || !st.generation && !st.compiling) &&
+            vscode.workspace.getConfiguration('wolfbook.tex').get('compile', 'onSave') !== 'off') {
+            coord.build(doc).catch(error => output.appendLine(`  viewer build: ${error.message}`));
         }
         const ed = vscode.window.activeTextEditor;
         // The first sync into a panel that has just opened: land where the
         // reader is, do not slide there.
-        if (ed) viewer.syncFromEditor(ed, { instant: true });
+        if (request === viewerOpenRequest && ed?.document?.uri.fsPath === doc.uri.fsPath)
+            viewer.syncFromEditor(ed, { instant: true });
     });
 
     reg('wolfbook.tex.mergeFromDisk', async () => {
@@ -2232,6 +2334,7 @@ async function offerReload(doc, diskText, output, viewer = null) {
     for (const doc of vscode.workspace.textDocuments) refresh(doc);
     paintRender();
 
+    setImmediate(() => overleafConnector.resume().catch(error => output.appendLine(`Overleaf open: ${error.message}`)));
     return { projection, diagnostics, coexisting, coord, viewer };
 }
 

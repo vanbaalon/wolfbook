@@ -3320,9 +3320,8 @@ class SaveLatexTool {
         try { content = decodeToolContent(content, options.input?.content_encoding); }
         catch (err) { return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(err.message)]); }
         const control = findControlChar(content);
-        const controlWarning = control
-            ? `\nWarning: content contains U+${control.code.toString(16).toUpperCase().padStart(4, '0')} at ${control.line}:${control.col}; preserved because form-feed can be legal in TeX.`
-            : '';
+        if (control) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+            `Error: content contains U+${control.code.toString(16).toUpperCase().padStart(4, '0')} at ${control.line}:${control.col}. Send literal LaTeX with JSON-escaped backslashes; no file was written.`)]);
         // Resolve relative paths against the active notebook directory
         let absPath = filePath;
         if (!path.isAbsolute(filePath)) {
@@ -3332,12 +3331,15 @@ class SaveLatexTool {
             absPath = path.join(base, filePath);
         }
         try {
+            const dirty = (vscode.workspace.textDocuments || []).find(doc => doc.uri.fsPath === absPath && doc.isDirty);
+            if (dirty && dirty.getText() !== content) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                'Error: this file has unsaved editor changes. Use paper_previewEdit/paper_applyEdit to edit that buffer; no file was written.')]);
             fs.mkdirSync(path.dirname(absPath), { recursive: true });
             fs.writeFileSync(absPath, content, 'utf8');
             const lines = content.split('\n').length;
             const bytes = Buffer.byteLength(content, 'utf8');
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                `Saved: ${absPath}\n${lines} lines, ${bytes} bytes${controlWarning}`
+                `Saved: ${absPath}\n${lines} lines, ${bytes} bytes`
             )]);
         } catch (err) {
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
@@ -3394,11 +3396,12 @@ class CompileLatexTool {
                 const pdfPath = absPath.replace(/\.tex$/, '.pdf');
                 const hasPdf  = fs.existsSync(pdfPath);
                 let msg;
-                if (success || hasPdf) {
+                if (success && hasPdf) {
                     msg = `\u2713 Compilation succeeded. PDF: ${pdfPath}`;
                     if (errLines) msg += `\nWarnings:\n${errLines}`;
                 } else {
                     msg = `\u2717 Compilation failed.\nErrors:\n${errLines || combined.slice(-2000)}`;
+                    if (hasPdf) msg += '\nAn existing PDF remains from an earlier build; it does not confirm this compile.';
                 }
                 resolve(new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(msg)]));
             });

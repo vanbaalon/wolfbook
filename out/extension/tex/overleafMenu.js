@@ -4,7 +4,7 @@
 // WPaper's toolbar: how the paper is kept in step with Overleaf, and every
 // action of that choice, in one menu.
 
-const { WORKSHOP_ID } = require('./overleafLive');
+const { WORKSHOP_ID, overleafConfiguration } = require('./overleafLive');
 
 /**
  * @param {object} o
@@ -15,10 +15,10 @@ const { WORKSHOP_ID } = require('./overleafLive');
  * @param {() => string|undefined} o.target
  */
 async function overleafMenu({ vscode, sync, live, git, target }) {
-    const cfg = vscode.workspace.getConfiguration('wolfbook.tex');
+    const file = target();
+    const { config: cfg, scope } = overleafConfiguration(vscode, file);
     const mode = cfg.get('overleafSync', 'git');
     const minutes = cfg.get('overleafSyncMinutes', 5);
-    const file = target();
     const linked = file ? live.link.linkFor(file) : null;
     const ls = live.link.state;
     const connectedHere = linked && live.link.root === linked.root && ls.status === 'connected';
@@ -76,7 +76,7 @@ async function overleafMenu({ vscode, sync, live, git, target }) {
         if (m === 'live') {
             if (!(await live.acceptRisks())) return false;
         }
-        await cfg.update('overleafSync', m, vscode.ConfigurationTarget.Global);
+        await cfg.update('overleafSync', m, scope);
         live.refresh();
         return true;
     };
@@ -92,7 +92,7 @@ async function overleafMenu({ vscode, sync, live, git, target }) {
     case 'minutes': {
         const v = await vscode.window.showInputBox({ title: 'Sync with Overleaf every … minutes', value: String(minutes),
             validateInput: s => (/^\d+$/.test(s) && +s >= 1 && +s <= 120 ? null : 'A whole number of minutes, 1 to 120') });
-        if (v) await cfg.update('overleafSyncMinutes', Number(v), vscode.ConfigurationTarget.Global);
+        if (v) await cfg.update('overleafSyncMinutes', Number(v), scope);
         break;
     }
     case 'live': await live.start(); break;

@@ -3,7 +3,7 @@
   "displayName": "Wolfbook — Mathematica & Wolfram Language Notebooks",
   "description": "Mathematica-style Wolfram Language notebooks and WPaper LaTeX editing in VS Code, with live kernels, compiled-paper navigation, rich output, debugging and agent tools.",
   "publisher": "wolfbook",
-  "version": "2.10.1",
+  "version": "2.10.2",
   "engines": {
     "vscode": "^1.95.0"
   },
@@ -160,6 +160,36 @@
       "type": "object",
       "title": "Wolfbook",
       "properties": {
+        "wolfbook.localTheme": {
+          "scope": "window",
+          "type": [
+            "object",
+            "null"
+          ],
+          "default": null,
+          "description": "Local workspace style. Choose Wolfbook: Local Theme to select a light, dark, or automatically adapting accent. Notebook backgrounds are independent. Store this in Workspace settings.",
+          "properties": {
+            "accent": {
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "description": "Accent colour as #RRGGBB."
+            },
+            "appearance": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "light",
+                "dark"
+              ],
+              "description": "Follow the active VS Code theme, or select a matching light/dark base theme in this workspace."
+            }
+          },
+          "required": [
+            "accent",
+            "appearance"
+          ],
+          "additionalProperties": false
+        },
         "wolfbook.evalMode": {
           "scope": "workspace",
           "type": "string",
@@ -573,10 +603,16 @@
           "type": "integer",
           "default": 3,
           "minimum": 1,
-          "maximum": 8,
           "scope": "window",
-          "markdownDescription": "Maximum live Wolfram kernels in one window. Each kernel consumes a separate Wolfram process/license seat.",
+          "markdownDescription": "Recommended number of local Wolfram kernels in one window. Advisory only: explicit creation may exceed it. Prefer reusing a kernel associated with your repository; each additional process consumes memory and may need a license seat.",
           "order": 8
+        },
+        "wolfbook.kernels.defaultForNewNotebooks": {
+          "type": "string",
+          "default": "",
+          "scope": "window",
+          "markdownDescription": "Kernel for new, unassigned notebooks in this workspace. Choose **Use Wolfram … for new notebooks in this workspace** in the notebook's kernel status menu. The value is a durable kernel slot (`default` for the window's shared kernel), not a runtime kernel ID or label. Empty asks on the first keyboard evaluation. Explicit notebook assignments and agent kernel/isolation choices take precedence; an unavailable chosen kernel is never silently replaced.",
+          "order": 9
         },
         "wolfbook.oberon.enabled": {
           "type": "boolean",
@@ -1112,6 +1148,22 @@
           "default": "",
           "description": "Optional absolute path to a separate WLaTeX installation or built development checkout. WLATEX_HOME is used when empty. WLaTeX is not bundled with WPaper; if unavailable, WPaper uses its existing compiler."
         },
+        "wolfbook.tex.review.historyLimit": {
+          "type": "integer",
+          "scope": "resource",
+          "default": 20,
+          "minimum": 0,
+          "maximum": 1000,
+          "description": "Maximum recent external versions retained in WPaper History per paper. Older versions are discarded when the paper is opened or a review is saved. 0 disables version history. Pending corrections, the approved baseline and review feedback are preserved."
+        },
+        "wolfbook.tex.review.historyMaxMB": {
+          "type": "number",
+          "scope": "resource",
+          "default": 20,
+          "minimum": 0,
+          "maximum": 1024,
+          "description": "Maximum combined size in MiB of the before/after texts retained in WPaper History per paper. The oldest versions are discarded first; historyLimit also applies. 0 disables version history. Active corrections and saved approvals are independent of this budget."
+        },
         "wolfbook.tex.review.groupWindowSeconds": {
           "type": "number",
           "default": 60,
@@ -1139,8 +1191,13 @@
           "description": "With the WLaTeX engine: how long a burst of keystrokes is merged before the incremental engine redraws the page (a newer request abandons an older one at its next page)."
         },
         "wolfbook.tex.overleafSync": {
+          "scope": "resource",
           "type": "string",
-          "enum": ["git", "live", "off"],
+          "enum": [
+            "git",
+            "live",
+            "off"
+          ],
           "enumDescriptions": [
             "Overleaf's Git integration: every few minutes, while you pause, WPaper commits your changes, merges collaborators' and pushes. Needs the project's Git remote and an Overleaf Git authentication token (a paid Overleaf plan). Overleaf's tracked changes and comments on lines a push changes can be lost or displaced.",
             "Real-time editing, as a collaborator in the Overleaf editor: the paper's folder is linked to an Overleaf project and edited in place, signed in with your browser's Overleaf session cookie. NOT supported by Overleaf: its terms forbid access other than through its supported interfaces, so this can break at any time and use of it is at your own risk (and your account's). Off unless you choose it.",
@@ -1150,6 +1207,7 @@
           "description": "How a paper that lives on Overleaf is kept in step with it."
         },
         "wolfbook.tex.overleafSyncMinutes": {
+          "scope": "resource",
           "type": "number",
           "default": 5,
           "minimum": 1,
@@ -1348,6 +1406,12 @@
     ],
     "commands": [
       {
+        "command": "wolfbook.localTheme",
+        "title": "Local Theme…",
+        "category": "Wolfbook",
+        "icon": "$(color-mode)"
+      },
+      {
         "command": "wolfbook.OpenNotebook",
         "title": "Open in System Editor"
       },
@@ -1420,6 +1484,11 @@
       {
         "command": "wolfbook.launchKernel",
         "title": "Wolfram Language: Launch Default Kernel"
+      },
+      {
+        "command": "wolfbook.openWolframDesktop",
+        "title": "Wolfram: Open New Desktop Instance (macOS)",
+        "enablement": "isMac"
       },
       {
         "command": "wolfbook.openConfigurations",
@@ -1784,6 +1853,21 @@
         "title": "WPaper: Sync with Overleaf Now"
       },
       {
+        "command": "wolfbook.tex.overleafConnectAccount",
+        "title": "Overleaf: Connect Account…",
+        "category": "Wolfbook"
+      },
+      {
+        "command": "wolfbook.tex.overleafOpenProject",
+        "title": "Overleaf: Browse and Open Project…",
+        "category": "Wolfbook"
+      },
+      {
+        "command": "wolfbook.tex.overleafOpenGit",
+        "title": "Overleaf: Open Project with Git…",
+        "category": "Wolfbook"
+      },
+      {
         "command": "wolfbook.tex.overleafLive",
         "title": "WPaper: Link This Paper to Overleaf, in Real Time (not supported by Overleaf)…"
       },
@@ -1991,6 +2075,10 @@
         }
       ],
       "commandPalette": [
+        {
+          "command": "wolfbook.tex.enterWlatexLicense",
+          "when": "wolfbook.wlatexAvailable"
+        },
         {
           "command": "wolfbook.tex.overleafMenuConnected",
           "when": "false"
@@ -2809,7 +2897,7 @@
         "displayName": "Wolfbook: Open or Create Notebook",
         "toolReferenceName": "wolfbookNewNotebook",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Open or create a .wb notebook (extension optional), make it this session's target and bind it to a kernel. isolation:\"kernel\" starts a private kernel (no shared definitions); isolation:\"context\" keeps the shared kernel but evaluates in the notebook's own $Context (Mathematica's Unique to This Notebook). An existing file opens unchanged unless overwrite:true. Initial cells are NOT evaluated unless evaluate:true.",
+        "modelDescription": "Open/create a .wb and bind its kernel, inheriting its binding or workspace default unless kernel_id/isolation overrides it. reveal:true opens the editor and selects its controller; use to recover controller_selected:false. Otherwise load in background. Preserve cells unless overwrite:true. isolation:\"kernel\" gives a private process; \"context\" separates names. Run initial cells only with evaluate:true.",
         "inputSchema": {
           "type": "object",
           "required": [],
@@ -2834,6 +2922,10 @@
               "type": "boolean",
               "description": "If false, create/open the notebook but do not make it the MCP session target. Default true."
             },
+            "reveal": {
+              "type": "boolean",
+              "description": "Open the notebook editor and select its bound kernel automatically in this call. Use true when creating a runnable notebook or recovering controller_selected:false. Default false loads in the background. Preserves existing source and binding unless overwrite or kernel_id explicitly changes them."
+            },
             "isolation": {
               "type": "string",
               "enum": [
@@ -2841,7 +2933,7 @@
                 "kernel",
                 "context"
               ],
-              "description": "none (default): shared kernel, Global` context. kernel: start a new private kernel and bind the notebook to it (costs a licence seat; limited by wolfbook.kernels.maximum). context: shared kernel, but cells evaluate in a context of their own, saved in the notebook."
+              "description": "none: use an existing notebook binding or this workspace's new-notebook default, otherwise its shared kernel, with Global` context. Declared folder sessions default to kernel isolation unless a workspace default is configured. kernel: create/reuse a dedicated binding; allocation requires acknowledge_resource_cost:true (memory/licence seat); wolfbook.kernels.maximum is advisory. context: shared kernel, but cells evaluate in a context of their own, saved in the notebook."
             },
             "context": {
               "type": "string",
@@ -2851,9 +2943,17 @@
               "type": "string",
               "description": "With isolation:\"kernel\": optional label for the new kernel."
             },
+            "kernel_id": {
+              "type": "string",
+              "description": "Bind to any available existing kernel instead of allocating a process; prefer one associated with your repository."
+            },
+            "acknowledge_resource_cost": {
+              "type": "boolean",
+              "description": "Required when starting a private Wolfram process. Reopening an existing notebook reuses its binding across agent sessions."
+            },
             "waitMs": {
               "type": "number",
-              "description": "Maximum time to wait for VS Code to open and show the notebook editor. Default 10000, max 60000."
+              "description": "Maximum time to wait for VS Code to load the notebook document in the background. Default 10000, max 60000."
             },
             "cells": {
               "type": "array",
@@ -2898,6 +2998,62 @@
             "timeoutSeconds": {
               "type": "number",
               "description": "Total budget for evaluate:true across all initial cells. Default 60."
+            }
+          }
+        }
+      },
+      {
+        "name": "wolfbook_readNotebookFile",
+        "displayName": "Wolfbook: Read Notebook File Virtually",
+        "toolReferenceName": "wolfbookReadNotebookFile",
+        "modelDescription": "Read an unopened .nb/.wb/.evsnb/.vsnb as immutable WB JSON without an editor, kernel or disk writes. Start with view:overview; use virtual_notebook_id for bounded cells/search/wb reads. view:wb returns {cells,metadata} under notebook. virtualCellId is not a live-editor ID. Reports conversion limits. Snapshots expire: resend file plus ID to recreate unchanged content. Large results use wolfbook_getResult.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "file": {
+              "type": "string",
+              "description": "Absolute notebook path, or relative to the selected VS Code workspace. Required to create/recover a snapshot."
+            },
+            "virtual_notebook_id": {
+              "type": "string",
+              "description": "Immutable snapshot ID from an earlier read. Follow-up reads never silently use changed source."
+            },
+            "view": {
+              "type": "string",
+              "enum": [
+                "overview",
+                "cells",
+                "search",
+                "wb"
+              ],
+              "description": "overview (default): compact cell index; cells: source/metadata/outputs; search: case-insensitive literal search; wb: ordinary WB JSON for the selected cells."
+            },
+            "startCell": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "1-based starting cell, defaults to 1. Use next_startCell to continue."
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "description": "Maximum cells per response. Defaults to 100 for overview, 20 otherwise."
+            },
+            "cell_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Optional virtual cell IDs to select."
+            },
+            "query": {
+              "type": "string",
+              "description": "Literal query for view:search, matching source and optionally stored text outputs."
+            },
+            "include_outputs": {
+              "type": "boolean",
+              "description": "Include/search stored outputs in cells/search views (default true). WB view preserves stored outputs."
             }
           }
         }
@@ -3955,9 +4111,10 @@
               "type": "string",
               "enum": [
                 "text",
-                "json"
+                "json",
+                "structured"
               ],
-              "description": "Return text (default) or pretty-printed JSON when the stored result is valid JSON."
+              "description": "text/json return slices. structured returns a typed JSON value when the complete requested node fits the limit, otherwise an explicitly labeled json-chunk."
             },
             "path": {
               "type": "array",
@@ -4133,7 +4290,7 @@
         "displayName": "Wolfbook: Kernel Manager",
         "toolReferenceName": "wolfbookKernels",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Kernels and notebook bindings: list; create a private kernel (needs acknowledge_resource_cost:true — it uses a licence seat); bind or unbind a notebook; rename; stop an idle non-default kernel. Bindings never change the .wb file.",
+        "modelDescription": "List/create/bind/unbind/rename kernels or stop an idle non-default process. Create requires acknowledge_resource_cost:true. Bindings never modify .wb source. If controller_selected:false, use wolfbook_newNotebook with the exact path, reveal:true and returned kernel_id to select automatically.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -4157,7 +4314,7 @@
             },
             "notebook": {
               "type": "string",
-              "description": "Notebook path or filename for bind/unbind."
+              "description": "Absolute notebook path for bind/select/default/unbind, and optional for create."
             },
             "label": {
               "type": "string",
@@ -4178,7 +4335,7 @@
         "tags": [
           "mcp:hidden"
         ],
-        "modelDescription": "Select which live Wolfram kernel a notebook uses. Use action=list to discover kernel_id values, action=select to bind a notebook to one of them, action=default to bind it to this VS Code window's default kernel, or action=create to start a new isolated kernel. Multiple notebooks may deliberately share one kernel. Bindings are local VS Code state and never modify the .wb file.",
+        "modelDescription": "List kernels; select binds a notebook to a returned kernel_id; default binds this window's default; create allocates an isolated process. Bindings never modify .wb source. If controller_selected:false, use wolfbook_newNotebook with the exact path, reveal:true and returned kernel_id to complete selection automatically.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -6151,7 +6308,7 @@
         "name": "paper_getObject",
         "displayName": "WPaper: Get Object",
         "toolReferenceName": "paperObject",
-        "modelDescription": "Fetch one equation, figure, table, paragraph, section or theorem by \\label, stableKey or objectId, with its source, lines and sourceHash (pass that to paper_applyEdit). Read-only.",
+        "modelDescription": "Fetch one equation, figure, table, paragraph, section or theorem by \\label, stableKey or objectId, with its source, lines and sourceHash (pass that to paper_applyEdit). Read-only. Source is verbatim. If textTruncated is true, fetch again with a larger max_chars before constructing a whole-object replacement; sourceHash always covers the entire object. selectors fetches up to 10 objects in one bounded snapshot.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -6170,16 +6327,22 @@
             },
             "max_chars": {
               "type": "number",
-              "description": "Truncate the returned text (default 4000)."
+              "description": "Source characters: default 4000 for one object; total budget 8000 for a batch (maximum 32000)."
             },
             "reveal": {
               "type": "boolean",
               "description": "Open the file and reveal/select this object in the editor."
+            },
+            "selectors": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 10,
+              "items": {
+                "type": "string"
+              },
+              "description": "Read 1–10 objects from one document snapshot. Cannot combine with selector or reveal. max_chars caps total batch source."
             }
-          },
-          "required": [
-            "selector"
-          ]
+          }
         },
         "tags": [
           "mcp:family:paper"
@@ -6190,7 +6353,7 @@
         "name": "paper_getSection",
         "displayName": "WPaper: Get Section",
         "toolReferenceName": "paperSection",
-        "modelDescription": "Fetch a section (by label, stableKey or title substring) and every addressable object in it. Read-only.",
+        "modelDescription": "Fetch a section (by label, stableKey or title substring) and every addressable object in it. Read-only. The section identity/hash addresses the heading only; included text covers heading and body. Use a batch of contained-object edits for body changes, or append_to_section.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -6495,7 +6658,10 @@
               }
             },
             "verify": {
-              "type": "object",
+              "type": [
+                "object",
+                "boolean"
+              ],
               "description": "Verification defaults saved with the preview transaction.",
               "properties": {
                 "parse": {
@@ -6522,6 +6688,117 @@
                   "type": "boolean"
                 }
               }
+            },
+            "projection": {
+              "type": "string",
+              "enum": [
+                "compact",
+                "full"
+              ],
+              "description": "MCP receipt projection, default compact with full details handle. full returns all original details."
+            }
+          }
+        },
+        "tags": [
+          "mcp:family:paper"
+        ],
+        "when": "wolfbook.ctx.paper || wolfbook.tools.paper"
+      },
+      {
+        "name": "paper_listenComments",
+        "displayName": "WPaper: Listen for Comments",
+        "toolReferenceName": "paperListenComments",
+        "modelDescription": "Listen on one .tex file: start, next, context, ack, release, status, stop. Compact deliveries carry guarded source spans and context handles. Context batches accept comment_ids. Apply verify:true before ack; only unchanged comments are consumed. Reader edits take priority. start returns client wake-up setup; waiting does not wake an inactive agent. status recovers outstanding delivery identity.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "start",
+                "next",
+                "context",
+                "ack",
+                "release",
+                "status",
+                "stop"
+              ],
+              "description": "Default start. next waits/delivers; ack consumes only after a verified edit; release preserves for retry; stop removes the listener."
+            },
+            "file": {
+              "type": "string",
+              "description": "Exact .tex path, required for start; otherwise listener_id identifies the file."
+            },
+            "listener_id": {
+              "type": "string"
+            },
+            "include_existing": {
+              "type": "boolean",
+              "description": "Start with already posted comments too (default false). Set true to recover pending comments after a restart."
+            },
+            "wait_seconds": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 300,
+              "description": "next wait duration, default 45. Above 45 requires a client with long request waits, or the returned asynchronous operation handle; waiting alone cannot wake an inactive model."
+            },
+            "max_comments": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10,
+              "description": "Comments per delivery, default 1."
+            },
+            "delivery_id": {
+              "type": "string",
+              "description": "Delivery returned by next, required for ack/release."
+            },
+            "operation_id": {
+              "type": "string",
+              "description": "Successful paper_applyEdit receipt made after delivery with LaTeX verification; required for ack."
+            },
+            "agent": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "codex",
+                "claude-code",
+                "other"
+              ],
+              "description": "Client for native wake-up instructions. Default auto detects MCP client name; set explicitly for language-model clients without that metadata. The model installs its own native scheduler; Wolfbook never launches another conversation."
+            },
+            "comment_id": {
+              "type": "string",
+              "description": "Delivered comment to read with action:context."
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "context source offset, default 0."
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 8000,
+              "description": "context source characters, default 8000."
+            },
+            "projection": {
+              "type": "string",
+              "enum": [
+                "compact",
+                "full"
+              ],
+              "description": "Default compact guards and identities. full includes quotes, object source, context and metadata; status full includes wake-up instructions."
+            },
+            "comment_ids": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 10,
+              "uniqueItems": true,
+              "items": {
+                "type": "string"
+              },
+              "description": "Batch context for these delivered comments. limit is the total quoted source budget."
             }
           }
         },
@@ -6534,7 +6811,7 @@
         "name": "paper_applyEdit",
         "displayName": "WPaper: Apply Edit",
         "toolReferenceName": "paperApplyEdit",
-        "modelDescription": "Apply a paper_previewEdit transaction_id (or guarded edits directly) as one undoable edit. verify:true also parses, audits references and compiles, rolling back on failure. action=history and action=undo (with undo_token).",
+        "modelDescription": "Apply guarded semantic edits or exact text patches as one undoable edit. Comment patches use delivery_id and expected_span_hash, bypassing object lookup. verify:true compiles privately; acknowledge:true consumes only verified unchanged patched comments. Mini-editor overlaps return user-editing. save:true saves only verified edits. Response waits up to 10 seconds by default; longer work returns an operation handle.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -6664,8 +6941,11 @@
               }
             },
             "verify": {
-              "type": "object",
-              "description": "Post-apply verification. Set rollback_on_failure to restore the exact prior buffer when any requested check fails.",
+              "type": [
+                "object",
+                "boolean"
+              ],
+              "description": "true parses, audits references and compiles with rollback on failure. An object selects checks (parse/references and rollback default on; latex is opt-in); false explicitly disables verification. Saving requires successful verification.",
               "properties": {
                 "parse": {
                   "type": "boolean"
@@ -6695,6 +6975,59 @@
             "save": {
               "type": "boolean",
               "description": "Save the document after applying."
+            },
+            "delivery_id": {
+              "type": "string",
+              "description": "Active comment delivery constraining patches to its exact quoted spans; file may be inferred."
+            },
+            "patches": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 20,
+              "description": "Guarded text replacements. With delivery_id, hash the delivered editable_span; otherwise hash expected_old_text and require a unique match in current source. Verification defaults to true.",
+              "items": {
+                "type": "object",
+                "required": [
+                  "expected_old_text",
+                  "replacement",
+                  "expected_span_hash"
+                ],
+                "properties": {
+                  "comment_id": {
+                    "type": "string",
+                    "description": "Select the delivered comment when several spans match."
+                  },
+                  "expected_old_text": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "replacement": {
+                    "type": "string"
+                  },
+                  "expected_span_hash": {
+                    "type": "string",
+                    "description": "SHA-256 of the delivered span, or expected_old_text without a delivery."
+                  }
+                }
+              }
+            },
+            "acknowledge": {
+              "type": "boolean",
+              "description": "Consume only patched comments after successful LaTeX verification; returns a separate acknowledgment outcome."
+            },
+            "wait_seconds": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 45,
+              "description": "MCP inline response wait, default 10 seconds; longer operations retain asynchronous handles."
+            },
+            "projection": {
+              "type": "string",
+              "enum": [
+                "compact",
+                "full"
+              ],
+              "description": "MCP receipt projection, default compact with full details handle. full returns all original details."
             }
           }
         },
@@ -6717,16 +7050,6 @@
         "editor.wordHighlightStrongBackground": "#3399ff28",
         "editor.wordHighlightBorder": "#3399ff40",
         "editor.wordHighlightStrongBorder": "#3399ff55"
-      },
-      "editor.tokenColorCustomizations": {
-        "textMateRules": [
-          {
-            "scope": "symbol.unrecognized",
-            "settings": {
-              "foreground": "#336699"
-            }
-          }
-        ]
       },
       "[wolfram]": {
         "editor.defaultFormatter": "wolfbook.wolfbook",
@@ -7322,6 +7645,11 @@
         }
       },
       "editor.scrollbar.horizontalScrollbarSize": 0,
+      "notebook.editorOptionsCustomizations": {
+        "editor.scrollbar": {
+          "ignoreHorizontalScrollbarInContentHeight": true
+        }
+      },
       "notebook.showCellStatusBar": "visible",
       "notebook.scrolling.revealNextCellOnExecute": "none"
     },

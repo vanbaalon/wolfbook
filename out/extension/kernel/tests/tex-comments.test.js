@@ -62,7 +62,20 @@ try {
     assert.strictEqual(listed.items[0].cellId, added.cell.id);
     assert.strictEqual(listed.items[0].line, 33);
 
+    const storedBeforeCopy = fs.readFileSync(sidecarFor(file), 'utf8');
     const md = markdownFor(listed.items, file);
+    assert.ok(md.includes(`Paper: ${JSON.stringify(file)}`), 'the agent receives the full root path');
+    assert.ok(md.includes(`File: ${JSON.stringify(file)}`), 'each comment names its actual source file');
+    assert.strictEqual(md.split('Please address these WPaper comments').length - 1, 1,
+        'one compact instruction covers the report, without bloating every comment');
+    assert.ok(md.includes('paper_applyEdit(verify:true)') && md.includes('paper_listenComments'),
+        'pasting a report tells the agent how to edit safely and continue listening');
+    assert.ok(md.includes('deleted after copying') && md.includes('without recreating'),
+        'the same report also works after Copy and delete all');
+    assert.strictEqual(fs.readFileSync(sidecarFor(file), 'utf8'), storedBeforeCopy,
+        'export instructions never become stored comments or mutate the sidecar');
+    assert.ok(!markdownFor([], file).includes('keep listening'),
+        'an empty report does not request background collaboration');
     assert.ok(md.includes('paper.tex:33'));
     assert.ok(md.includes('Section: Introduction'));
     assert.ok(!md.includes(added.cell.id), 'copied comments use human locations, not storage ids');
@@ -224,6 +237,38 @@ try {
         'review navigation rejects coordinates belonging to another PDF generation');
     assert.match(client, /if \(state\.fitMode\) setTimeout\(\(\) => fitWidth\(\), 30\)/,
         'showing or hiding annotations recomputes a fitted view');
+
+    // A selection quote is per-comment; its parent keeps the durable identity.
+    // Reopening, updating, and moving the source must retain the whole quote.
+    const selectionFile = path.join(tmp, 'selection.tex');
+    const quote = 'from £14.7m to £21.9m, ' + 'selected words '.repeat(25) + '\n\\textbf{£1.7m to £4.8m}';
+    const parentText = 'Unselected lead.\nHere ' + quote + '\nUnselected tail.';
+    const parent = object(selectionFile, parentText, 10, { stableKey: 'root/paragraph/selection', lines: 3 });
+    const selected = store.add(selectionFile, parent, 'Check these figures.', {
+        selection: { quote, lineOffset: 1, endLineOffset: 2 },
+    }, [parent]);
+    const other = store.add(selectionFile, parent, 'Check the tail.', {
+        selection: { quote: 'Unselected tail.', lineOffset: 3, endLineOffset: 3 },
+    }, [parent]);
+    assert.equal(selected.cell.id, other.cell.id);
+    const reopened = new CommentStore();
+    reopened.update(selectionFile, selected.id, 'Verified figures.');
+    let selectedItems = reopened.list([selectionFile], () => [parent]).items;
+    assert.equal(selectedItems[0].sourcePreview, quote);
+    assert.equal(selectedItems[0].excerpt, quote, 'selection quotes are never replaced by the whole paragraph or truncated');
+    assert.equal(selectedItems[0].line, 11);
+    assert.equal(selectedItems[0].endLine, 12);
+    const selectedMarkdown = markdownFor(selectedItems, selectionFile);
+    assert.ok(selectedMarkdown.includes('selection.tex:11-12'));
+    assert.ok(selectedMarkdown.includes('> ' + quote.replace(/\n/g, '\n> ')));
+    assert.ok(selectedMarkdown.includes('Verified figures.'));
+    const shifted = object(selectionFile, parentText.replace('Here ', 'Inserted line.\nHere '), 30,
+        { stableKey: parent.stableKey, lines: 4 });
+    selectedItems = reopened.list([selectionFile], () => [shifted]).items;
+    assert.equal(selectedItems[0].line, 32, 'the location follows insertions above and inside its parent');
+    assert.equal(selectedItems[0].endLine, 33);
+    assert.equal(selectedItems[1].line, 34);
+    assert.equal(new CommentStore().list([selectionFile], () => [shifted]).items[0].line, 32);
 
     console.log('WPaper shared comments: OK');
 } finally {

@@ -267,6 +267,31 @@ function paperEngineIntent(text) {
     return found(pdfOutput, 'pdflatex', describe) || found(primitive, 'pdflatex', describe);
 }
 
+/** Compiler for a full PDF or native fallback. Unicode font packages cannot
+ * run under pdfLaTeX. Keep an explicit engine declaration and a configured
+ * Unicode engine; otherwise use XeLaTeX to match WLaTeX's live fonts. */
+function paperCompileEngine(text, configured = 'pdflatex') {
+    const program = paperEngineIntent(text)?.program;
+    const aliases = { xetex:'xelatex', luatex:'lualatex', pdftex:'pdflatex' };
+    const declared = aliases[program] || program;
+    if (['xelatex', 'lualatex', 'pdflatex'].includes(declared)) return declared;
+    if (typeof text !== 'string') return configured;
+    const begin = text.indexOf('\\begin{document}');
+    const preamble = (begin < 0 ? text : text.slice(0, begin))
+        .replace(/(^|[^\\])%.*$/gm, (m, c) => c + ' '.repeat(m.length - c.length));
+    // An engine-conditional template may intentionally load fontspec only
+    // in its Unicode branch. Leave that choice to its author.
+    if (/\\if(?:pdftex|PDFTeX|xetex|XeTeX|luatex|LuaTeX|tutex|TUTeX)\b/.test(preamble)) return configured;
+    const packages = /\\(?:usepackage|RequirePackage)\s*(?:\[[^\]]*\]\s*)?\{([^}]*)\}/g;
+    let unicodeFonts = false;
+    for (const match of preamble.matchAll(packages)) {
+        const names = match[1].split(',').map(name => name.trim());
+        if (names.some(name => ['xeCJK', 'xltxtra'].includes(name))) return 'xelatex';
+        if (names.some(name => ['fontspec', 'unicode-math', 'polyglossia'].includes(name))) unicodeFonts = true;
+    }
+    return unicodeFonts && configured === 'pdflatex' ? 'xelatex' : configured;
+}
+
 module.exports = {
     FLOOR_MS,
     MAX_LIVE_WAIT_MS,
@@ -282,4 +307,5 @@ module.exports = {
     generationSatisfies,
     authoritativeDelayMs,
     paperEngineIntent,
+    paperCompileEngine,
 };

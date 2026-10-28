@@ -122,7 +122,7 @@ function buildModel(scan, opts = {}) {
         else if (o.label && !byLabel.has(o.label)) byLabel.set(o.label, o);
     }
 
-    return { file, objects, byId, byKey, byLabel, warnings: scan.warnings || [] };
+    return { file, objects, byId, byKey, byLabel, warnings: scan.warnings || [], bodyEndOffset:scan.bodyEndOffset };
 }
 
 /**
@@ -271,9 +271,12 @@ function summariseObject(o, { includeText = false, maxText = 2000 } = {}) {
     if (o.title) out.title = o.title;
     if (o.target) out.target = o.target;
     if (includeText) {
-        out.text = (o.text || '').length > maxText
-            ? (o.text || '').slice(0, maxText) + `\n… (${(o.text || '').length - maxText} more chars)`
-            : o.text;
+        const source = o.text || '';
+        const limit = Number.isFinite(Number(maxText)) ? Math.max(0, Math.min(1000000, Math.floor(Number(maxText)))) : 2000;
+        out.text = source.slice(0, limit);
+        out.textTruncated = source.length > limit;
+        out.sourceChars = source.length;
+        out.returnedChars = out.text.length;
     }
     return out;
 }

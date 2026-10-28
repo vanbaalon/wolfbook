@@ -88,14 +88,28 @@ const GATE_TIMEOUT_MS = 30000;
 /** Which project each out dir's empty-directory skeleton was mirrored from. */
 const _mirrored = new Map();   // outDir -> projectDir
 
-// Executable checks are process-wide and immutable for the life of an
-// extension host. If the user installs TeX, the instructions correctly ask
-// them to restart VS Code; the new host then gets a clean cache and PATH.
+// Finder/Dock-launched VS Code may omit MacTeX and Homebrew from PATH. Keep
+// the reader's chosen tools first, then discover standard installed locations.
+// Pass this environment to latexmk as well: its engine/bibliography children
+// need the same PATH that passed the preflight checks. Never change host PATH.
+function texEnvironment(base = process.env, platform = process.platform) {
+    if (platform !== 'darwin') return { ...base };
+    const extra = ['/Library/TeX/texbin', '/opt/homebrew/bin', '/usr/local/bin',
+        '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
+    const entries = (base.PATH || '').split(path.delimiter).filter(Boolean);
+    for (const dir of extra) if (!entries.includes(dir) && fs.existsSync(dir)) entries.push(dir);
+    return { ...base, PATH:entries.join(path.delimiter) };
+}
+
+// Coalesce probes for one environment. A failure is retryable, so installing
+// or repairing a tool does not leave the window permanently unable to compile.
 const _toolProbes = new Map();
 
 function probeExecutable(command, { timeoutMs = 8000, spawnFn = spawn } = {}) {
     const cacheable = spawnFn === spawn;
-    if (cacheable && _toolProbes.has(command)) return _toolProbes.get(command);
+    const env = texEnvironment();
+    const key = `${command}\0${env.PATH || ''}`;
+    if (cacheable && _toolProbes.has(key)) return _toolProbes.get(key);
     const promise = new Promise((resolve) => {
         let child; let output = ''; let settled = false; let timer = null;
         const finish = (result) => {
@@ -105,7 +119,7 @@ function probeExecutable(command, { timeoutMs = 8000, spawnFn = spawn } = {}) {
             resolve(result);
         };
         try {
-            child = spawnFn(command, ['--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
+            child = spawnFn(command, ['--version'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
         } catch (e) {
             finish({ ok: false, command, code: e && e.code, output: '' });
             return;
@@ -117,9 +131,12 @@ function probeExecutable(command, { timeoutMs = 8000, spawnFn = spawn } = {}) {
         if (child.stdout) child.stdout.on('data', (d) => { output += d; });
         if (child.stderr) child.stderr.on('data', (d) => { output += d; });
         child.on('error', (e) => finish({ ok: false, command, code: e && e.code, output }));
-        child.on('close', (code) => finish({ ok: code === 0, command, code, output }));
+        child.on('close', (code, signal) => finish({ ok: code === 0, command, code, signal, output }));
     });
-    if (cacheable) _toolProbes.set(command, promise);
+    if (cacheable) {
+        _toolProbes.set(key, promise);
+        promise.then(result => { if (!result.ok && _toolProbes.get(key) === promise) _toolProbes.delete(key); });
+    }
     return promise;
 }
 
@@ -137,13 +154,23 @@ async function checkToolchain(engine) {
     for (const tool of ['latexmk', engine]) {
         const probe = await probeExecutable(tool);
         if (!probe.ok) {
-            return { ok: false, issue: missingToolIssue(tool, {
+            return { ok: false, issue: toolchainIssue(tool, probe, {
                 platform: process.platform,
                 manager: await detectManager(),
             }) };
         }
     }
     return { ok: true };
+}
+
+function toolchainIssue(tool, probe, options = {}) {
+    if (probe.code === 'ENOENT') return missingToolIssue(tool, options);
+    const reason = probe.code === 'ETIMEDOUT' ? 'timed out during its availability check'
+        : `failed its availability check (${probe.code ?? probe.signal ?? 'unknown exit'})`;
+    const detail = String(probe.output || '').trim().replace(/\s+/g, ' ').slice(0, 360);
+    return { kind:'tex-tool-check-failed', key:`tool-check:${tool}:${probe.code ?? probe.signal ?? 'unknown'}`,
+        tool, platform:options.platform || process.platform,
+        summary:`${tool} ${reason}. Compilation did not start. Press Compile to retry.${detail ? ` ${detail}` : ''}` };
 }
 
 /** Stable, per-document scratch directory. Never inside the user's project. */
@@ -268,24 +295,24 @@ function pdfPageCount(buf) {
 }
 
 /**
- * Per-file content hashes, keyed on (size, mtime).
+ * Per-file content hashes, keyed on (size, mtime, ctime).
  *
  * snapshotSources runs on every build and reads every source file. Caching is
  * safe in ONE DIRECTION and that is the direction Dropbox errs in: it touches
  * mtimes without changing bytes, which causes a needless re-read (right answer,
- * wasted work). The dangerous case — different bytes with size AND mtime
- * preserved — requires a write that deliberately restores both.
+ * wasted work). Sync clients can restore mtime after writing equal-size new
+ * content; ctime still changes, so that write must not reuse the old hash.
  */
-const _fileHash = new Map();   // path -> {size, mtimeMs, hash}
+const _fileHash = new Map();   // path -> {size, mtimeMs, ctimeMs, hash}
 
 function hashFileCached(f) {
     let stat = null;
     try { stat = fs.statSync(f); } catch (_) { return '\0missing'; }
     const hit = _fileHash.get(f);
-    if (hit && hit.size === stat.size && hit.mtimeMs === stat.mtimeMs) return hit.hash;
+    if (hit && hit.size === stat.size && hit.mtimeMs === stat.mtimeMs && hit.ctimeMs === stat.ctimeMs) return hit.hash;
     let hash;
     try { hash = sha256(fs.readFileSync(f)); } catch (_) { return '\0missing'; }
-    _fileHash.set(f, { size: stat.size, mtimeMs: stat.mtimeMs, hash });
+    _fileHash.set(f, { size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, hash });
     return hash;
 }
 
@@ -386,10 +413,14 @@ async function _compileLocked(o, ctx) {
 
     const toolchain = await checkToolchain(engine);
     if (!toolchain.ok) {
-        return unavailableRecord({
+        const failed = unavailableRecord({
             root, projectDir, outDir, engine, queuedAt, t0,
             issue: toolchain.issue,
         });
+        // Even a preflight failure belongs to the source revision requested.
+        // Without this identity the coordinator drops its diagnostic as stale.
+        failed.sourceSnapshotHash = o.sourceSnapshotHash ?? snapshotSources(o.sourceFiles || [root], o.overlay);
+        return failed;
     }
 
     fs.mkdirSync(outDir, { recursive: true });
@@ -438,7 +469,7 @@ async function _compileLocked(o, ctx) {
 
     const sep = process.platform === 'win32' ? ';' : ':';
     const env = {
-        ...process.env,
+        ...texEnvironment(),
         // `//` = search recursively; the trailing separator keeps the system
         // trees. TMPDIR is deliberately untouched (biber, 5.2x).
         TEXINPUTS: `${overlayDir}${path.sep}${path.sep}${sep}` +
@@ -568,8 +599,10 @@ async function _compileLocked(o, ctx) {
     }
     // A directory the project gained since we last mirrored: re-arm the walk.
     if (/I can't write on file/.test(logText)) _mirrored.delete(outDir);
-    // The GlyphMap the hook wrote, if it ran. Hashed like the synctex so a
-    // rebuild with identical output can reuse the parsed map.
+    // The GlyphMap has TWO files: glyph geometry and the source/font table.
+    // Saving an unsaved buffer can keep every glyph identical while moving
+    // its source from _wblive to the real project. Reusing geometry alone
+    // would retain the deleted temporary editor target (and old font data).
     const glyphMapPath = glyphMap ? path.join(outDir, glyphMapName) : null;
     const glyphMapMetaPath = glyphMap ? path.join(outDir, glyphMapMetaName) : null;
     let glyphMapHash = null;
@@ -584,7 +617,12 @@ async function _compileLocked(o, ctx) {
             fresh = mapM >= runStartedAt - 1500 || !pdfRewritten;
         } catch (_) { fresh = false; }
         if (fresh) {
-            try { glyphMapHash = sha256(fs.readFileSync(glyphMapPath)); } catch (_) { glyphMapHash = null; }
+            try {
+                glyphMapHash = sha256(JSON.stringify([
+                    sha256(fs.readFileSync(glyphMapPath)),
+                    sha256(fs.readFileSync(glyphMapMetaPath)),
+                ]));
+            } catch (_) { glyphMapHash = null; }
         }
     }
     let synctexHash = null;
@@ -692,7 +730,8 @@ function unavailableRecord({ root, projectDir, outDir, engine, queuedAt, t0, iss
         overlayDir: null, live: false, pdfHash: null, pdfBytes: null,
         synctexHash: null, glyphMapPath: null, glyphMapMetaPath: null,
         glyphMapHash: null, pageCount: null, pageSize: null,
-        diagnostics: [], stopped: true, stopReason: issue.summary,
+        diagnostics: [{ severity:'error', kind:'dependency', file:root, message:issue.summary }],
+        stopped: true, stopReason: issue.summary,
         errors: 1, warnings: 0, passes: null, maxPasses: null,
         passesLimited: false, rerunWanted: false, rcUnsupported: false,
         ms: Date.now() - t0, queuedMs: t0 - queuedAt,
@@ -879,6 +918,7 @@ function probeInitCode(code, { timeoutMs = 5000 } = {}) {
         let child;
         try {
             child = spawn('latexmk', ['-e', code, '--version'], {
+                env: texEnvironment(),
                 stdio: ['ignore', 'pipe', 'pipe'],
             });
         } catch (_) { resolve(false); return; }
@@ -933,6 +973,7 @@ function loadGeneration(root, { outDir, sourceFiles, overlay } = {}) {
 
 function generationIsCurrent(gen, sourceFiles, overlay) {
     if (!gen || !gen.sourceSnapshotHash) return false;
+    if (gen.assetFiles?.length && gen.assetSnapshotHash !== snapshotSources(gen.assetFiles)) return false;
     return gen.sourceSnapshotHash === snapshotSources(sourceFiles, overlay);
 }
 
@@ -954,7 +995,7 @@ function probeLualatex() {
     return new Promise((resolve) => {
         let child;
         try {
-            child = spawn('lualatex', ['--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
+            child = spawn('lualatex', ['--version'], { env:texEnvironment(), stdio: ['ignore', 'pipe', 'pipe'] });
         } catch (_) { _luaOk = false; return resolve(false); }
         let out = '';
         child.stdout.on('data', (d) => { out += d; });
@@ -965,6 +1006,7 @@ function probeLualatex() {
 }
 
 module.exports = {
+    texEnvironment, toolchainIssue,
     nextGeneration,
     describeExit, describeCompileFailure,
     glyphMapHookPath, probeLualatex,

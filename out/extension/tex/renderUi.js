@@ -26,12 +26,16 @@ const { RenderMap, FLAG } = require('./renderMap');
 const { GlyphMap } = require('./glyphMap');
 const { NativeMap } = require('./nativeMap');
 const { NativeBuildLane } = require('./nativeCompileService');
+const { hasNativeRuntime } = require('./nativeRuntime');
 const { findRoot, buildGraph } = require('./texProject');
 const {
-    nextLiveDelayMs, liveDeadlineDelayMs, cooldownDelayMs, blendLiveMs, synctexUnchanged,
-    generationSatisfies, authoritativeDelayMs, shouldUseGlyphMap, glyphMapBackoff, paperEngineIntent,
+    nextLiveDelayMs, cooldownDelayMs, blendLiveMs, synctexUnchanged,
+    generationSatisfies, authoritativeDelayMs, shouldUseGlyphMap, glyphMapBackoff, paperEngineIntent, paperCompileEngine,
 } = require('./livePolicy');
 const { foldForCompile, MARK: COLLAPSE_MARK } = require('./collapse');
+const sameRenderedSource = (st,a,b) => a===b || !!a && !!b &&
+    (st.renderlessSnapshots?.get(a) || a)===(st.renderlessSnapshots?.get(b) || b);
+const supersededNativeWork=error=>['AbortError','StaleBuild','Cancelled'].includes(error?.name);
 const { formatDependencyHelp } = require('./dependencyHelp');
 
 const FLAG_ICON = {
@@ -84,14 +88,14 @@ function makeMap(o) {
 /**
  * A source file's text, or null — a file we cannot read simply is not folded.
  *
- * CACHED ON (mtime, size), because this runs for every source file on every
+ * CACHED ON (mtime, ctime, size), because this runs for every source file on every
  * rebuild — that is once per typing pause — and a project is many files. The
  * cache is only ever a shortcut past a read whose answer cannot have changed.
  */
 const _textCache = new Map();          // file -> {key, text}
 function readFileOrNull(f) {
     let key = null;
-    try { const st = fs.statSync(f); key = `${st.mtimeMs}:${st.size}`; } catch (_) { return null; }
+    try { const st = fs.statSync(f); key = `${st.mtimeMs}:${st.ctimeMs}:${st.size}`; } catch (_) { return null; }
     const hit = _textCache.get(f);
     if (hit && hit.key === key) return hit.text;
     let text = null;
@@ -148,15 +152,48 @@ class RenderCoordinator {
         this.onDidInteractive = this._interactiveEmitter.event;
         this._liveTimers = new Map();    // rootPath -> debounce handle
         this._previewTimers = new Map(); // rootPath -> live preview throttle handle
+        this._previewRecovery = new Map(); // bounded engine retries per source revision
         this._liveFirst = new Map();
         this._idleTimers = new Map();    // rootPath -> the full-rebuild handle
+        this._sourceTexts = new Map();
         this._capOk = null;              // can latexmk take our -e? probed once
         this._reportedDependencyIssues = new Set();
+        this._buildWork = new Map();
+        const { ExternalBuildQueue, gitWorktreeBusy } = require('./externalBuildQueue');
+        this._externalBuilds = new ExternalBuildQueue({
+            busy: root => !!this._buildWork.get(root)?.size || !!this.roots.get(root)?.compiling || gitWorktreeBusy(root),
+            needed: root => {
+                const cfg = vscode.workspace.getConfiguration('wolfbook.tex');
+                if (!cfg.get('liveRender', true) || cfg.get('compile', 'onSave') === 'off') return false;
+                const st = this.roots.get(root);
+                if (!st) return false;
+                const snapshot = snapshotSources(st.files, this.liveOverlay(root));
+                const signature = this._externalSignature(st, snapshot);
+                // A failed build is retried by an actual source/asset change or
+                // manual Compile, not by delayed review notifications.
+                if (st.lastError && st.externalAttempt === signature) return false;
+                const needed = !st.map || !this.isCurrent(st, snapshot, { authoritative: st._noConverge !== snapshot });
+                if (!needed && st.sourceAhead) { st.sourceAhead = false; this._emitter.fire(st); }
+                // An identical reload can invalidate provenance without
+                // changing the PDF. Recover that window, not the whole paper.
+                if (!needed && st.nativeLane && !st.map?.available) this._scheduleNativeRefresh(st, st.nativeLane, 0);
+                return needed;
+            },
+            run: async root => {
+                const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(root));
+                const st = this.roots.get(root);
+                if (st) st.externalAttempt = this._externalSignature(st);
+                await this.build(doc, { external: true, authoritative: true, quiet: true });
+            },
+            onError: error => this.log(`external rebuild: ${error.message}`),
+        });
     }
 
     dispose() {
         if (this._disposed) return;
         this._disposed = true;
+        this._externalBuilds.dispose();
+        for (const s of this.roots.values()) this._clearNativeWork(s);
         for (const s of this.roots.values()) if (s.nativeLane) {
             const lane = s.nativeLane;
             s.nativeLane = null;
@@ -167,8 +204,10 @@ class RenderCoordinator {
         for (const t of this._previewTimers.values()) clearTimeout(t);
         for (const t of this._idleTimers.values()) clearTimeout(t);
         this._liveTimers.clear();
+        this._previewTimers.clear();
         this._liveFirst.clear();
         this._idleTimers.clear();
+        this._sourceTexts?.clear();
         this._emitter.dispose();
         this._interactiveEmitter.dispose();
     }
@@ -176,8 +215,9 @@ class RenderCoordinator {
     /**
      * The unsaved text of every file in this root's include graph.
      *
-     * Only DIRTY documents go in: a clean buffer is identical to the file, and
-     * shadowing it would copy the whole project for nothing.
+     * Dirty documents and content changes whose dirty flag has not arrived
+     * yet go in. WorkspaceEdit can deliver the new text before isDirty flips;
+     * a viewer deletion must preview that text rather than the old disk file.
      */
     liveOverlay(root) {
         const st = this.roots.get(root);
@@ -185,9 +225,12 @@ class RenderCoordinator {
         const files = new Set(st.files || [root]);
         const m = new Map();
         for (const d of vscode.workspace.textDocuments) {
-            if (!d.isDirty || d.isClosed) continue;
+            if (d.isClosed) continue;
             const f = d.uri.fsPath;
             if (!files.has(f) && f !== root) continue;
+            const pending = st.pendingOverlayVersions?.get(f) === d.version;
+            if (!d.isDirty && !pending) continue;
+            if (d.isDirty) st.pendingOverlayVersions?.delete(f);
             m.set(f, d.getText());
         }
 
@@ -225,18 +268,26 @@ class RenderCoordinator {
      * Recompile after typing pauses. Debouncing avoids obsolete queued builds
      * and keeps the viewer to at most one swap per pause.
      */
-    scheduleLive(doc, delayMs) {
+    scheduleLive(doc, delayMs, { preview = true } = {}) {
         const cfg = vscode.workspace.getConfiguration('wolfbook.tex');
         if (!cfg.get('liveRender', true)) return;
         // Someone who turned compiling off did not ask for it back by typing.
         if (cfg.get('compile', 'onSave') === 'off') return;
         const root = this.rootFor(doc);
         const st = this.roots.get(root);
+        if (this._externalBuilds.has(root)) {
+            // Reader typing retains its incremental preview. A clean buffer
+            // reload from Git contributes only to the shared full-build batch.
+            if (preview && (doc.isDirty || st?.lastEditOrigin === 'mini-editor')) this._schedulePreview(root, st);
+            this.scheduleExternal(doc);
+            return;
+        }
+        if (!st?.sourceAhead && st?.renderlessVersion?.file===doc.uri.fsPath && st.renderlessVersion.version===doc.version) return;
         // With an incremental engine the page on screen follows every
         // keystroke (see _schedulePreview); the full native build below only
         // settles what the preview cannot (PDF, map of every page, aux files),
         // so it waits for typing to really stop.
-        const previewing = delayMs === undefined && this._schedulePreview(root, st);
+        const previewing = preview && delayMs === undefined && this._schedulePreview(root, st);
         // THE SETTING IS THE CEILING, NOT THE VALUE. A paper that rebuilds in
         // 400 ms should feel immediate; one that takes 17 s must stay calm,
         // because firing sooner than the last build finished only queues work
@@ -248,15 +299,9 @@ class RenderCoordinator {
         const settleMs = Math.max(0, cfg.get('nativeSettleDelayMs', 2500));
         if (previewing) wait = Math.max(wait, settleMs);
         const prev = this._liveTimers.get(root);
-        if (!this._liveFirst.has(root)) this._liveFirst.set(root, Date.now());
-        // A continuous stream of agent edits must not postpone the first
-        // refresh indefinitely. build() already coalesces an in-flight run.
-        wait = liveDeadlineDelayMs({
-            waitMs: wait,
-            firstAtMs: this._liveFirst.get(root),
-            nowMs: Date.now(),
-            ...(previewing ? { maxWaitMs: Math.max(10000, settleMs) } : {}),
-        });
+        // Every automatic full build waits for idle. A first-edit deadline
+        // would force a PDF rebuild in the middle of sustained typing.
+        this._liveFirst.delete(root);
         if (prev) clearTimeout(prev);
         this._liveTimers.set(root, setTimeout(() => {
             this._liveTimers.delete(root);
@@ -265,6 +310,28 @@ class RenderCoordinator {
         }, wait));
         // Typing also postpones the full rebuild that converges cross-references.
         this._armAuthoritative(root, wait);
+    }
+
+    _externalSignature(st, snapshot = snapshotSources(st.files, this.liveOverlay(st.root))) {
+        const assets = this._assetFiles(st);
+        return `${snapshot}:${assets.length ? snapshotSources(assets) : ''}`;
+    }
+
+    /** All external files of one paper share one settled build after the burst. */
+    scheduleExternal(doc) {
+        if (this._disposed) return;
+        const cfg = vscode.workspace.getConfiguration('wolfbook.tex');
+        if (!cfg.get('liveRender', true) || cfg.get('compile', 'onSave') === 'off') return;
+        const root = this.rootFor(doc);
+        // Cancel competing full builds, leaving the reader's already queued
+        // incremental page preview intact.
+        for (const timers of [this._liveTimers, this._idleTimers]) {
+            const timer = timers.get(root);
+            if (timer != null) clearTimeout(timer);
+            timers.delete(root);
+        }
+        this._liveFirst.delete(root);
+        this._externalBuilds.notify(root, Math.max(1000, cfg.get('liveRenderDelayMs', 900)));
     }
 
     /**
@@ -328,9 +395,10 @@ class RenderCoordinator {
         let doc;
         try { doc = await vscode.workspace.openTextDocument(vscode.Uri.file(root)); }
         catch (_) { return; }
+        if (was && st.generation !== was) return;
         st.authoritativeRunning = true;
         this._emitter.fire(st);
-        try { await this.build(doc, { authoritative: true, quiet: true }); }
+        try { await this.build(doc, { authoritative: true, quiet: true, settleGeneration: was }); }
         finally { st.authoritativeRunning = false; this._emitter.fire(st); }
 
         // DID IT ACTUALLY FIX ANYTHING? If the correcting build still wants a
@@ -367,26 +435,24 @@ class RenderCoordinator {
     stateFor(doc) { return this.roots.get(this.rootFor(doc)) || null; }
     mapFor(doc) { const s = this.stateFor(doc); return s ? s.map : null; }
 
-    /**
-     * The viewer reports each page whose text layer it rendered. Those pages
-     * (plus a neighbour each side) are the window a native map materializes;
-     * a page rendered outside the current view asks for a refresh.
-     */
+    /** The PDF text sweep is not a viewport: it visits the entire paper. */
     noteRenderedPage(root, generation, page) {
         const st = this.roots.get(root);
         if (!st || !Number.isInteger(page)) return;
-        if (!st.renderedPages || st.renderedPages.generation !== String(generation))
-            st.renderedPages = { generation: String(generation), pages: new Set() };
-        st.renderedPages.pages.add(page);
-        // The viewer's text sweep reports every page in turn after an open: a
-        // burst is one read of the grown window, not one read per page.
+        if (!this._nativeWindow(st).includes(page)) return;
         if (st.nativeLane && st.map?.native && !st.map.hasPage(page)) this._scheduleNativeRefresh(st, st.nativeLane, 50);
     }
+    /** Materialize geometry near the reader, never every page visited before. */
+    noteNativeViewport(root, page) {
+        const st = this.roots.get(root);
+        if (!st || !Number.isInteger(page) || page < 1 || st.nativeViewportPage === page) return;
+        st.nativeViewportPage = page;
+        if (st.nativeLane && st.map?.native) this._scheduleNativeRefresh(st, st.nativeLane, 50);
+    }
     _nativeWindow(st) {
-        const pages = new Set();
-        for (const p of st.renderedPages?.pages || []) { pages.add(p - 1); pages.add(p); pages.add(p + 1); }
-        for (const p of st.map?.native ? st.map.materializedPages : []) pages.add(p);
-        return [...pages].filter(p => p >= 1).sort((a, b) => a - b);
+        const center = st.nativeViewportPage || 1;
+        const count = Math.max(center, st.generation?.pageCount || Infinity);
+        return [center - 1, center, center + 1].filter(p => p >= 1 && p <= count);
     }
     /**
      * Refreshes coalesce: a burst of keystrokes produces one page read after
@@ -394,6 +460,7 @@ class RenderCoordinator {
      * The worker translates every intermediate revision, so nothing is lost.
      */
     _scheduleNativeRefresh(st, lane, delayMs = 80) {
+        if (this._disposed || this.proDisabled || st.nativeLane !== lane) return;
         // WITH A LIVE ENGINE, NOT WHILE THE READER TYPES — whoever asks (an
         // edit, the viewer's text sweep, a read a keystroke made stale). On a
         // long paper the read is the whole document, and done per keystroke
@@ -406,6 +473,7 @@ class RenderCoordinator {
         if (lane?.interactive && sinceKey < NATIVE_REFRESH_TYPING_IDLE_MS) delayMs = Math.max(delayMs, NATIVE_REFRESH_TYPING_IDLE_MS - sinceKey);
         clearTimeout(st.nativeRefreshTimer);
         st.nativeRefreshTimer = setTimeout(() => {
+            if (this._disposed || this.proDisabled || st.nativeLane !== lane) return;
             // A key since this was asked for: wait for the pause again.
             const last = Math.max(st.lastEditAt || 0, st.lastInkAt || 0);
             if (lane?.interactive && last && Date.now() - last < NATIVE_REFRESH_TYPING_IDLE_MS) {
@@ -417,7 +485,9 @@ class RenderCoordinator {
             // would be thrown away seconds later. Afterwards, only if the map
             // is still behind (the build failed or was superseded).
             if (st.compiling) { this._scheduleNativeRefresh(st, lane, 500); return; }
-            if (st.map?.native && st.map.available && this._nativeWindow(st).every(p => st.map.hasPage(p))) return;
+            const window = this._nativeWindow(st);
+            if (st.map?.native && st.map.available && window.every(p => st.map.hasPage(p)) &&
+                (st.map.materializedPages || []).every(p => window.includes(p))) return;
             this._runNativeRefresh(st, lane).catch(() => {});
         }, delayMs);
     }
@@ -425,20 +495,32 @@ class RenderCoordinator {
      * The cold map, current, for a click that needs it now: a refresh the
      * typing postponed runs at once. True when the map is available.
      */
-    async ensureNativeMap(st, timeoutMs = 1500) {
-        if (!st?.map?.native || st.map.available) return !!st?.map?.available;
+    async ensureNativeMap(st, timeoutMs = 1500, page = null) {
+        const ready = () => !!st?.map?.available && (!Number.isInteger(page) || st.map.hasPage(page));
+        if (!st?.map?.native || ready()) return ready();
+        if (Number.isInteger(page) && page > 0) st.nativeViewportPage = page;
         const lane = st.nativeLane;
         if (!lane) return false;
         const deadline = Date.now() + timeoutMs;
         clearTimeout(st.nativeRefreshTimer);
-        await this._runNativeRefresh(st, lane).catch(() => {});
-        while (!st.map?.available && Date.now() < deadline) {
-            if (!st.nativeRefreshing) await this._runNativeRefresh(st, lane).catch(() => {});
+        const refresh = async () => {
+            let timer;
+            try {
+                await Promise.race([
+                    this._runNativeRefresh(st, lane).catch(() => {}),
+                    new Promise(resolve => { timer = setTimeout(resolve, Math.max(0, deadline - Date.now())); }),
+                ]);
+            } finally { clearTimeout(timer); }
+        };
+        await refresh();
+        while (!ready() && !this._disposed && st.nativeLane === lane && Date.now() < deadline) {
+            if (!st.nativeRefreshing) await refresh();
             await new Promise(resolve => setTimeout(resolve, 10));
         }
-        return !!st.map?.available;
+        return !this._disposed && st.nativeLane === lane && ready();
     }
     async _runNativeRefresh(st, lane) {
+        if (this._disposed || this.proDisabled || st.nativeLane !== lane) return;
         if (st.nativeRefreshing) { st.nativeRefreshAgain = true; return; }
         st.nativeRefreshing = true;
         try {
@@ -449,7 +531,7 @@ class RenderCoordinator {
             catch (error) {
                 // A keystroke during pagination invalidates the view; read again
                 // after the burst instead of giving the lane up.
-                if (error?.name === 'StaleBuild') { st.nativeRefreshAgain = true; return; }
+                if (supersededNativeWork(error)) { st.nativeRefreshAgain = true; return; }
                 throw error;
             }
             if (!view || st.nativeLane !== lane || st.generation !== generation || generation?.nativeSource !== lane.source) return;
@@ -468,6 +550,10 @@ class RenderCoordinator {
             st.map = map;
             this._emitter.fire(st);
         } catch (error) {
+            if(supersededNativeWork(error)) {
+                if(st.nativeLane===lane)st.nativeRefreshAgain=true;
+                return;
+            }
             this.log(`  native mapping: ${error.message}`);
             await this._retireNativeLane(st, lane, error.message);
         } finally {
@@ -488,7 +574,7 @@ class RenderCoordinator {
      */
     _schedulePreview(root, st, { now = false } = {}) {
         const lane = st && st.nativeLane;
-        if (!lane || !lane.interactive || this._disposed || st.nativeOff) return false;
+        if (!lane || !lane.interactive || this._disposed || this.proDisabled || st.nativeOff) return false;
         const cfg = vscode.workspace.getConfiguration('wolfbook.tex');
         const throttle = Math.max(0, cfg.get('livePreviewThrottleMs', 30));
         // LEADING EDGE WHEN IDLE. With no preview build in flight the keystroke
@@ -514,7 +600,7 @@ class RenderCoordinator {
         clearTimeout(this._previewTimers.get(root));
         this._previewTimers.set(root, setTimeout(() => {
             this._previewTimers.delete(root);
-            if (this._disposed || st.nativeLane !== lane) return;
+            if (this._disposed || this.proDisabled || st.nativeLane !== lane) return;
             const next = { started: Date.now(), shown: false, pending: false, run: null };
             const run = this._runInteractive(st, lane, root, { root, sourceFiles: st.files, overlay: this.liveOverlay(root),
                 nativePages: this._nativeWindow(st) }, next).catch(() => { /* logged inside */ });
@@ -542,11 +628,12 @@ class RenderCoordinator {
      * settle). At most two per text, as LaTeX's own reruns converge.
      */
     _scheduleReferencePass(root, st, lane) {
+        if (this._disposed || this.proDisabled || st.nativeOff || st.nativeLane !== lane) return;
         const timers = (this._referenceTimers ||= new Map());
         clearTimeout(timers.get(root));
         if (st.referencePassText === st.lastEditAt && (st.referencePasses || 0) >= 2) return;
         const fire = () => {
-            if (this._disposed || st.nativeLane !== lane || !lane.interactive) return;
+            if (this._disposed || this.proDisabled || st.nativeOff || st.nativeLane !== lane || !lane.interactive) return;
             const last = Math.max(st.lastEditAt || 0, st.lastInkAt || 0);
             const wait = last ? NATIVE_REFRESH_TYPING_IDLE_MS - (Date.now() - last) : 0;
             if (wait > 0 || this._previewBusy?.has(root)) { timers.set(root, setTimeout(fire, Math.max(wait, 30))); return; }
@@ -569,6 +656,7 @@ class RenderCoordinator {
      * their next key: a live build whose pages are not drawn.
      */
     _warmLiveAfterSettle(root, st, lane) {
+        if (this._disposed || this.proDisabled || st.nativeOff || st.nativeLane !== lane) return;
         if (!lane?.interactive || typeof lane.liveAuxiliaryStale !== 'function' || !lane.liveAuxiliaryStale()) return;
         const last = Math.max(st.lastEditAt || 0, st.lastInkAt || 0);
         if ((last && Date.now() - last < NATIVE_REFRESH_TYPING_IDLE_MS) || this._previewBusy?.has(root)) return;
@@ -589,7 +677,7 @@ class RenderCoordinator {
      */
     _previewFirstOpen(root, st) {
         const lane = st && st.nativeLane;
-        if (!lane || !lane.interactive || this._disposed || st.nativeOff) return;
+        if (!lane || !lane.interactive || this._disposed || this.proDisabled || st.nativeOff) return;
         const busy = (this._previewBusy ||= new Map());
         if (busy.has(root)) return;
         const run = this._runInteractive(st, lane, root, { root, sourceFiles: st.files, overlay: this.liveOverlay(root),
@@ -615,12 +703,16 @@ class RenderCoordinator {
     }
 
     async _runInteractive(st, lane, root, compileOpts, cur = null) {
+        if (this._disposed || this.proDisabled || st.nativeOff || st.nativeLane !== lane) return null;
         const t0 = Date.now();
+        const revision = st.sourceRevision || 0;
+        const diagnosticsAtStart = st.diagnosticsSequence || 0;
+        const keyAt = st.lastEditAt || t0;
         let result = null;
         try {
             result = await lane.interactiveBuild({ ...compileOpts,
                 onPage: page => {
-                    if (this._disposed || st.nativeLane !== lane) return;
+                    if (this._disposed || this.proDisabled || st.nativeLane !== lane) return;
                     this._interactiveEmitter.fire({ kind:'page', root, ...page });
                     // FRESH, not merely "changed": a build re-sends pages it calls
                     // changed that are identical to what was delivered before
@@ -641,7 +733,7 @@ class RenderCoordinator {
                 // next key may supersede this build, and its page comes when
                 // the typing pauses.
                 onFragment: fragment => {
-                    if (this._disposed || st.nativeLane !== lane) return;
+                    if (this._disposed || this.proDisabled || st.nativeLane !== lane) return;
                     this._interactiveEmitter.fire({ kind:'fragment', root, ...fragment });
                     if (cur && fragment.placement && fragment.txdl) {
                         cur.fragmentShown = true;
@@ -649,7 +741,7 @@ class RenderCoordinator {
                     }
                 },
                 onPageMap: map => {
-                    if (this._disposed || st.nativeLane !== lane) return;
+                    if (this._disposed || this.proDisabled || st.nativeLane !== lane) return;
                     this._interactiveEmitter.fire({ kind:'pageMap', root, lane, ...map });
                 } });
         } catch (error) {
@@ -658,26 +750,52 @@ class RenderCoordinator {
             this.log(`  WLaTeX live preview: ${error.message}`);
             return null;
         }
-        if (!result || this._disposed || st.nativeLane !== lane) return null;
+        if (!result || this._disposed || this.proDisabled || st.nativeLane !== lane) return null;
+        // The full compile is authoritative. An older live run finishing
+        // late cannot replace its diagnostics, even for identical source.
+        const canPublishDiagnostics = (st.sourceRevision || 0) === revision &&
+            !(st.compileDiagnostics?.revision === revision && st.compileDiagnostics.sequence > diagnosticsAtStart);
         if (!result.ok) {
-            this.log(`  WLaTeX live preview skipped: ${result.diagnostics[0]?.message || 'unknown reason'}`);
+            const problem = result.diagnostics?.find(d => d.severity === 'error') || result.diagnostics?.[0];
+            const reason = `${problem?.line ? `Line ${problem.line}: ` : ''}${problem?.message || 'the live build failed'}`;
+            this.log(`  WLaTeX live preview skipped: ${reason}`);
+            if (canPublishDiagnostics) {
+                const sourceErrors = (result.diagnostics || []).filter(d => d.severity === 'error' && !d.producer);
+                const producer = problem?.producer === true && !sourceErrors.length;
+                st.livePreviewError = { revision, reason, producer };
+                // A preview watchdog or restart failure says nothing about
+                // the document's TeX. Keep its real diagnostics untouched.
+                if (!producer) st.liveDiagnostics = { revision, at:Date.now(), sequence:st.diagnosticsSequence = (st.diagnosticsSequence || 0) + 1,
+                    list:sourceErrors.map(d => ({ ...d, file:d.file ? path.resolve(lane.projectDir, d.file) : null })) };
+                this._emitter.fire(st);
+                if (producer) this._retryPreview(st, lane, revision);
+            }
             return result;
         }
         // THE LIVE ERRORS, NOW. A preview that hit a TeX error says so while
         // the reader is still at the keyboard; the next full build's own
         // diagnostics replace these (renderDiagnostics compares the times).
-        const errors = (result.diagnostics || []).filter(d => d.severity === 'error' && d.line != null)
+        const errors = (result.diagnostics || []).filter(d => d.severity === 'error')
             .map(d => ({ ...d, file: d.file ? path.resolve(lane.projectDir, d.file) : null }));
         const hadLive = !!st.liveDiagnostics?.list.length;
-        st.liveDiagnostics = { at: Date.now(), list: errors };
+        const hadPreviewError = !!st.livePreviewError;
+        if (canPublishDiagnostics) {
+            const problem = result.diagnostics?.find(d => d.severity === 'error');
+            st.livePreviewError = problem ? { revision,
+                reason:`${problem.line ? `Line ${problem.line}: ` : ''}${problem.message}` } : null;
+        }
+        if (canPublishDiagnostics) st.liveDiagnostics = { revision, at: Date.now(),
+            sequence:st.diagnosticsSequence = (st.diagnosticsSequence || 0) + 1, list: errors };
+        if ((st.sourceRevision || 0) === revision) this._clearPreviewRecovery(root);
         // The page now shows the latest text: the status says "live".
         const wasCurrent = st.livePreviewAt >= (st.lastEditAt || 0);
-        st.livePreviewAt = Date.now();
+        st.livePreviewAt = keyAt;
+        st.livePreviewRevision = revision;
         const r = result.report || {};
         st.livePreviewStats = { firstChangedMs: r.first_changed_ms ?? null, totalMs: r.total_ms ?? null,
             recomputed: r.pages_recomputed ?? null, reused: r.pages_reused ?? null,
             sinceKeyMs: st.lastEditAt ? Date.now() - st.lastEditAt : null };
-        if (errors.length || hadLive || !wasCurrent) this._emitter.fire(st);
+        if (errors.length || hadLive || hadPreviewError || !wasCurrent) this._emitter.fire(st);
         const report = result.report || {};
         // Honest by construction: this says what the preview recomputed, not
         // what is settled. The settled state is still the cold build's, and
@@ -704,10 +822,79 @@ class RenderCoordinator {
      * to latexmk is exactly what made the lane untrustworthy.
      */
     async _retireNativeLane(st, lane, reason = null) {
-        if (st.nativeLane === lane) st.nativeLane = null;
+        const current = st.nativeLane === lane;
+        if (current) {
+            this._clearNativeWork(st);
+            st.nativeLane = null;
+            if (reason) st.nativeUnavailable = reason;
+        }
         try { await lane.close(); }
         catch (error) { this.log(`WLaTeX shutdown: ${error.message}`); }
-        if (reason) this._noticeNativeLane(`WLaTeX preview stopped: ${reason}. Using the normal WPaper compiler until the next Compile.`);
+        if (current && !this._disposed && !st.nativeLane) this._emitter.fire(st);
+        if (current && reason) this._noticeNativeLane(`WLaTeX preview stopped: ${reason}. Using the normal WPaper compiler until the next Compile.`);
+    }
+
+    _clearPreviewRecovery(root) {
+        clearTimeout(this._previewRecovery?.get(root)?.timer);
+        this._previewRecovery?.delete(root);
+    }
+
+    _retryPreview(st, lane, revision) {
+        const root = st.root;
+        let retry = this._previewRecovery.get(root);
+        if (!retry || retry.revision !== revision) {
+            this._clearPreviewRecovery(root);
+            retry = { revision, attempts:0, timer:null };
+            this._previewRecovery.set(root, retry);
+        }
+        if (retry.timer || retry.attempts >= 2) return;
+        retry.attempts++;
+        retry.timer = setTimeout(() => {
+            retry.timer = null;
+            if (this._disposed || this.proDisabled || st.nativeOff || st.nativeLane !== lane ||
+                (st.sourceRevision || 0) !== revision || !st.livePreviewError?.producer) return;
+            this._schedulePreview(root, st, { now:true });
+        }, retry.attempts * 1000);
+    }
+
+    _clearNativeWork(st) {
+        this._clearPreviewRecovery(st.root);
+        clearTimeout(st.nativeRefreshTimer);
+        st.nativeRefreshTimer = null;
+        st.nativeRefreshAgain = false;
+        for (const timers of [this._previewTimers, this._referenceTimers]) {
+            clearTimeout(timers?.get(st.root));
+            timers?.delete(st.root);
+        }
+        const cur = this._previewCur?.get(st.root);
+        if (cur) { clearTimeout(cur.graceTimer); cur.pending = false; }
+        this._previewCur?.delete(st.root);
+        this._previewBusy?.delete(st.root);
+    }
+
+    /** A deliberate engine setting change supersedes work prepared for the old engine. */
+    configurationChanged(event) {
+        if (this._disposed || !['mapEngine', 'wlatexDirectory', 'engine'].some(key =>
+            event.affectsConfiguration(`wolfbook.tex.${key}`))) return false;
+        this._licenseRefused = null;
+        for (const st of this.roots.values()) {
+            st.buildPreparation = (st.buildPreparation || 0) + 1;
+            st.running?.abort();
+            this._clearNativeWork(st);
+            for (const timers of [this._liveTimers, this._idleTimers]) {
+                clearTimeout(timers.get(st.root));
+                timers.delete(st.root);
+            }
+            this._liveFirst.delete(st.root);
+            st.nativeRefusedSnapshot = null;
+            st.nativeRefusedDirectory = null;
+            st.nativeUnavailable = null;
+            st.prevMap = st.map;
+            st.map = null;
+            if (st.nativeLane) this._retireNativeLane(st, st.nativeLane).catch(error => this.log(error.message));
+            this._emitter.fire(st);
+        }
+        return true;
     }
 
     _noticeNativeLane(message, license = false) {
@@ -816,16 +1003,59 @@ class RenderCoordinator {
     }
 
     /** Feed an edit through, so the map can translate rather than go stale. */
-    noteChange(e) {
+    noteChange(e, { origin = 'editor' } = {}) {
+        if (this._disposed) return;
+        const file = e.document.uri.fsPath;
+        if (!e.contentChanges?.length) {
+            // The later dirty/save notification ends the WorkspaceEdit gap.
+            // Do not leave a clean buffer shadowing future disk changes.
+            this.roots.get(this.rootOf.get(file))?.pendingOverlayVersions?.delete(file);
+            return;
+        }
         const st = this.stateFor(e.document);
         if (!st) return;
-        st.sourceAhead = true;
+        const after=typeof e.document.getText==='function' ? e.document.getText() : null;
+        const impact=after==null ? {renderChanged:true} : require('./renderChange').editImpact(
+            after,e.contentChanges,this._sourceTexts?.get(file));
+        if (after!=null) (this._sourceTexts ||= new Map()).set(file,after);
+        if (impact.sourceChanged===false) return impact;
+        const wasAhead=!!st.sourceAhead;
+        // Only a proven blank-line space edit can alias an already-current
+        // PDF. Capture both raw snapshots: real pending edits stay behind.
+        let beforeSnapshot=null;
+        if (!impact.renderChanged) {
+            try {
+                const overlay=new Map(this.liveOverlay(st.root) || []);
+                overlay.set(file,impact.before);
+                beforeSnapshot=snapshotSources(st.files,overlay);
+            } catch (_) { /* unknown provenance still needs a build */ }
+        }
+        st.renderlessVersion=!impact.renderChanged ? {file,version:e.document.version} : null;
+        if (origin === 'external-reload' && !e.document.isDirty) st.pendingOverlayVersions?.delete(file);
+        else (st.pendingOverlayVersions ||= new Map()).set(file, e.document.version);
+        st.sourceAhead = impact.renderChanged || wasAhead;
         st.lastEditAt = Date.now();
+        st.lastEditOrigin = origin;
+        if (impact.renderChanged) {
+            st.sourceRevision = (st.sourceRevision || 0) + 1;
+            st.renderlessSnapshots?.clear();
+        } else if (beforeSnapshot) {
+            const afterSnapshot=snapshotSources(st.files,this.liveOverlay(st.root));
+            const aliases=st.renderlessSnapshots ||= new Map();
+            const base=aliases.get(beforeSnapshot) || beforeSnapshot;
+            aliases.set(afterSnapshot,base);
+            if (aliases.size>64) {
+                const key=st.generation?.sourceSnapshotHash, generationBase=aliases.get(key);
+                aliases.clear(); aliases.set(afterSnapshot,base);
+                if (generationBase) aliases.set(key,generationBase);
+            }
+        }
+        impact.pendingRendering=st.sourceAhead;
         // A KEY KILLS THE BACKGROUND FULL BUILD. Its text is gone; the live
         // lane takes the key, and the next pause starts a full build of the
         // new text. A forced Compile is left to finish. A save's change
         // event (no content changes: only the dirty flag moved) is no key.
-        if (st.running && st.backgroundCompiling && !st.forcedCompiling && e.contentChanges?.length) {
+        if (impact.renderChanged && st.running && st.backgroundCompiling && !st.forcedCompiling && !st.externalCompiling && e.contentChanges?.length) {
             const running = st.running;
             st.running = null;
             st.runningSnapshot = null;
@@ -842,17 +1072,21 @@ class RenderCoordinator {
             lane.noteChange(e.document, e.contentChanges).then(() => {
                 if (st.nativeLane === lane) this._scheduleNativeRefresh(st, lane);
             }).catch(async error => {
+                if(supersededNativeWork(error)) {
+                    if(st.nativeLane===lane)this._scheduleNativeRefresh(st,lane);
+                    return;
+                }
                 this.log(`  native mapping: ${error.message}`);
                 await this._retireNativeLane(st, lane, error.message);
             });
         }
-        if (!st.map) return;
-        const file = e.document.uri.fsPath;
+        if (!st.map) return impact;
         for (const c of e.contentChanges) {
             const removed = c.range.end.line - c.range.start.line;
             const added = (c.text.match(/\n/g) || []).length;
             if (removed !== added) st.map.noteEdit(file, c.range.start.line + 1, added - removed);
         }
+        return impact;
     }
 
     /**
@@ -865,14 +1099,35 @@ class RenderCoordinator {
      * content nobody has any more.
      */
     invalidate(file) {
+        _textCache.delete(file);
         const root = this.rootOf.get(file) || file;
         const st = this.roots.get(root);
         if (!st) return false;
+        st.renderlessSnapshots?.clear(); st.renderlessVersion=null;
         st.sourceAhead = true;
+        st.sourceRevision = (st.sourceRevision || 0) + 1;
         st.nativeLane?.invalidate();
         if (st.map?.native) st.map.noteEdit();
         this._emitter.fire(st);
         return true;
+    }
+
+    /** Binary assets are dependencies, never text overlays or review edits. */
+    invalidateAsset(root, file) {
+        const st = this.roots.get(root);
+        if (!st) return false;
+        st.assetFiles ||= new Set();
+        st.assetFiles.add(file);
+        return this.invalidate(root);
+    }
+
+    _assetFiles(st, generation = st.generation) {
+        return [...new Set([...(st.assetFiles || []), ...(generation?.assetFiles || [])])].sort();
+    }
+
+    _assetsCurrent(st, generation = st.generation) {
+        const files = this._assetFiles(st, generation);
+        return !files.length || generation?.assetSnapshotHash === snapshotSources(files);
     }
 
     /**
@@ -886,7 +1141,8 @@ class RenderCoordinator {
     isCurrent(st, snapshot, { authoritative = false } = {}) {
         const g = st.generation;
         if (!g || !g.sourceSnapshotHash) return false;
-        if (g.sourceSnapshotHash !== snapshot) return false;
+        if (!sameRenderedSource(st,g.sourceSnapshotHash,snapshot)) return false;
+        if (!this._assetsCurrent(st, g)) return false;
         return generationSatisfies(g, { authoritative });
     }
 
@@ -901,10 +1157,33 @@ class RenderCoordinator {
      * WLaTeX's full build with its exact map, where `force` runs latexmk.
      * Going to an agent's change asks for one (TexViewer.compileForReview).
      */
-    async build(doc, { force = false, live = false, authoritative = false, quiet = false, priority = false } = {}) {
+    async build(doc, options = {}) {
+        if (this._disposed) return;
+        const root = this.rootFor(doc), st = this.roots.get(root);
+        if (options.force || options.priority) this._externalBuilds.cancel(root);
+        else if (!options.external && this._externalBuilds.has(root)) {
+            this.scheduleExternal(doc);
+            return st;
+        }
+        // Cover asynchronous engine preparation as well as the actual process:
+        // a watcher must not supersede a manual Compile still opening its lane.
+        const token = {};
+        const work = this._buildWork.get(root) || new Set();
+        this._buildWork.set(root, work); work.add(token);
+        st.externalWork = token; st.externalCompiling = !!options.external;
+        try { return await this._build(doc, options); }
+        finally {
+            work.delete(token);
+            if (!work.size) this._buildWork.delete(root);
+            if (st.externalWork === token) st.externalCompiling = false;
+        }
+    }
+
+    async _build(doc, { force = false, firstPass = false, settleGeneration = null, live = false, authoritative = false, quiet = false, priority = false, external = false } = {}) {
         const waited = force || priority;
         if (this._disposed) return;
         const root = this.rootFor(doc);
+        if (typeof doc.getText==='function') (this._sourceTexts ||= new Map()).set(doc.uri.fsPath,doc.getText());
         // A deliberate save/Compile supersedes the debounce which preceded it.
         // Leaving that timer armed lets it wake during the authoritative build
         // and abort the very compile the reader explicitly requested.
@@ -915,15 +1194,22 @@ class RenderCoordinator {
             this._liveFirst.delete(root);
         }
         const st = this.roots.get(root);
+        const background = !waited && !!st.generation;
+        const sourceRevision = st.sourceRevision || 0;
         const preparation = st.buildPreparation = (st.buildPreparation || 0) + 1;
-        const preparing = () => !this._disposed && this.roots.get(root) === st && st.buildPreparation === preparation;
+        const preparing = () => !this._disposed && this.roots.get(root) === st && st.buildPreparation === preparation &&
+            (!background || (st.sourceRevision || 0) === sourceRevision);
         const overlay = this.liveOverlay(root);
         // ONE snapshot per build. It used to be computed twice — here and again
         // inside compile() — which reads and hashes every source file twice per
         // keystroke pause, and let the two disagree if a file moved between them.
         const snapshot = snapshotSources(st.files, overlay);
-        // An explicit Compile is never a capped build.
-        const wantFull = authoritative || force;
+        const assetFiles = this._assetFiles(st);
+        const assetSnapshotHash = assetFiles.length ? snapshotSources(assetFiles) : null;
+        // The viewer's Compile requests fresh output immediately; it need not
+        // wait for reference convergence. Export/verification still request a
+        // full build. `force` alone retains that full-build contract for tools.
+        const wantFull = authoritative || (force && !firstPass);
         // THE ENGINE EMITS THE MAP (tex/glyphMap.js). `mapEngine` auto means:
         // build the WPaper view with lualatex + the wbmap hook when lualatex is
         // installed, so the render map is read off the engine rather than
@@ -938,6 +1224,16 @@ class RenderCoordinator {
         // WLaTeX (the ordinary map engine; no live pages, no page typing).
         if (this.proDisabled && mapEngine === 'wlatex') mapEngine = 'auto';
         const nativeDirectory = cfg0.get('wlatexDirectory', '') || process.env.WLATEX_HOME || '';
+        // An unreleased optional engine must be invisible when absent, even
+        // with a stale opt-in setting or a paper requesting another engine.
+        if (mapEngine === 'wlatex' && !hasNativeRuntime(nativeDirectory)) {
+            mapEngine = 'auto';
+            st.nativeUnavailable = 'Optional runtime absent; using the normal WPaper compiler.';
+            if (st.nativeLane) {
+                await this._retireNativeLane(st, st.nativeLane);
+                if (!preparing()) return st;
+            }
+        }
         if (force) st.nativeRefusedSnapshot = null;
         // A SETTLED NATIVE BUILD IS AUTHORITATIVE. Saves and the convergence
         // timer stay on the native lane, which runs the auxiliary passes and
@@ -946,16 +1242,23 @@ class RenderCoordinator {
         // sources left a tool pending (`rerunWanted`).
         const nativeUnsettled = st.generation?.runner === 'wlatex' && st.generation.rerunWanted &&
             st.generation.sourceSnapshotHash === snapshot;
-        let wantNative = mapEngine === 'wlatex' && !force && !(authoritative && nativeUnsettled);
+        // Settle with the producer of the first PDF. Switching a manual
+        // pdfLaTeX preview to WLaTeX here changes its layout, rather than just
+        // resolving its references, and discards the useful auxiliary files.
+        const settleConventional = settleGeneration?.runner === 'latexmk';
+        let wantNative = mapEngine === 'wlatex' && !force && !settleConventional && !(authoritative && nativeUnsettled);
         // A PAPER WRITTEN FOR ANOTHER ENGINE. `% !TEX program = pdflatex`
         // says so outright; a paper that failed natively but built with the
-        // configured compiler (`\pdfoutput`, luacode) proved it. Either keeps
-        // this paper off the native lane until its preamble changes.
-        const hints = mapEngine === 'wlatex' ? paperEngineHints(root, overlay) : null;
-        if (st.nativeIncompatible && st.nativeIncompatible.preamble !== hints?.preamble) st.nativeIncompatible = null;
+        // configured compiler (`\pdfoutput`, luacode) proved it. A declared
+        // engine holds until its preamble changes; a comparison holds only
+        // for the exact text compared, so a repaired body can recover Pro.
+        const hints = paperEngineHints(root, overlay, cfg0.get('engine', 'pdflatex'));
+        if (st.nativeIncompatible && (st.nativeIncompatible.preamble !== hints?.preamble ||
+            st.nativeIncompatible.snapshot !== snapshot)) st.nativeIncompatible = null;
+        if (st.nativeIncompatibleTried && st.nativeIncompatibleTried !== snapshot) st.nativeIncompatibleTried = null;
         // The writer chose WLaTeX for this preamble anyway (see _noticeNativeOff).
         const overridden = !!hints?.preamble && st.nativeOverride === hints.preamble;
-        const intent = hints?.intent && !['xelatex', 'xetex'].includes(hints.intent.program) && !overridden ? hints.intent : null;
+        const intent = mapEngine === 'wlatex' && hints?.intent && !['xelatex', 'xetex'].includes(hints.intent.program) && !overridden ? hints.intent : null;
         const where = intent ? `${intent.why}${intent.line ? `, line ${intent.line}` : ''}` : '';
         st.nativeOff = intent ? (intent.why.startsWith('% !TEX') ? `the paper asks for ${intent.program} (${where})`
             : `the paper is written for ${intent.program} (${where})`) : st.nativeIncompatible?.reason || null;
@@ -975,6 +1278,13 @@ class RenderCoordinator {
             // A pdfLaTeX paper is built with pdflatex (SyncTeX), not
             // LuaLaTeX's exact map: the PDF is the one its author gets.
             mapEngine = st.nativeOffEngine === 'pdflatex' ? 'off' : 'auto';
+            // THE LANE GOES WITH IT. Left attached, every later build was a
+            // pdflatex generation "on the lane", which the Pro badge can only
+            // read as `settling` — it spun for the rest of the session.
+            if (st.nativeLane) {
+                await this._retireNativeLane(st, st.nativeLane);
+                if (!preparing()) return st;
+            }
         }
         if (wantNative && st.nativeRefusedSnapshot === snapshot && st.nativeRefusedDirectory === nativeDirectory) {
             wantNative = false;
@@ -1008,7 +1318,7 @@ class RenderCoordinator {
                 if (error?.code === 'WLATEX_LICENSE') this._licenseRefused = error;
                 if (st.nativeUnavailable !== reason) this.log(reason);
                 st.nativeUnavailable = reason;
-                this._noticeNativeLane(reason, error?.code === 'WLATEX_LICENSE');
+                // Keep startup diagnostics in the log; no unreleased-engine popup.
                 wantNative = false;
                 mapEngine = 'auto';
             }
@@ -1021,7 +1331,10 @@ class RenderCoordinator {
             if (this._luaOk == null) this._luaOk = await probeLualatex();
         }
         if (!preparing()) return st;
-        const wantGlyphMap = shouldUseGlyphMap({
+        // An automatic LuaLaTeX map must not override a XeLaTeX font setup
+        // or a paper's explicit pdfLaTeX declaration.
+        const wantGlyphMap = settleConventional ? !!settleGeneration.glyphMapPath : (mapEngine === 'lualatex' ||
+            (hints?.engine !== 'xelatex' && !['pdflatex', 'pdftex'].includes(hints?.program))) && shouldUseGlyphMap({
             mapEngine,
             luaOk: !!this._luaOk,
             force,
@@ -1051,7 +1364,7 @@ class RenderCoordinator {
             const cached = loadGeneration(root, { sourceFiles: st.files, overlay });
             // A cached generation without the glyph map is not the one we want
             // when the engine can emit one: compile instead of reviving it.
-            if (cached && !wantNative && !(wantGlyphMap && !cached.glyphMapPath)) {
+            if (cached && this._assetsCurrent(st, cached) && !wantNative && !(wantGlyphMap && !cached.glyphMapPath)) {
                 st.generation = cached;
                 st.map = makeMap({
                     generation: cached,
@@ -1122,12 +1435,10 @@ class RenderCoordinator {
         // "compiling…" banner a deliberate Compile deserves.
         st.liveCompiling = live;
         st.forcedCompiling = waited;
-        // BACKGROUND FULL BUILDS ARE INVISIBLE. With WLaTeX Pro the live lane
-        // already shows what is typed, so the full build after a pause (and a
-        // save's, and the convergence pass) runs behind it with no glow, and
-        // the next key kills it (noteChange). Only the Compile button, or a
-        // paper with nothing on screen yet, glows.
-        st.backgroundCompiling = !waited && mapEngine === 'wlatex' && !!st.generation;
+        // Automatic builds on either engine keep the existing paper visible
+        // without a blue shade; the next key kills them (noteChange). Only
+        // a deliberate Compile/priority request or first open glows.
+        st.backgroundCompiling = background;
         this._emitter.fire(st);
 
         const t0 = Date.now();
@@ -1137,7 +1448,7 @@ class RenderCoordinator {
         // notification per pause would be intolerable.
         let progress = null;
         let progressDone = null;
-        if (!live && !quiet) {
+        if (!live && !quiet && !st.backgroundCompiling) {
             const ready = new Promise(r => { progressDone = r; });
             vscode.window.withProgress({
                 location: vscode.ProgressLocation.Notification,
@@ -1152,13 +1463,15 @@ class RenderCoordinator {
         const note = (msg) => { try { if (progress) progress.report({ message: msg }); } catch (_) { /* gone */ } };
         try {
             const cfg = vscode.workspace.getConfiguration('wolfbook.tex');
-            // ONE PASS WHILE TYPING. The correction is scheduled, not skipped:
-            // a limited generation arms the idle rebuild and never satisfies a
-            // save. Capped only when latexmk has been shown to accept the -e.
-            const capWanted = live && !wantFull && !wantNative && cfg.get('liveSinglePass', true);
+            // Publish the first usable PDF before settling its references.
+            // Viewer Compile explicitly asks for this; typing can opt out via
+            // liveSinglePass. Only a limited/unsettled result arms the quiet
+            // follow-up below. Export and verification always settle in place.
+            const capWanted = !wantFull && !wantNative &&
+                (firstPass || (live && cfg.get('liveSinglePass', true)));
             if (capWanted && this._capOk === null) {
                 this._capOk = await probeInitCode(MAX_PASSES_CODE(1));
-                if (!this._capOk) this.log('  latexmk refused the pass cap — live builds stay full');
+                if (!this._capOk) this.log('  latexmk refused the pass cap — builds stay full');
             }
             const compileOpts = {
                 root,
@@ -1176,7 +1489,7 @@ class RenderCoordinator {
                 nativePages: this._nativeWindow(st),
                 // The skeleton only has to be walked when it might have changed.
                 mirror: live ? 'auto' : 'always',
-                engine: st.nativeOffEngine || cfg.get('engine', 'pdflatex'),
+                engine: (settleConventional && settleGeneration.engine) || st.nativeOffEngine || hints?.engine || cfg.get('engine', 'pdflatex'),
                 onLog: (l) => {
                     const run = /^Latexmk: Run number (\d+)/.exec(l);
                     if (run) { note(`pass ${run[1]}`); return; }
@@ -1235,20 +1548,25 @@ class RenderCoordinator {
                 }
                 if (gen.nativeCompiledSources) gen.sourceSnapshotHash = snapshotSources(st.files,
                     new Map([...(overlay || []), ...gen.nativeCompiledSources]));
-                // A document error WLaTeX hits and the configured compiler
-                // does not is the paper needing that engine. Tried once per
-                // preamble: an error both engines hit (a half-typed macro) is
-                // the reader's, and the native lane stays.
+                // A PDF is best-effort output, not proof of error-free TeX.
+                // Only a clean comparison of this SAME frozen text can
+                // disable Pro, and only until that text changes. A half-typed
+                // formula both engines reject keeps its live lane.
                 if (!gen.ok && gen.errors > 0 && !ac.signal.aborted && hints?.preamble &&
-                    st.nativeIncompatibleTried !== hints.preamble) {
-                    st.nativeIncompatibleTried = hints.preamble;
+                    st.nativeIncompatibleTried !== snapshot && (st.sourceRevision || 0) === sourceRevision) {
                     const conventional = await compile({ ...compileOpts, maxPasses: null });
-                    if (conventional.ok && !ac.signal.aborted) {
+                    const clean = conventional.ok && !conventional.cancelled && !conventional.stopped && !conventional.timedOut &&
+                        conventional.logWritten !== false &&
+                        !(conventional.errors > 0) && !conventional.diagnostics?.some(d => d.severity === 'error');
+                    const current = !ac.signal.aborted && (st.sourceRevision || 0) === sourceRevision &&
+                        snapshotSources(st.files, this.liveOverlay(root)) === (gen.sourceSnapshotHash || snapshot);
+                    if (current) st.nativeIncompatibleTried = snapshot;
+                    if (clean && current) {
                         const first = gen.diagnostics?.find(d => d.severity === 'error')?.message || 'a document error';
-                        st.nativeIncompatible = { preamble: hints.preamble,
-                            reason: `WLaTeX (XeTeX) cannot build this paper and ${compileOpts.engine} can (${first})` };
+                        st.nativeIncompatible = { preamble: hints.preamble, snapshot,
+                            reason: `WLaTeX (XeTeX) cannot build this paper with the current text; ${compileOpts.engine} builds it without errors (${first})` };
                         st.nativeOff = st.nativeIncompatible.reason;
-                        this.log(`  ${st.nativeIncompatible.reason} — using ${compileOpts.engine} until the preamble changes`);
+                        this.log(`  ${st.nativeIncompatible.reason} — retrying WLaTeX when the text changes`);
                         st.nativeOffLogged = st.nativeOff;
                         this._noticeNativeOff(root, st.nativeOff, compileOpts.engine);
                         gen = conventional;
@@ -1303,36 +1621,77 @@ class RenderCoordinator {
                 catch (_) { prebuilt = null; /* makeMap below throws it again, as before */ }
                 if (ac.signal.aborted) { this.log('  cancelled'); return st; }
             }
+            let currentSnapshot = null;
+            // Capture the assets from before the build, not after it: an image
+            // changed mid-build must not make an older PDF look current.
+            gen.assetFiles = assetFiles;
+            gen.assetSnapshotHash = assetSnapshotHash;
+            const assetsCurrent = this._assetsCurrent(st, gen);
+            try { currentSnapshot = snapshotSources(st.files, this.liveOverlay(root)); }
+            catch (_) { currentSnapshot = null; }
+            // Git can deliver the clean-buffer reload after the disk watcher
+            // already captured those exact bytes. Its revision bump is not a
+            // reason to throw away a completed batch and compile it again.
+            const sameExternalSource = external && sameRenderedSource(st,gen.sourceSnapshotHash,currentSnapshot) && assetsCurrent;
+            if (background && (((st.sourceRevision || 0) !== sourceRevision && !sameExternalSource) ||
+                gen.ok && (!sameRenderedSource(st,gen.sourceSnapshotHash,currentSnapshot) || !assetsCurrent))) {
+                st.sourceAhead = true;
+                this.log('  background result dropped: source changed');
+                return st;
+            }
+            const diagnosticRevision = sameExternalSource ? st.sourceRevision || 0 : sourceRevision;
+            if ((st.sourceRevision || 0) === diagnosticRevision && gen.sourceSnapshotHash === currentSnapshot) {
+                st.compileDiagnostics = { revision:diagnosticRevision, at:Date.now(),
+                    sequence:st.diagnosticsSequence = (st.diagnosticsSequence || 0) + 1, list:gen.diagnostics || [] };
+            }
+            if ((st.sourceRevision || 0) === diagnosticRevision && gen.sourceSnapshotHash === currentSnapshot) {
+                const problem = gen.diagnostics?.find(d => d.severity === 'error');
+                st.livePreviewError = problem ? { revision:diagnosticRevision,
+                    reason:`${problem.line ? `Line ${problem.line}: ` : ''}${problem.message}` } : null;
+                this._clearPreviewRecovery(root);
+            }
             const prevGen = st.generation;
             // prevMap and map may now SHARE one parsed SyncTeX doc. That is
             // safe because the doc is never mutated after construction — the
             // only mutation in RenderMap is the overlay remap, which the reuse
             // path skips — and prevMap is read only by diffAgainst.
             const prevDoc = st.map && st.map.doc;
-            st.prevMap = st.map;
-            st.generation = gen;
             const model = this._modelFor(root);
             // The parsed GlyphMap is reused the same way when its bytes did
             // not move (glyphMapHash): a rebuild that ships nothing new costs
             // no re-parse either.
             const prevGlyph = st.map && st.map.gm;
-            st.map = prebuilt || makeMap({
-                generation: gen,
-                model,
-                pageSize: this._pageSize(gen),
-                synctexDoc: (prevDoc && synctexUnchanged(prevGen, gen)) ? prevDoc : null,
-                glyphDoc: (prevGlyph && prevGen && gen.glyphMapHash && prevGen.glyphMapHash === gen.glyphMapHash) ? prevGlyph : null,
-            });
+            const keepNativeOutput = !gen.ok && !gen.pdfPath && !!st.nativeLane &&
+                prevGen?.runner === 'wlatex' && !!prevGen.pdfPath;
+            if (keepNativeOutput) {
+                // A native or explicit conventional TeX error must not erase
+                // the live worker's last artifact or editable provenance. These bytes
+                // still describe the previous source snapshot: never label
+                // them current, successful, or verified merely because they
+                // remain on screen. Keep the failed report for inspection.
+                st.generation = { ...prevGen, ok:false, diagnostics:gen.diagnostics,
+                    errors:gen.errors, warnings:gen.warnings, stopped:gen.stopped,
+                    stopReason:gen.stopReason, logPath:gen.logPath, ms:gen.ms,
+                    finishedAt:gen.finishedAt, failedBuild:gen };
+                if (st.nativeLane) this._scheduleNativeRefresh(st, st.nativeLane);
+            } else {
+                st.prevMap = st.map;
+                st.generation = gen;
+                st.map = prebuilt || makeMap({
+                    generation: gen,
+                    model,
+                    pageSize: this._pageSize(gen),
+                    synctexDoc: (prevDoc && synctexUnchanged(prevGen, gen)) ? prevDoc : null,
+                    glyphDoc: (prevGlyph && prevGen && gen.glyphMapHash && prevGen.glyphMapHash === gen.glyphMapHash) ? prevGlyph : null,
+                });
+            }
             st.dependencyIssue = gen.dependencyIssue || null;
             // A compile can finish while the reader is still typing. Resume
             // tracing only when the generation describes the bytes that are
             // current NOW, not merely those captured when this run started.
             // Failed/unavailable builds never make an old page current.
-            let currentSnapshot = null;
-            try { currentSnapshot = snapshotSources(st.files, this.liveOverlay(root)); }
-            catch (_) { currentSnapshot = null; }
             st.sourceAhead = !(gen.ok && gen.pdfPath && gen.sourceSnapshotHash &&
-                gen.sourceSnapshotHash === currentSnapshot);
+                sameRenderedSource(st,gen.sourceSnapshotHash,currentSnapshot) && assetsCurrent);
             if (st.map.exact) this.log(st.map.native ? '  render map: native provenance' : '  render map: exact (GlyphMap)');
             // The preview shows this. "compile produced no PDF" sent a user round
             // the same loop; name the launch failure instead when that is what it is.
@@ -1356,7 +1715,7 @@ class RenderCoordinator {
             this.log(`  ${gen.ok ? 'ok' : 'FAILED'} · ${gen.pageCount ?? '?'} pages · ` +
                 counts +
                 `${gen.passes ?? '?'} pass(es)${gen.passesLimited ? ' (capped)' : ''}` +
-                `${gen.runner === 'wlatex' ? ' (native preview; authoritative build pending)'
+                `${gen.runner === 'wlatex' ? (gen.rerunWanted ? ' (WLaTeX; references pending)' : ' (WLaTeX)')
                     : gen.rerunWanted ? ' (cross-references one pass behind)' : ''} · ` +
                 `${gen.ms} ms${gen.queuedMs ? ` (+${gen.queuedMs} ms queued)` : ''} · ` +
                 `${Date.now() - t0} ms total`);
@@ -1499,7 +1858,8 @@ function makeStatusItem(coord, projection) {
             item.show();
             return;
         }
-        if (st && st.sourceAhead && st.livePreviewAt >= (st.lastEditAt || Infinity)) {
+        if (st && st.sourceAhead && st.livePreviewAt >= (st.lastEditAt || Infinity) &&
+            (st.livePreviewRevision ?? 0) === (st.sourceRevision || 0)) {
             const t = st.livePreviewStats || {};
             const ms = v => (v == null ? '?' : `${Math.round(v)} ms`);
             // WLaTeX Pro, and how long the last key took to reach the page.
@@ -1636,19 +1996,19 @@ function applyPageMarkers(editor, coord, decoration) {
  * LuaTeX-only code), and a digest of its preamble (the text before
  * `\begin{document}`), which is what decides whether another engine is needed.
  */
-function paperEngineHints(root, overlay) {
+function paperEngineHints(root, overlay, configuredEngine = 'pdflatex') {
     let text = overlay?.get?.(root);
     if (text == null) { try { text = fs.readFileSync(root, 'utf8'); } catch (_) { return null; } }
     const intent = paperEngineIntent(text);
     const begin = text.indexOf('\\begin{document}');
     const preamble = require('crypto').createHash('sha256')
         .update(begin < 0 ? text : text.slice(0, begin)).digest('hex');
-    return { program: intent?.program || null, intent, preamble };
+    return { program: intent?.program || null, intent, preamble, engine:paperCompileEngine(text, configuredEngine) };
 }
 
 function renderDiagnostics(doc, coord, projection) {
     const st = coord.stateFor(doc);
-    if (!st || !st.generation) return [];
+    if (!st) return [];
     const file = doc.uri.fsPath;
     const { model } = projection.get(doc);
     const out = [];
@@ -1659,10 +2019,16 @@ function renderDiagnostics(doc, coord, projection) {
         .sort((a, b) => (a.sourceRange.endLine - a.sourceRange.startLine) -
             (b.sourceRange.endLine - b.sourceRange.startLine))[0];
 
-    // Errors of the live preview, while it is newer than the full build.
-    const live = st.liveDiagnostics && st.liveDiagnostics.at > (st.generation.finishedAt || 0)
-        ? st.liveDiagnostics.list.map(d => ({ ...d, live: true })) : [];
-    for (const d of [...st.generation.diagnostics, ...live]) {
+    // A retained PDF is not the latest diagnostic report. The newest current
+    // completion wins, including a clean live preview after correcting TeX.
+    const revision = st.sourceRevision || 0;
+    const completed = [st.compileDiagnostics, st.liveDiagnostics]
+        .filter(d => d && d.revision === revision)
+        .sort((a,b) => (b.sequence || 0) - (a.sequence || 0) || b.at - a.at);
+    const latest = completed[0];
+    const diagnostics = latest ? latest.list : !st.sourceAhead ? st.generation?.diagnostics || [] : [];
+    for (const diagnostic of diagnostics) {
+        const d = latest === st.liveDiagnostics ? { ...diagnostic, live:true } : diagnostic;
         // Only this file's problems. A diagnostic with no file is the root's.
         if (d.file && path.resolve(d.file) !== path.resolve(file) &&
             path.basename(d.file) !== path.basename(file)) continue;

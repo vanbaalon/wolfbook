@@ -58,6 +58,7 @@ class WorkerServer {
         this._healthFailCount = 0;
         this._electionInProgress = false;
         this._onPromotedCb = null;       // async () => void — set by extension.js
+        this.getMcpServer = null;         // live server getter; survives promotion
     }
 
     get clientId() { return this._clientId; }
@@ -152,7 +153,8 @@ class WorkerServer {
             res.end(JSON.stringify({ clientId: this._clientId, notebooks: this._notebooks }));
         } else if (req.method === 'GET' && url.pathname === '/health') {
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ status: 'ok', clientId: this._clientId, port: this._port }));
+            res.end(JSON.stringify({ status: 'ok', clientId: this._clientId, port: this._port,
+                mcp: !!this.getMcpServer, standby: true }));
         } else if (req.method === 'POST' && url.pathname === '/new-primary') {
             // New primary elected — re-register
             let body = '';
@@ -163,6 +165,10 @@ class WorkerServer {
                 this._healthFailCount = 0;
                 this._registerWithPrimary().catch(() => {});
             });
+        } else if (this.getMcpServer && ['/sse', '/sse/economy', '/message', '/mcp', '/mcp/economy'].includes(url.pathname)) {
+            const server = this.getMcpServer();
+            server.refreshWorkersFromRegistry();
+            server._handle(req, res);
         } else {
             res.writeHead(404); res.end();
         }
@@ -334,6 +340,7 @@ class WorkerServer {
 
     _registerWithPrimary() {
         return new Promise(resolve => {
+            const deadline = setTimeout(() => { req.destroy(); resolve(); }, 2000);
             const body = JSON.stringify({
                 clientId:  this._clientId,
                 port:      this._port,
@@ -357,9 +364,9 @@ class WorkerServer {
                     ...require('./auth').authHeaders(),
                 },
                 timeout: 2000,
-            }, res => { res.resume(); resolve(); });
-            req.on('error',   () => resolve());   // primary may not be up yet — OK
-            req.on('timeout', () => { req.destroy(); resolve(); });
+            }, res => { clearTimeout(deadline); res.resume(); resolve(); });
+            req.on('error',   () => { clearTimeout(deadline); resolve(); });   // primary may not be up yet — OK
+            req.on('timeout', () => { clearTimeout(deadline); req.destroy(); resolve(); });
             req.write(body);
             req.end();
         });
@@ -370,6 +377,12 @@ class WorkerServer {
     _startHealthPolling() {
         if (this._healthTimer) clearInterval(this._healthTimer);
         this._healthTimer = setInterval(() => {
+            // The heartbeat belongs to THIS worker, not to the primary. Keep
+            // discovery fresh even when the primary is alive but unresponsive.
+            if (this._port) this._syncRegistry();
+            let settled = false;
+            const fail = () => { if (!settled) { settled = true; clearTimeout(deadline); this._onHealthFail(); } };
+            const deadline = setTimeout(() => { fail(); req.destroy(); }, 2000);
             const req = http.get(
                 `http://127.0.0.1:${PRIMARY_PORT}/health`,
                 { timeout: 2000 },
@@ -380,18 +393,22 @@ class WorkerServer {
                         try {
                             const json = JSON.parse(buf);
                             if (json.status === 'ok') {
+                                if (settled) return;
+                                settled = true;
+                                clearTimeout(deadline);
                                 this._healthFailCount = 0;
-                                this._syncRegistry();
                                 this._registerWithPrimary().catch(() => {});
                                 return;
                             }
                         } catch {}
-                        this._onHealthFail();
+                        fail();
                     });
+                    res.on('error', fail);
+                    res.on('aborted', fail);
                 }
             );
-            req.on('error',   () => this._onHealthFail());
-            req.on('timeout', () => { req.destroy(); this._onHealthFail(); });
+            req.on('error', fail);
+            req.on('timeout', () => { fail(); req.destroy(); });
         }, HEALTH_INTERVAL_MS);
     }
 
@@ -405,6 +422,7 @@ class WorkerServer {
     }
 
     _tryElection() {
+        require('../utils/kernel-lifecycle-log').record('primary.election', { clientId: this._clientId, reason: 'three-health-polls-failed' });
         console.log(`[Wolfbook Worker ${this._clientId}] Primary appears dead — starting election`);
 
         // Race: first worker to bind port 27182 wins

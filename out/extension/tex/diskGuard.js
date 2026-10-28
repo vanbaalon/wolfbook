@@ -104,6 +104,8 @@ class DiskWatch {
     constructor() {
         this._seen = new Map();      // path -> hash of the disk content last acted on
         this._saving = new Map();    // exact snapshots awaiting save notifications
+        this._activeSaves = new Map(); // save participants can change the written version
+        this._saved = new Map();     // last confirmed bytes, independent of newer dirty text
     }
 
     noteSaving(file, text) {
@@ -113,9 +115,60 @@ class DiskWatch {
         this._saving.set(file, entries.slice(-8));
     }
 
+    beginSaving(file, text) {
+        this.noteSaving(file, text);
+        // Keep every version in this save transaction: formatting, trimming,
+        // and resumed typing can all precede the did-save notification.
+        const active = this._activeSave(file);
+        if (active) { active.hashes.add(hashText(text)); return; }
+        let finish;
+        const done = new Promise(resolve => { finish = resolve; });
+        this._activeSaves.set(file, { at: Date.now(), hashes: new Set([hashText(text)]), done, finish });
+    }
+
+    _activeSave(file) {
+        const active = this._activeSaves.get(file);
+        if (active && Date.now() - active.at >= 30000) {
+            active.finish(); this._activeSaves.delete(file);
+            return null;
+        }
+        return active;
+    }
+
+    noteSaveCandidate(file, text) {
+        const active = this._activeSave(file);
+        if (active) active.hashes.add(hashText(typeof text === 'function' ? text() : text));
+    }
+
+    finishSaving(file, diskText, docText, isDirty) {
+        const active = this._activeSave(file);
+        const hash = typeof diskText === 'string' ? hashText(diskText) : null;
+        const own = hash !== null && (active?.hashes.has(hash) ||
+            this.isOwnSave(file, diskText) || (!isDirty && diskText === docText));
+        if (own) this._saved.set(file, hash);
+        // Intent and candidate buffer versions are no longer save evidence
+        // after completion. Only the bytes actually persisted remain so.
+        this._saving.delete(file);
+        this._activeSaves.delete(file);
+        active?.finish();
+        return own;
+    }
+
+    /** Unknown watcher bytes may beat the save-participant/document events. */
+    async settleSave(file, timeoutMs = 1500) {
+        const active = this._activeSave(file);
+        if (!active) return false;
+        let timer;
+        try {
+            await Promise.race([active.done, new Promise(resolve => { timer = setTimeout(resolve, timeoutMs); })]);
+        } finally { clearTimeout(timer); }
+        return true;
+    }
+
     isOwnSave(file, text) {
         if (typeof text !== 'string') return false;
         const now = Date.now(), hash = hashText(text);
+        if (this._saved.get(file) === hash || this._activeSave(file)?.hashes.has(hash)) return true;
         const entries = (this._saving.get(file) || []).filter(e => now - e.at < 30000);
         if (entries.length) this._saving.set(file, entries);
         else this._saving.delete(file);
@@ -128,8 +181,14 @@ class DiskWatch {
         else this._seen.set(file, hashText(text));
     }
 
-    forget(file) { this._seen.delete(file); this._saving.delete(file); }
-    dispose() { this._seen.clear(); this._saving.clear(); }
+    forget(file) {
+        this._seen.delete(file); this._saving.delete(file); this._saved.delete(file);
+        this._activeSaves.get(file)?.finish(); this._activeSaves.delete(file);
+    }
+    dispose() {
+        for (const active of this._activeSaves.values()) active.finish();
+        this._seen.clear(); this._saving.clear(); this._saved.clear(); this._activeSaves.clear();
+    }
 
     /**
      * @returns {{verdict: string, repeat: boolean}} `repeat` is true when this
@@ -139,6 +198,7 @@ class DiskWatch {
     classify(file, { diskText, docText, isDirty }) {
         const verdict = classifyExternalChange({ diskText, docText, isDirty });
         const h = diskText == null ? null : hashText(diskText);
+        if (!this.isOwnSave(file, diskText)) this._saved.delete(file);
         const repeat = this._seen.get(file) === h && h !== null;
         if (verdict !== VERDICT.UNCHANGED) this._seen.set(file, h);
         return { verdict, repeat };

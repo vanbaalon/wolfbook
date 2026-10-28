@@ -24,6 +24,7 @@ async function main() {
         coord: { roots: new Map([['paper.tex', { generation: { generation: 1 } }]]) },
         _chips: { destinations: [{ destination: 'equation.20' }] },
         _labelChips: () => [], _mmaChips: () => [], _copyFormat: () => 'command',
+        _paperCellBoundaries: TexViewer.prototype._paperCellBoundaries,
         _post: m => posted.push(m) };
     await TexViewer.prototype._postLabels.call(owner);
     assert.equal(posted[0].type, 'labels');

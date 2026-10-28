@@ -119,6 +119,56 @@ test('a fragment only ever GROWS', () => {
         'a reader who selected too little meant the thing they pointed at');
 });
 
+test('parentheses and square brackets keep their partners and punctuation', () => {
+    assert.equal(grow('Before (a [small] phrase). After', 'small] phrase').text, '[small] phrase');
+    assert.equal(grow('Before (a [small] phrase). After', 'small] phrase)').text, '(a [small] phrase).');
+    assert.equal(grow('Before (a phrase), after', '(a phrase').text, '(a phrase),');
+});
+
+test('nested environments with identical names choose their actual partner', () => {
+    const src = '\\begin{center} outer \\begin {center} inner \\end {center} outer \\end{center}';
+    assert.equal(grow(src, 'inner \\end {center}').text, '\\begin {center} inner \\end {center}');
+    assert.equal(grow(src, '\\begin{center} outer').text, src);
+    const commented = '% \\begin{equation}\nText. \\begin{equation} x \\end{equation}';
+    assert.equal(grow(commented, 'x \\end{equation}').text, '\\begin{equation} x \\end{equation}');
+});
+
+test('inline, display, and scalable math delimiters travel together', () => {
+    for (const [src, want, expected] of [
+        ['Text $x+y$, next', '$x', '$x+y$,'],
+        ['Text $$x+y$$. Next', 'y$$', '$$x+y$$.'],
+        [String.raw`Text \(x+y\). Next`, String.raw`y\)`, String.raw`\(x+y\).`],
+        [String.raw`Text \[x+y\]. Next`, String.raw`\[x`, String.raw`\[x+y\].`],
+        [String.raw`$\left\langle x,\left(y\right)\right\rangle$`, String.raw`y\right)`, String.raw`\left(y\right)`],
+    ]) assert.equal(grow(src, want).text, expected);
+});
+
+test('trailing punctuation extends phrases without swallowing the next token', () => {
+    assert.equal(grow('A phrase; next', 'A phrase').text, 'A phrase;');
+    assert.equal(grow('A sentence... Next', 'A sentence').text, 'A sentence...');
+    assert.equal(grow('Value 1.25 and plot.pdf', 'Value 1').text, 'Value 1');
+    assert.equal(grow('Value 1.25 and plot.pdf', 'plot').text, 'plot');
+    assert.equal(grow('One word . Next', 'word').text, 'word');
+    assert.equal(balanceRange('Word.', 4, 4).widened, false, 'an empty range deletes nothing');
+});
+
+test('escaped characters, verbatim contents and commented environments are not structural', () => {
+    assert.equal(grow(String.raw`Text \$5 and more`, '5 and').text, '5 and');
+    assert.equal(grow(String.raw`Text \verb|{[()]}| after`, '[()').text, '[()');
+    const src = String.raw`\begin{verbatim}{[()]}\end{verbatim} after`;
+    assert.equal(grow(src, '[()').text, '[()');
+    assert.equal(grow(src, '\\begin{verbatim}').text, src.slice(0, src.indexOf(' after')));
+});
+
+test('more than eight levels of nesting finish balancing and balancing is idempotent', () => {
+    const src = '('.repeat(24) + 'word' + ')'.repeat(24) + '.';
+    const r = grow(src, '(word');
+    assert.equal(r.text, '(word)', 'only the selected inner boundary needs its partner');
+    const whole = grow(src, 'word' + ')'.repeat(24));
+    assert.equal(whole.text, src);
+    assert.equal(balanceRange(src, whole.from, whole.to).widened, false);
+});
+
 (async () => {
     for (const [name, fn] of tests) {
         try { await fn(); pass++; results.push('  ok   ' + name); }

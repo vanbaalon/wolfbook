@@ -27,7 +27,7 @@ const CLASSES = {
 
 const TOOL_CLASS = {
     // ── notebooks: reading ───────────────────────────────────────────────
-    wolfbook_getNotebookContext: 'R', wolfbook_searchCells: 'R', wolfbook_getCellOutput: 'R',
+    wolfbook_getNotebookContext: 'R', wolfbook_readNotebookFile: 'R', wolfbook_searchCells: 'R', wolfbook_getCellOutput: 'R',
     wolfbook_lookupSymbol: 'R', wolfbook_showImage: 'R', wolfbook_validateSyntax: 'R',
     wolfbook_status: 'R', wolfbook_kernelStatus: 'R', wolfbook_list_clients: 'R',
     wolfbook_operationStatus: 'R', wolfbook_waitEvaluation: 'R', wolfbook_getResult: 'R',
@@ -66,7 +66,7 @@ const TOOL_CLASS = {
     // ── papers ───────────────────────────────────────────────────────────
     paper_getOutline: 'R', paper_getObject: 'R', paper_getSection: 'R',
     paper_findReferences: 'R', paper_search: 'R', paper_previewEdit: 'R',
-    paper_applyEdit: 'D', paper_mathematicaBlocks: 'D',
+    paper_applyEdit: 'D', paper_mathematicaBlocks: 'D', paper_listenComments: 'D',
     wolfbook_latex: 'X',   // runs latexmk/pdflatex; can clean build files
 };
 

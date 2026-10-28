@@ -14,10 +14,12 @@ const NB_TYPE = 'extended-wolfram-notebook';
 
 function syncBindingAffinities(vscode, manager) {
     let updated = 0;
+    const owners = new Set();
     for (const nb of vscode.workspace.notebookDocuments || []) {
         if (nb.notebookType !== NB_TYPE) continue;
         const owner = manager.bindingFor(nb.uri.fsPath);
         if (!owner) continue;
+        owners.add(owner.controller);
         for (const entry of manager._entries.values()) {
             try {
                 entry.controller._controller.updateNotebookAffinity(nb, entry.id === owner.id
@@ -27,6 +29,10 @@ function syncBindingAffinities(vscode, manager) {
             } catch (_) {}
         }
     }
+    // Rebinding an already visible notebook need not fire a visibility or
+    // controller-selection event. Affinity alone leaves its old offline filter
+    // in place even after a successful run on an already running kernel.
+    for (const controller of owners) controller._syncKernelRendererState?.();
     return updated;
 }
 

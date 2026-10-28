@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const { TARGETS, targetFor, resolveNativeRuntime, readInstallation, digest } = require('../../tex/nativeRuntime');
+const { hasNativeRuntime, TARGETS, targetFor, resolveNativeRuntime, readInstallation, digest } = require('../../tex/nativeRuntime');
 function installation(target = 'darwin-arm64') {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wpaper-runtime-'));
     fs.mkdirSync(path.join(root, 'sdk')); fs.mkdirSync(path.join(root, 'bin'));
@@ -66,4 +66,37 @@ test('explicit development checkouts require real executable paths', () => {
         assert.throws(() => resolveNativeRuntime(f.root, { platform:'darwin', arch:'arm64', env:{} }), /ENOENT/);
         assert.throws(() => resolveNativeRuntime('relative', { env:{} }), /absolute/);
     } finally { f.close(); }
+});
+
+
+test('optional presence probe is quiet for missing, incomplete and invalid installations', () => {
+    const options = {env:{},platform:'darwin',arch:'arm64'};
+    assert.equal(hasNativeRuntime('', options),false);
+    assert.equal(hasNativeRuntime('/missing/wlatex', options),false);
+    assert.equal(hasNativeRuntime('relative', options),false);
+    const f=installation();
+    try {
+        assert.equal(hasNativeRuntime(f.root,options),true);
+        fs.unlinkSync(path.join(f.root,f.manifest.nativeBinary));
+        assert.equal(hasNativeRuntime(f.root,options),false);
+        fs.writeFileSync(path.join(f.root,'runtime.json'),'invalid');
+        assert.equal(hasNativeRuntime(f.root,options),false);
+    } finally { f.close(); }
+});
+
+
+test('unreleased licence command is hidden and quiet when no runtime can be resolved', async () => {
+    const vm=require('node:vm');
+    const source=fs.readFileSync(path.join(__dirname,'../../tex/index.js'),'utf8');
+    const start=source.indexOf("    reg('wolfbook.tex.enterWlatexLicense',");
+    const command=source.slice(start,source.indexOf('\n    });',start)+8);
+    for(const resolveNativeRuntime of [()=>null,()=>{throw Error('missing runtime');}]){
+        let invoke;const messages=[];
+        vm.runInNewContext(command,{reg:(_name,handler)=>{invoke=handler;},process:{env:{}},
+            require:()=>({resolveNativeRuntime}),vscode:{workspace:{getConfiguration:()=>({get:()=>''})},
+                window:{showWarningMessage:s=>messages.push(s),showErrorMessage:s=>messages.push(s)}}});
+        await invoke();assert.deepEqual(messages,[]);
+    }
+    const pkg=JSON.parse(fs.readFileSync(path.join(__dirname,'../../../../package.json'),'utf8'));
+    assert.equal(pkg.contributes.menus.commandPalette.find(x=>x.command==='wolfbook.tex.enterWlatexLicense').when,'wolfbook.wlatexAvailable');
 });

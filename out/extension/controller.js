@@ -241,6 +241,16 @@ class WolframNotebookKernel {
             }
             return sent;
         };
+        // The renderer keeps its offline CSS until explicitly told otherwise.
+        // A binding/selection can change without launching a process or
+        // recreating that renderer, so replay the NEW owner's current state.
+        // Never broadcast: idle foreign proxies must not gray this notebook.
+        this._syncKernelRendererState = () => {
+            if (this._disposed) return 0;
+            return this._postToOwnedRenderers({
+                type: this.kernelStatusString === 'resolved' ? 'kernel-online' : 'kernel-offline',
+            });
+        };
         // The cell whose stored output carries this Manipulate. A kernel restart
         // strips the output header (it is tagged with the old session epoch), so
         // the outputId is gone by the time the sliders need help — the manip id
@@ -307,7 +317,7 @@ class WolframNotebookKernel {
         this._quitKernelTimer  = null;
 
         this.thisExtension       = vscode.extensions.getExtension("wolfbook.wolfbook");
-        this.diagnosticCollection = vscode.languages.createDiagnosticCollection("wolfram-syntax");
+        this.diagnosticCollection = require('./syntax/diagnostics').acquireDiagnostics(vscode);
 
         // Decoration type for syntax-error highlighting
         this.syntaxErrorDecoration = vscode.window.createTextEditorDecorationType({
@@ -335,9 +345,12 @@ class WolframNotebookKernel {
         this.hoverOutputDecoration = vscode.window.createTextEditorDecorationType({
             isWholeLine: true,
             backgroundColor: "rgba(100, 160, 255, 0.08)",
-            borderLeft: "3px solid rgba(100, 160, 255, 0.35)",
+            // Hover must only repaint: a border can change overflow, make
+            // Monaco add a scrollbar and move the output boundary under the
+            // pointer, repeatedly entering/leaving this same highlight.
         });
         this._hoverOutputDecorCell = null;  // currently-decorated cell docUri
+        this._hoverOutputDecorKey = null;
 
         this.cellDecorations      = new Map();  // docUri -> ranges[]
         this.truncatedOutputCells = new Map();  // outputId -> {cell, outN}
@@ -415,35 +428,9 @@ class WolframNotebookKernel {
             // its offline state must not touch the window.
             if (this.kernelStatusString !== 'resolved' && this._ownedVisibleEditors().length) {
                 this._applyKernelOfflineUI();
-            }
-            // Auto-launch kernel when a wolfram notebook becomes visible and kernel has
-            // never been started (unresolved) in this session window.
-            // Only for a notebook THIS kernel is bound to. Checking "any wolfram
-            // notebook is visible" made every never-started kernel in the window
-            // launch when an unrelated tab (e.g. an in-memory notebook getting its
-            // first editor) appeared — a stray WolframKernel for an idle isolated
-            // kernel, and for a remote proxy a call into another window. A remote
-            // proxy never launches anything: its owner does.
-            if (this.kernelStatusString === 'unresolved' && !this._disposed && !this.session?.isRemote) {
-                if (this._ownedVisibleEditors().length) {
-                    scrollLog('[auto-launch] wolfram nb visible + kernel unresolved — scheduling launch in 800ms');
-                    setTimeout(() => {
-                        if (this.kernelStatusString === 'unresolved' && !this._disposed && this._ownedVisibleEditors().length) {
-                            scrollLog('[auto-launch] 800ms fired — launching kernel | queue:', this.executionQueue.queueLength());
-                            this.launchKernel().then(() => {
-                                scrollLog('[auto-launch] launchKernel resolved | status:', this.kernelStatusString, '| queue:', this.executionQueue.queueLength());
-                                if (this.kernelStatusString === 'resolved') this.checkoutExecutionQueue();
-                            }).catch(err => {
-                                scrollLog('[auto-launch] launchKernel FAILED:', err.message);
-                                vscode.window.showErrorMessage(`Auto-launch failed: ${err.message}`);
-                                this.executionQueue.clear();
-                            });
-                        } else {
-                            scrollLog('[auto-launch] 800ms fired but status is', this.kernelStatusString, '— skipping duplicate launch');
-                        }
-                    }, 800);
-                }
-            }
+            } else this._syncKernelRendererState();
+            // Visibility only restores UI state. Evaluation (or an explicit
+            // launch/restart command) owns process startup, including after reload.
             // Send current epoch so renderer removes stale Out-headers/banners from old
             // sessions — to OUR notebooks only. Broadcast, another kernel's epoch
             // deleted the headers this one had just stamped.
@@ -1338,6 +1325,12 @@ class WolframNotebookKernel {
                         if (editor) {
                             const startLine = Math.max(0, message.start ?? 0);
                             const endLine   = Math.max(startLine, message.end ?? startLine);
+                            const key=JSON.stringify([cellUri,startLine,endLine]);
+                            if(this._hoverOutputDecorKey===key)return;
+                            if(this._hoverOutputDecorCell && this._hoverOutputDecorCell!==cellUri) {
+                                const previous=vscode.window.visibleTextEditors.find(e=>e.document.uri.toString()===this._hoverOutputDecorCell);
+                                if(previous)previous.setDecorations(this.hoverOutputDecoration,[]);
+                            }
                             editor.setDecorations(this.hoverOutputDecoration, [
                                 new vscode.Range(
                                     new vscode.Position(startLine, 0),
@@ -1345,18 +1338,21 @@ class WolframNotebookKernel {
                                 )
                             ]);
                             this._hoverOutputDecorCell = cellUri;
+                            this._hoverOutputDecorKey = key;
                         }
                     } catch (_) {}
                 }
                 return;
             }
             if (message.type === 'hover-output-end') {
+                if (!_mine) return;
                 if (this._hoverOutputDecorCell) {
                     const editor = vscode.window.visibleTextEditors.find(
                         e => e.document.uri.toString() === this._hoverOutputDecorCell
                     );
                     if (editor) editor.setDecorations(this.hoverOutputDecoration, []);
                     this._hoverOutputDecorCell = null;
+                    this._hoverOutputDecorKey = null;
                 }
                 return;
             }
@@ -1460,6 +1456,7 @@ class WolframNotebookKernel {
                     this._quitKernelTimer = null;
                 }
                 if (DEV_MODE) this.outputPanel.print(`Controller selected for: ${notebook.uri.fsPath}`);
+                this._syncKernelRendererState();
             } else {
                 this.selectedNotebooks.delete(notebook);
             }
@@ -1469,7 +1466,7 @@ class WolframNotebookKernel {
                 // needlessly; cancel in the selected:true branch above if it arrives first.
                 this._quitKernelTimer = setTimeout(() => {
                     this._quitKernelTimer = null;
-                    if (this.selectedNotebooks.size === 0) this.quitKernel();
+                    if (this.selectedNotebooks.size === 0) this.quitKernel('no-selected-notebooks');
                 }, 500);
             }
         }));
@@ -1531,7 +1528,7 @@ class WolframNotebookKernel {
         for (const t of this._scrollPosTimers.values()) clearTimeout(t);
         // NotebookConfig owns its onDidChangeConfiguration subscription.
         try { this.config?.dispose?.(); } catch (_) {}
-        try { this.quitKernel(); } catch (_) {}
+        try { this.quitKernel('controller-disposed'); } catch (_) {}
         try { this._controller.dispose(); } catch (_) {}
         // Per-kernel VS Code resources, released LAST (quitKernel may still log):
         // one output channel, diagnostics and three decoration types per kernel —
@@ -1698,6 +1695,7 @@ class WolframNotebookKernel {
 
     // -----------------------------------------------------------------------
     async execute(cells, _notebook, _controller) {
+        if (this._windowClosing) throw new Error('The VS Code window is closing.');
         // Reset refine guard flag — set to true below if this is a refine keyboard eval.
         this._refineGuardActive = false;
 
@@ -1907,10 +1905,18 @@ class WolframNotebookKernel {
                     scrollLog('[execute] cell', cell.index, 'createNotebookCellExecution threw:', e?.message);
                     return null;
                 }
+                // VS Code is authoritative: a cached selection receipt can be
+                // stale after a kernel switch. Otherwise associateNotebook's
+                // 'already' shortcut simply retries the same rejected execution.
+                this.selectedNotebooks.delete(cell.notebook);
                 const { associateNotebook } = require('./kernel/association');
-                // Silent (agent) runs restore the user's active tab afterwards;
-                // human runs happen in the already-active notebook.
-                const assoc = await associateNotebook(this, cell.notebook, { restoreActive: isSilent });
+                // A silent run must never reveal a notebook over WPaper. Kernel
+                // selection can happen in the already-active notebook; hidden
+                // notebooks without a selected controller need an explicit open.
+                const assoc = await associateNotebook(this, cell.notebook, { allowReveal: !isSilent });
+                if (!assoc.associated && isSilent) {
+                    void require('./tools/shared').notifyAgentNotebookEvent({ notebook: cell.notebook });
+                }
                 if (assoc.associated) {
                     try { return this._controller.createNotebookCellExecution(cell); } catch (_) {}
                 }
@@ -1994,6 +2000,7 @@ class WolframNotebookKernel {
                     this.abortEvaluation();
                 });
             }
+            if (!_report.dispatched.length) return _report;
             if (this.kernelStatusString !== 'launching') {
                 scrollLog('[execute] status is', this.kernelStatusString, '— calling launchKernel');
                 vscode.window.showInformationMessage('Kernel not running — launching kernel and queuing evaluation…');
@@ -2067,16 +2074,23 @@ class WolframNotebookKernel {
 
     // -----------------------------------------------------------------------
     // Kernel launch — thin wrapper delegating to kernel/lifecycle.js
-    async launchKernel() { return _lifecycle.launchKernel(this, WstpSession); }
+    launchKernel() {
+        if (this._launchPromise) return this._launchPromise;
+        const work = _lifecycle.launchKernel(this, WstpSession);
+        this._launchPromise = work;
+        const clear = () => { if (this._launchPromise === work) this._launchPromise = null; };
+        work.then(clear, clear);
+        return work;
+    }
 
     // -----------------------------------------------------------------------
     // Sub-kernel and shutdown — thin wrappers delegating to kernel/lifecycle.js
     _prewarmSubKernel()                  { /* no-op: subkernel removed */ }
-    quitKernel() {
+    quitKernel(reason = 'requested') {
         this.arbiter?.invalidate('kernel quit');
         this.operations?.invalidateAll('kernel quit');
         this._abortUncertain = false;   // a fresh kernel has no abort in flight
-        _lifecycle.quitKernel(this);
+        return _lifecycle.quitKernel(this, reason);
     }
 
     // -----------------------------------------------------------------------
@@ -2154,9 +2168,12 @@ class WolframNotebookKernel {
     _startAbortUncertaintyWatchdog() {
         if (this._abortWatchdogActive) return;
         this._abortWatchdogActive = true;
+        const session=this.session,token={};this._abortWatchdogToken=token;
+        const current=()=>this._abortWatchdogToken===token && this.session===session && this._abortUncertain;
+        const stop=()=>{if(this._abortWatchdogToken===token)this._abortWatchdogActive=false;};
         const deadline = Date.now() + 30000;
         const probe = async () => {
-            if (!this._abortUncertain) { this._abortWatchdogActive = false; return; }
+            if (!current()) { stop(); return; }
             // Idle flags recovering on their own also resolves the uncertainty.
             if (!this.isAborting && !this._abortPending && !this._evalDispatched &&
                 this.executionQueue.queueLength() === 0) {
@@ -2167,6 +2184,7 @@ class WolframNotebookKernel {
                         new Promise(resolve => setTimeout(() => resolve(false), 1500)),
                     ]);
                 } catch (_) { ok = false; }
+                if (!current()) { stop(); return; }
                 if (ok) {
                     this._abortUncertain = false;
                     this._abortWatchdogActive = false;
@@ -2188,9 +2206,11 @@ class WolframNotebookKernel {
 
     // -----------------------------------------------------------------------
     restartKernel() {
+        if (this._restartPromise) return this._restartPromise;
         this.arbiter?.invalidate('kernel restart');
         this.operations?.invalidateAll('kernel restart');
         this._abortUncertain = false;   // a fresh kernel has no abort in flight
+        this._abortWatchdogActive=false;this._abortWatchdogToken=null;
         return _editor.restartKernel(this);
     }
     // -----------------------------------------------------------------------

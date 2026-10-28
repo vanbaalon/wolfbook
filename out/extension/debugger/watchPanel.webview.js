@@ -24,11 +24,50 @@
             pnl.classList.toggle('active', pnl.id === 'tab-' + name);
         });
         if (name === 'agents') vscode.postMessage({ command: 'requestFairyHistory' });
+        if (name === 'overleaf') vscode.postMessage({ command: 'requestOverleafState', refresh: true });
         if (name === 'skilxiv') vscode.postMessage({ command: 'requestSkilxivState' });
     }
     tabButtons.forEach(function(b) {
         b.addEventListener('click', function() { activateTab(b.dataset.tab); });
     });
+
+    // ── Overleaf connector ────────────────────────────────────────────────
+    var overleafState = {};
+    function olAction(action, value) { vscode.postMessage({ command: 'overleafAction', action: action, id: value }); }
+    ['connect', 'disconnect', 'browse', 'git', 'settings', 'website'].forEach(function(action) {
+        var button = document.getElementById('ol-' + action);
+        if (button) button.addEventListener('click', function() { olAction(action); });
+    });
+    document.getElementById('ol-refresh').addEventListener('click', function() { vscode.postMessage({ command: 'requestOverleafState', refresh: true }); });
+    document.getElementById('ol-filter').addEventListener('input', function() { renderOverleaf(overleafState); });
+    function renderOverleaf(state) {
+        overleafState = state || {};
+        var labels = { connected: 'Connected', saved: 'Session saved', disconnected: 'Not connected', error: 'Connection error', unavailable: 'Unavailable' };
+        document.getElementById('ol-connection').textContent = state.busy ? 'Opening…' : (labels[state.account] || 'Not connected');
+        document.getElementById('ol-dot').style.background = state.account === 'connected' ? '#3fb950' : state.account === 'error' ? '#f85149' : '#6e7681';
+        document.getElementById('ol-detail').textContent = state.detail || '';
+        document.getElementById('ol-connect').textContent = ['connected', 'saved', 'error'].indexOf(state.account) >= 0 ? 'Replace session' : 'Connect account';
+        document.getElementById('ol-disconnect').hidden = state.account === 'disconnected' || state.account === 'unavailable';
+        document.getElementById('ol-filter').hidden = !(state.projects || []).length;
+        Array.prototype.forEach.call(document.querySelectorAll('#tab-overleaf button'), function(button) { button.disabled = !!state.busy; });
+        var filter = document.getElementById('ol-filter').value.toLowerCase();
+        function list(id, entries, kind, empty) {
+            var holder = document.getElementById(id); holder.replaceChildren();
+            entries.forEach(function(item) {
+                var button = document.createElement('button'); button.className = 'sx-btn secondary';
+                button.style.cssText = 'display:block;text-align:left;width:100%;margin:5px 0;white-space:normal;word-break:break-word;';
+                button.textContent = item.name + (item.mode ? ' · ' + (item.mode === 'live' ? 'Live sync' : 'Git') : '');
+                button.title = item.root || 'Choose a .tex file and open this project in WPaper';
+                button.disabled = !!state.busy;
+                button.addEventListener('click', function() { olAction(kind, kind === 'recent' ? item.root : item.id); });
+                holder.appendChild(button);
+            });
+            if (!entries.length) holder.textContent = empty;
+        }
+        list('ol-projects', (state.projects || []).filter(function(p) { return p.name.toLowerCase().indexOf(filter) >= 0; }), 'project', filter ? 'No matching projects.' : (state.account === 'connected' ? 'No editable projects found.' : 'Connect your account to see projects.'));
+        list('ol-recent', state.recent || [], 'recent', 'Opened projects will appear here.');
+        document.getElementById('ol-live').textContent = state.live && state.live.connected ? state.live.title : '';
+    }
 
     // ── SkilXiv tab ───────────────────────────────────────────────────────
     function sxClick(id, command) { var el = document.getElementById(id); if (el) el.addEventListener('click', function() { vscode.postMessage({ command: command }); }); }
@@ -247,6 +286,9 @@
             timingEl.textContent   = '';
             emptyMsg.textContent   = 'Add variables below to monitor them.';
             renderTable(msg.variables || []);
+
+        } else if (msg.command === 'overleafState') {
+            renderOverleaf(msg.state || {});
 
         } else if (msg.command === 'skilxivState') {
             renderSkilxiv(msg.state);

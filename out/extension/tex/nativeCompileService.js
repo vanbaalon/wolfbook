@@ -9,6 +9,17 @@ const { NativeArtifactCache } = require('./nativeArtifactCache');
 // setting must degrade to the default rather than retire the native lane.
 const clampTimeout = ms => Number.isFinite(ms) && ms >= 1 ? Math.min(Math.floor(ms), 3600000) : 120000;
 
+// Synchronizing a captured buffer must preserve origins outside its actual
+// change. Replacing the entire file displaced every glyph after a light edit.
+function sourceSplice(old,text) {
+    let start=0,endOld=old.length,endNew=text.length;
+    while(start<endOld && start<endNew && old[start]===text[start])start++;
+    if(start && /[\uD800-\uDBFF]/.test(old[start-1]))start--;
+    while(endOld>start && endNew>start && old[endOld-1]===text[endNew-1]){endOld--;endNew--;}
+    if(endOld<old.length && /[\uDC00-\uDFFF]/.test(old[endOld])){endOld++;endNew++;}
+    return {start,end:endOld,text:text.slice(start,endNew)};
+}
+
 // A failed report is the document's failure when the log holds a TeX error
 // the document raised: an undefined command (placed on its file and line by
 // the producer's file-line-error style), a missing input (LaTeX types that
@@ -69,9 +80,9 @@ function interactiveFragment(generation, event) {
 // A preview that did not run. Shaped like a failed generation so a caller can
 // log it and move on; it is never a reason to retire the native lane, because
 // the cold build that follows is untouched by it.
-function interactiveFailure(generation, message, fatal) {
+function interactiveFailure(generation, message, fatal, producer = false) {
     return { ok:false, incremental:true, generation, pages:[], pageCount:null, report:null, fatal:!!fatal,
-        diagnostics:[{ severity:'error', file:null, line:null, producer:false,
+        diagnostics:[{ severity:'error', file:null, line:null, producer,
             message:message || 'the interactive build failed' }] };
 }
 
@@ -193,6 +204,11 @@ function coldBuildEnv() {
     return { ...(synctex ? { WLATEX_SYNCTEX: '1' } : {}), ...(shellEscape ? { WLATEX_SHELL_ESCAPE: '1' } : {}) };
 }
 
+function interactiveMaxBuildMs() {
+    try { return clampTimeout(require('vscode').workspace.getConfiguration('wolfbook.tex').get('compileTimeoutMs', 180000)); }
+    catch (_) { return 180000; }
+}
+
 class NativeBuildLane {
     constructor(root, directory = '', runtimeOptions) {
         this.root = root;
@@ -235,7 +251,8 @@ class NativeBuildLane {
             if (typeof sdk.NativeBuildSession === 'function') {
                 const session = new sdk.NativeBuildSession({ compiler:this.compiler, source:this.source,
                     labBinary, nativeBinary, cache:this.artifactCache.directory,
-                    interactive:{ main:this.root, root:this.projectDir } });
+                    interactive:{ main:this.root, root:this.projectDir,
+                        maxBuildMs:interactiveMaxBuildMs() } });
                 if (session.interactive) this.session = session;
                 else this.interactiveUnavailable = 'this WLaTeX has no incremental engine';
             } else this.interactiveUnavailable = 'this WLaTeX SDK has no build session';
@@ -276,7 +293,15 @@ class NativeBuildLane {
             .sort((a,b) => b.start-a.start);
         this.edits = this.edits.catch(() => {}).then(async () => {
             if (!this.source.files.has(file)) return this.source.open(file, text);
-            for (const c of captured) await this.source.edit(file, c.start, c.end, c.text);
+            const old=this.source.files.get(file).text;
+            // A preview may already have synchronized this editor revision.
+            // Verify deltas before sending them, rather than double-applying
+            // a keystroke and retiring the worker for the resulting mismatch.
+            if(old===text)return;
+            let candidate=old;
+            for(const c of captured)candidate=candidate.slice(0,c.start)+c.text+candidate.slice(c.end);
+            const edits=candidate===text ? captured : [sourceSplice(old,text)];
+            for (const c of edits) await this.source.edit(file, c.start, c.end, c.text);
             // A missed external/editor event cannot silently desynchronize us.
             if (this.source.files.get(file).text !== text) throw Error('Native source edit history diverged');
         });
@@ -340,7 +365,10 @@ class NativeBuildLane {
                 requireCurrent();
                 const existing = this.source.files.get(file);
                 if (!existing) await this.source.open(file, text);
-                else if (existing.text !== text) await this.source.edit(file, 0, existing.text.length, text);
+                else if (existing.text !== text) {
+                    const edit=sourceSplice(existing.text,text);
+                    await this.source.edit(file,edit.start,edit.end,edit.text);
+                }
             }
         });
         await this.edits;
@@ -370,7 +398,12 @@ class NativeBuildLane {
             // installation) is the lane's problem, and that still throws so
             // the host can retire it and say so.
             if (!isDocumentFailure(report)) throw Error(report.diagnostics.map(d=>d.message).join('\n') || 'Native compilation failed');
-            const diagnostics = report.diagnostics.map(d=>({ ...d,
+            // The process exits nonzero because TeX reported this document
+            // error. Showing that consequence as another LaTeX error makes a
+            // surviving live worker look crashed. Keep unrelated producer
+            // failures visible; only this redundant exit status is omitted.
+            const diagnostics = report.diagnostics.filter(d => !(d.producer &&
+                /^Native compiler exited with exit status:/.test(d.message || ''))).map(d=>({ ...d,
                 file: d.file ? path.resolve(this.projectDir,d.file) : null }));
             const errors = diagnostics.filter(d=>d.severity==='error');
             return { ok:false, runner:'wlatex', engine:'wlatex', root:this.root, projectDir:this.projectDir, nativeArtifactLease,
@@ -486,7 +519,22 @@ class NativeBuildLane {
      */
     async outlines(font, glyphs) {
         if (!this.interactive) return null;
+        const definition = this._liveFonts?.get(font);
+        // A TFM with no vector font file is a METAFONT bitmap. Avoid asking
+        // the engine for the same unavailable outline on every keystroke.
+        if (definition?.kind === 'tfm' && definition.file === null) {
+            this._bitmapFonts ||= new (require('./bitmapFont').BitmapFonts)();
+            return this._bitmapFonts.outlines(definition, glyphs);
+        }
         return this.session.outlines(font, glyphs);
+    }
+
+    _rememberLiveFonts(payload) {
+        const fonts = this._liveFonts ||= new Map();
+        for (const definition of payload?.txdl?.fonts || []) {
+            const digest = definition.definition_digest;
+            if (digest) fonts.set(digest, { ...fonts.get(digest), ...payload.fonts?.[digest], ...definition });
+        }
     }
 
     /**
@@ -509,9 +557,9 @@ class NativeBuildLane {
      * arrives as a TXDL display list through `o.onPage` and is drawn over the
      * PDF canvas in the webview.
      *
-     * IT IS A PREVIEW, NOT A BUILD. It never settles, produces no PDF, no
-     * source map and no provenance; the cold build that follows it still does
-     * all of that and remains what the reader finally sees. Therefore this
+     * It never settles or produces a PDF. Its page maps answer for the live
+     * pixels; the cold build still produces the authoritative PDF and map.
+     * Therefore this
      * NEVER THROWS for a failure of its own: a failed interactive build comes
      * back as `{ ok: false }` and the caller simply carries on to the cold
      * build. Only a superseded or aborted build answers null.
@@ -524,13 +572,14 @@ class NativeBuildLane {
         if (!this.interactiveWarm) {
             const warm = this.warmInteractive();
             if (o.wait !== true) return null;
-            if (!await warm) return interactiveFailure(null, this.interactiveUnavailable, false);
+            if (!await warm) return interactiveFailure(null, this.interactiveUnavailable, false, true);
             if (!this.interactive) return null;
         }
         let handle = null, generation = null, fedAuxiliary = {};
         const timing = process.env.WPAPER_BUILD_TIMING ? { t0: performance.now() } : null;
         try {
             const texts = this._interactiveOverlays(o);
+            await this._syncInteractiveSources(o, texts);
             if (timing) timing.overlays = performance.now() - timing.t0;
             const viewport = [...new Set((o.nativePages || [])
                 .filter(page => Number.isInteger(page) && page >= 1))].sort((a, b) => a - b);
@@ -544,7 +593,7 @@ class NativeBuildLane {
                 generation, lane:'interactive', viewport });
         } catch (error) {
             if (error?.name === 'AbortError') return null;
-            return interactiveFailure(generation, error.message, error.fatal === true);
+            return interactiveFailure(generation, error.message, error.fatal === true, error.producer === true);
         }
         const abort = () => { try { handle.cancel(); } catch (_) { /* already finished */ } };
         o.signal?.addEventListener('abort', abort, { once:true });
@@ -554,6 +603,7 @@ class NativeBuildLane {
             for await (const event of handle.events()) {
                 if (timing && timing[event.event] == null) timing[event.event] = performance.now() - timing.t0;
                 if (event.event === 'page_finalized') {
+                    this._rememberLiveFonts(event.payload);
                     // A KEYSTROKE DOES NOT INVALIDATE A PAGE. The reader is
                     // still typing — that is why this ran — and a page from a
                     // build two characters old is precisely what the preview
@@ -566,6 +616,7 @@ class NativeBuildLane {
                     try { o.onPage({ ...interactivePage(generation, event), ...(timing ? { timing: { ...timing, page: performance.now() - timing.t0 } } : {}) }); }
                     catch (_) { /* a viewer that cannot draw never fails a build */ }
                 } else if (event.event === 'paragraph_fragment') {
+                    this._rememberLiveFonts(event.payload);
                     // The typed paragraph ahead of its page: drawn at once over
                     // the page shown. Same staleness rule as pages.
                     if (this.closed || o.signal?.aborted || typeof o.onFragment !== 'function') continue;
@@ -575,7 +626,11 @@ class NativeBuildLane {
                     // The page's own source map reached the worker (or could
                     // not be bound): clicks on that live page may now be
                     // answered from it. It never gates the pixels.
-                    if (this.closed || typeof o.onPageMap !== 'function') continue;
+                    if (this.closed) continue;
+                    this._livePageIdentities ||= new Map();
+                    if (event.event === 'page_map_ready') this._livePageIdentities.set(event.page,event.identity ?? null);
+                    else this._livePageIdentities.delete(event.page);
+                    if (typeof o.onPageMap !== 'function') continue;
                     try { o.onPageMap({ generation, page:event.page, ready:event.event === 'page_map_ready',
                         identity:event.identity ?? null, error:event.error ?? null }); }
                     catch (_) { /* a viewer that cannot map never fails a build */ }
@@ -586,11 +641,11 @@ class NativeBuildLane {
             await handle.report;
         } catch (error) {
             if (error?.name === 'AbortError') return null;
-            if (!failed) return interactiveFailure(generation, error.message, error.fatal === true);
+            if (!failed) return interactiveFailure(generation, error.message, error.fatal === true, error.producer === true);
         } finally { o.signal?.removeEventListener('abort', abort); }
         if (superseded || o.signal?.aborted) return null;
-        if (failed) return interactiveFailure(generation, failed.error, failed.fatal === true);
-        if (!built) return interactiveFailure(generation, 'the interactive build produced no report', false);
+        if (failed) return interactiveFailure(generation, failed.error, failed.fatal === true, failed.producer === true);
+        if (!built) return interactiveFailure(generation, 'the interactive build produced no report', false, true);
         // NEW REFERENCES. A \\label typed now is in the .aux this build wrote,
         // not in the one it read: one more build reading it prints the number
         // (the host runs it at a pause, see renderUi._scheduleReferencePass).
@@ -612,9 +667,8 @@ class NativeBuildLane {
      * The overlay texts one interactive build compiles: the root, the editor's
      * include graph, every unsaved buffer and every file the source session
      * already knows (a package the engine discovered on an earlier build).
-     * The same map `_compile` builds, minus the edit-chain synchronization —
-     * that belongs to the cold path, which owns the source map, and a preview
-     * must not perturb it.
+     * Saved regular files stay on disk. `_syncInteractiveSources` separately
+     * binds their current text in the source worker for live-page mapping.
      */
     _interactiveOverlays(o) {
         // ONLY WHAT DIFFERS FROM DISK. The engine reads the project from disk
@@ -639,6 +693,43 @@ class NativeBuildLane {
         }
         return texts;
     }
+
+    /** Bind the preview's text before admitting its map, including disk edits
+     * made by an agent without an open-editor change event. The edit chain
+     * orders this with reader typing; a newer change cancels the old capture.
+     * Unchanged disk files still stay out of the engine overlay payload. */
+    async _syncInteractiveSources(o, overlays) {
+        const version=this.version;
+        const current=()=>{ if (this.closed || version !== this.version || o.signal?.aborted)
+            throw Object.assign(Error('Native preview source superseded'),{name:'AbortError'}); };
+        const texts=new Map(overlays);
+        const names=new Set([this.relative(this.root), ...(o.sourceFiles || []).filter(f=>this.isInside(f)).map(f=>this.relative(f)),
+            ...this.source.files.keys()]);
+        await Promise.all([...names].filter(name=>!texts.has(name)).map(async name=>{
+            try { texts.set(name,await fs.promises.readFile(path.join(this.projectDir,name),'utf8')); }
+            catch (error) { if (name === this.relative(this.root) || error.code !== 'ENOENT') throw error; }
+        }));
+        current();
+        this.edits=(this.edits || Promise.resolve()).catch(()=>{}).then(async()=>{
+            current();
+            for (const [name,text] of texts) {
+                current();
+                const old=this.source.files.get(name)?.text;
+                if (old === text) continue;
+                if (old == null) await this.source.open(name,text);
+                else {
+                    // Preserve unaffected source ranges instead of invalidating
+                    // a whole file for a one-sentence external replacement.
+                    const edit=sourceSplice(old,text);
+                    await this.source.edit(name,edit.start,edit.end,edit.text);
+                }
+            }
+            current();
+        });
+        await this.edits;
+    }
+
+    liveMapIdentity(page) { return this._livePageIdentities?.get(page) ?? null; }
 
     /**
      * The auxiliary files the last successful cold build wrote, so references,
@@ -702,12 +793,15 @@ class NativeBuildLane {
      * The live map's view of `pages` (pages the incremental engine drew and
      * whose own maps reached the worker), or null when there is none.
      */
-    async liveView(pages) {
+    async liveView(pages, {requiredPage=null} = {}) {
         if (this.closed || !pages.length) return null;
         // The session keeps each live page's map and publishes it to the
         // worker only when a viewer reads that page.
         if (typeof this.session?.ensureLiveMaps === 'function') {
-            const { ready } = await this.session.ensureLiveMaps(pages);
+            const { ready, failed=[] } = await this.session.ensureLiveMaps(pages);
+            const failure=failed.find(f=>f.page === requiredPage) || (!ready.length && failed[0]);
+            if (failure) throw Object.assign(Error(`Live page ${failure.page}: ${failure.error}`),
+                {name:'LiveMapUnavailable',page:failure.page});
             pages = pages.filter(page => ready.includes(page));
         }
         if (this.closed || !this.source.livePublished || !pages.length) return null;
@@ -743,7 +837,14 @@ class NativeBuildLane {
     }
     async refresh(pages) {
         if (this.closed) return null;
-        await this.edits;
+        // A superseded preview can reject a shared queue tail without the
+        // source worker failing. Drain newer reader writes, then read the map.
+        for(;;) {
+            const pending=this.edits;
+            try { await pending; }
+            catch(error) { if(!['AbortError','StaleBuild','Cancelled'].includes(error?.name))throw error; }
+            if(this.edits===pending || this.closed)break;
+        }
         if (this.closed || !this.source.published) return null;
         return this.source.readPages(this.pageWindow(pages, this.source.published.artifact.page_count));
     }

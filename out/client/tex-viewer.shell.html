@@ -408,18 +408,41 @@
   #tikzpanel .tz-chip { border:1px solid var(--vscode-editorWidget-border, #666); border-radius:10px; padding:0 2px 0 6px; font-family:var(--vscode-editor-font-family, monospace); }
   #tikzpanel .tz-chip button { background:none; border:none; color:inherit; cursor:pointer; padding:0 3px; }
   #tikzpanel .tz-actions { display:flex; gap:4px; flex-wrap:wrap; margin-top:6px; }
+  #tikzpanel .tz-source { width:100%; min-width:0; }
+  #tikzpanel .tz-source textarea { width:100%; box-sizing:border-box; min-height:120px; max-height:45vh; resize:vertical;
+    font:12px/1.5 var(--vscode-editor-font-family, monospace); color:var(--vscode-input-foreground, inherit);
+    background:var(--vscode-input-background, transparent); border:1px solid var(--vscode-input-border, #888); padding:6px; }
+  #tikzpanel .tz-source-meta { margin-top:4px; font-size:11px; overflow-wrap:anywhere; }
+  #tikzpanel .tz-source-meta.conflict { color:var(--vscode-editorWarning-foreground, #b7791f); }
   .tikz-from { fill:none; stroke:#e11d48; stroke-width:3; stroke-opacity:.7; }
   .tikz-guide { stroke:#4f46e5; stroke-width:1; stroke-dasharray:none; pointer-events:none; }
   .tikz-spacing { stroke:#e11d48; stroke-width:1.5; }
   .tikz-marquee { fill:rgba(55,148,255,.08); }
   .tikz-placing main .page { cursor:copy; }
-  /* A TeX error of the live preview, on the page it was typeset on. */
-  .live-error { position:absolute; left:8px; right:8px; top:8px; z-index:7; cursor:pointer;
-             padding:3px 8px; border-radius:3px; font:12px/1.4 var(--vscode-font-family, sans-serif);
-             color:#fff; background: rgba(190,40,40,.88);
-             background: color-mix(in srgb, var(--vscode-errorForeground, #be2828) 88%, transparent);
-             white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .live-error:hover { background: rgba(190,40,40,1); }
+  /* Compiler errors sit beside the mapped line, above either page renderer. */
+  .compile-error { position:absolute; z-index:9; width:420px; max-width:calc(100% - 16px);
+        box-sizing:border-box; border:1px solid #a82020; border-radius:4px;
+        color:#fff; background:#b82727; font:12px/1.4 var(--vscode-font-family, sans-serif);
+        box-shadow:0 2px 6px rgba(0,0,0,.22); }
+  .compile-error summary { display:flex; align-items:center; gap:6px; cursor:pointer; padding:4px 8px; }
+  .compile-error summary::before { content:'▸'; flex:none; }
+  .compile-error[open] summary::before { content:'▾'; }
+  .compile-error[open] { z-index:32; }
+  .compile-error summary:hover { background:rgba(0,0,0,.12); }
+  .compile-error summary:focus-visible, .error-source:focus-visible { outline:2px solid #fff; outline-offset:1px; }
+  .error-title { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; }
+  .error-where { white-space:nowrap; opacity:.85; }
+  .error-body { padding:4px 8px 8px; border-top:1px solid rgba(255,255,255,.25);
+        max-height:240px; overflow:auto; user-select:text; overflow-wrap:anywhere; }
+  .error-body p { margin:4px 0 8px; white-space:pre-wrap; }
+  .error-location { font-size:11px; opacity:.85; margin-bottom:6px; }
+  .error-source { color:#fff; background:rgba(0,0,0,.15); border:1px solid rgba(255,255,255,.4);
+        border-radius:3px; font:inherit; cursor:pointer; padding:2px 6px; }
+  .compile-error-ink { position:absolute; z-index:8; pointer-events:none; box-sizing:border-box;
+        border-bottom:2px solid #d02020; background:rgba(210,30,30,.08); }
+  #compileerrorlist { position:sticky; top:4px; z-index:10; max-width:440px; margin:0 auto; }
+  #compileerrorlist[hidden] { display:none; }
+  .compile-error.unplaced { position:relative; left:0 !important; margin-bottom:4px; }
 
   .movecaret { position:absolute; pointer-events:none; z-index:8;
          background: var(--vscode-focusBorder, #4a9eff);
@@ -827,7 +850,8 @@
              margin:-8px -12px 6px; padding:8px 12px 6px;
              display:flex; align-items:center; gap:8px;
              font-family: var(--vscode-font-family); font-size:11px;
-             opacity:.7; margin-bottom:6px; display:flex; gap:8px; align-items:center; }
+             margin-bottom:6px; flex-wrap:wrap; }
+  #reviewdiff .rd-author, .rchip .r-author { max-width:110px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11px; opacity:.7; }
   #reviewdiff .rd-head .sp { flex:1; }
   #reviewdiff .rd-acts { display:flex; gap:4px; flex:0 0 auto; }
   #reviewdiff .rd-acts button { background:transparent; border:1px solid var(--vscode-panel-border);
@@ -838,19 +862,44 @@
   #reviewdiff .rd-acts button.undo { color: var(--vscode-gitDecoration-deletedResourceForeground, #c66); }
   #reviewdiff .rd-flag { font-size:10.5px; color: var(--vscode-editorWarning-foreground, #c90); white-space:nowrap; }
   #reviewdiff .rd-none { font-family: var(--vscode-font-family); font-size:12px; opacity:.6; }
-  #reviewdiff .rd-line { white-space:pre-wrap; word-break:break-word; padding:0 6px;
-             border-left:2px solid transparent; }
-  #reviewdiff .rd-line.was { background: var(--vscode-diffEditor-removedTextBackground, rgba(200,90,70,.18));
-             border-left-color: var(--vscode-gitDecoration-deletedResourceForeground, #c66); }
-  #reviewdiff .rd-line.now { background: var(--vscode-diffEditor-insertedTextBackground, rgba(80,180,120,.18));
-             border-left-color: var(--vscode-gitDecoration-addedResourceForeground, #4a8); }
+  #reviewdiff .rd-line { display:flex; padding:2px 0; gap:6px; }
+  #reviewdiff .rd-number { min-width:4ch; text-align:right; opacity:.55; user-select:none; }
+  #reviewdiff .rd-sign { width:1ch; flex:none; user-select:none; font-weight:700; }
+  #reviewdiff .was .rd-sign { color:var(--vscode-gitDecoration-deletedResourceForeground, #c66); }
+  #reviewdiff .now .rd-sign { color:var(--vscode-gitDecoration-addedResourceForeground, #4a8); }
+  #reviewdiff .rd-source { white-space:pre-wrap; overflow-wrap:anywhere; min-width:0; }
+  #reviewdiff .rd-tools { display:flex; align-items:center; flex-wrap:wrap; gap:12px; margin:6px 0 12px;
+             font:11px var(--vscode-font-family); }
+  #reviewdiff .rd-modes { display:flex; gap:2px; }
+  #reviewdiff .rd-modes button { padding:3px 8px; border:1px solid var(--vscode-panel-border);
+             background:transparent; color:inherit; cursor:pointer; border-radius:3px; }
+  #reviewdiff .rd-modes button[aria-pressed="true"] { border-color:var(--vscode-focusBorder, #1688e8);
+             background:var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.18)); }
+  #reviewdiff .rd-legend.was { border-bottom:2px solid #c43e3e; }
+  #reviewdiff .rd-legend.now { border-bottom:2px solid #278447; }
+  #reviewdiff .rd-render { padding:8px; font:12px var(--vscode-font-family); overflow:auto;
+             border-left:3px solid transparent; }
+  #reviewdiff .rd-render.was { border-left-color:#c43e3e; }
+  #reviewdiff .rd-render.now { border-left-color:#278447; }
+  #reviewdiff .rd-fallback { font-family:var(--vscode-editor-font-family, monospace);
+             font-size:calc(var(--vscode-editor-font-size, 12px) * .92); line-height:1.45; }
+  #reviewdiff .rd-preview-status { font:11px var(--vscode-font-family); padding-bottom:8px; opacity:.85; }
+  #reviewdiff .rd-crop { position:relative; background:white; margin:0 0 6px; }
+  #reviewdiff .rd-crop canvas { display:block; width:100%; height:100%; }
+  .hiddenCanvasElement { position:absolute; left:-10000px; top:-10000px; visibility:hidden; pointer-events:none; }
+  #reviewdiff .rd-inkmark { position:absolute; pointer-events:none; box-sizing:border-box;
+             border-bottom:2px solid #c43e3e; }
+  #reviewdiff .now .rd-inkmark { border-bottom-color:#278447; }
+  #reviewdiff .rd-error, #reviewdiff .rd-mapping { font:11px var(--vscode-font-family); padding:5px 0; }
   #reviewdiff .rd-sep { height:6px; }
   #reviewdiff .rd-tag { font-family: var(--vscode-font-family); font-size:10px; opacity:.65;
-             letter-spacing:.06em; text-transform:uppercase; margin:2px 0; }
+             letter-spacing:.06em; text-transform:uppercase; margin:8px 0 4px; }
   #reviewdiff mark { background: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 22%, transparent);
              color:inherit; border-radius:2px; padding:0 1px; }
-  #reviewdiff .was mark { background: color-mix(in srgb, var(--vscode-gitDecoration-deletedResourceForeground, #c66) 38%, transparent); }
-  #reviewdiff .now mark { background: color-mix(in srgb, var(--vscode-gitDecoration-addedResourceForeground, #4a8) 38%, transparent); }
+  #reviewdiff .was mark { background: color-mix(in srgb, var(--vscode-gitDecoration-deletedResourceForeground, #c66) 25%, transparent);
+             border-bottom:2px solid var(--vscode-gitDecoration-deletedResourceForeground, #c66); }
+  #reviewdiff .now mark { background: color-mix(in srgb, var(--vscode-gitDecoration-addedResourceForeground, #4a8) 25%, transparent);
+             border-bottom:2px solid var(--vscode-gitDecoration-addedResourceForeground, #4a8); }
   #reviewpanel .grp { position:sticky; top:0; z-index:1; padding:5px 12px; font-size:11px;
              opacity:.85; display:flex; gap:8px; align-items:center;
              background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
@@ -878,6 +927,9 @@
              border-bottom:1px solid rgba(128,128,128,.10); }
   .rh:hover { background: var(--vscode-list-hoverBackground, rgba(128,128,128,.12)); }
   .rh.on { background: var(--vscode-list-activeSelectionBackground, rgba(90,140,220,.22)); }
+  .rh.waiting { opacity:.55; cursor:default; }
+  .rh.waiting:hover { background:transparent; }
+  #reviewpanel button:disabled, #reviewbar button:disabled { opacity:.5; cursor:default; }
   .rh .v { font-weight:700; text-align:center; }
   .rh .v.add { color: var(--vscode-gitDecoration-addedResourceForeground, #4a8); }
   .rh .v.del { color: var(--vscode-gitDecoration-deletedResourceForeground, #c66); }
@@ -1152,13 +1204,21 @@
     .comment-marker { transition:none; }
     .comment-marker.add.pending .tool-icon, .cp-spinner { animation:none; }
   }
-  /* A change marked on the page: the same band as a selection, in its own hue. */
-  .rband { position:absolute; pointer-events:none; border-radius:2px;
-             background: var(--vscode-diffEditor-insertedTextBackground, rgba(80,180,120,.18));
-             box-shadow: inset 2px 0 0 var(--vscode-gitDecoration-modifiedResourceForeground, #d90); }
-  .rband.add { box-shadow: inset 2px 0 0 var(--vscode-gitDecoration-addedResourceForeground, #4a8); }
+  /* Continuous review regions, like selection: no edges between glyph runs. */
+  .rband { position:absolute; pointer-events:none; z-index:4;
+             background:rgba(80,180,120,.14); }
+  .runderline { position:absolute; pointer-events:none; z-index:7; height:0;
+             border-bottom:2px solid #278447; }
+  .rinkfill { position:absolute; pointer-events:none; z-index:5;
+             background:rgba(39,132,71,.12); }
   .rband.del { background:transparent; border-bottom:2px solid
              var(--vscode-gitDecoration-deletedResourceForeground, #c66); }
+  .rband.change.removal { background:rgba(196,62,62,.05); }
+  .rremoved { position:absolute; z-index:28; white-space:nowrap; font:11px var(--vscode-font-family);
+             color:#a32323; background:#fff3f3; border:1px solid #cf7777;
+             border-radius:3px; padding:2px 5px; cursor:pointer; }
+  .rband.contextual { background:transparent; border-bottom:2px dashed #a77819; }
+  .rremoved.contextual { color:#806018; background:#fff9e8; border-color:#b6944d; }
   /* Focus belongs to the whole change, not to every PDF text fragment.  The
      client paints one union contour around its rows; outlining .rband itself
      produced a distracting blue box around every line and every span. */
@@ -1214,6 +1274,10 @@
           border:1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border));
           border-radius:6px; overflow:hidden;
           box-shadow: 0 8px 28px rgba(0,0,0,.4); }
+  /* The mini-editor floats over the corrections drawer, outside the paper's
+     clipping/stacking contexts. Its coordinates still belong to its page. */
+  .editcard[popover] { position:fixed; inset:auto; margin:0; padding:0; }
+  .editcard::backdrop { background:transparent; pointer-events:none; }
   /* The header is also the DRAG HANDLE (see makeDraggable): it must not start
      a text selection under the pointer, or a drag paints the title blue. */
   .ec-head { display:flex; align-items:center; gap:8px; padding:4px 6px 4px 10px;
@@ -1245,6 +1309,12 @@
           font-size:12px; line-height:1.55; tab-size:2;
           white-space:pre-wrap; word-wrap:break-word; overflow-wrap:break-word;
           font-variant-ligatures:none; letter-spacing:normal; }
+  .paper-cell-boundary { position:absolute; height:0; border-top:1px solid rgba(50,60,70,.18);
+          pointer-events:none; z-index:2; }
+  .wb-dark-pages .paper-cell-boundary { border-color:rgba(220,225,230,.18); }
+  .ec-cell-boundary { position:absolute; height:0; border-top:1px solid;
+          border-color:color-mix(in srgb, var(--vscode-editor-foreground, #888) 24%, transparent);
+          pointer-events:none; z-index:1; }
   .ec-hl { display:block; min-height:48px; pointer-events:none;
           color: var(--vscode-editor-foreground, var(--vscode-foreground)); }
   .editcard textarea { position:absolute; top:0; left:0; width:100%;
@@ -1488,7 +1558,12 @@
   #probadge[data-state="settled"] .pro-dot { background:#0ea5e9; }
   #probadge[data-state="off"] { opacity:.6; filter:grayscale(.7); }
   #probadge[data-state="disabled"] { opacity:.55; filter:grayscale(1); cursor:pointer; }
+  #probadge[data-state="off"] .pro-mark b { text-decoration:line-through; text-decoration-thickness:2px; }
+  #probadge[data-fallback="true"] .pro-dot { background:#f59e0b; border:0; box-shadow:none; animation:none; }
   header.tight #probadge .pro-state { display:none; }
+  #probadge[data-fallback="true"] .pro-state,
+  header.tight #probadge[data-fallback="true"] .pro-state { display:inline; max-width:125px;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   #propanel { position:absolute; right:8px; top:34px; z-index:40; width:300px; padding:10px 12px;
               background:var(--vscode-editorWidget-background, #f3f3f3);
               color:var(--vscode-editorWidget-foreground, var(--vscode-foreground, #1f1f1f));
@@ -1583,7 +1658,7 @@ body.wb-dark #overleaf.connected { color: #73d69a; }
   </defs>
 </svg>
 <header>
-  <button id="recompile" title="Recompile the paper"><svg class="tool-icon"><use href="#ti-refresh"/></svg><span class="tlbl">Compile</span></button>
+  <button id="recompile" title="Recompile the paper · ⌘/Ctrl-click to write the PDF beside the .tex file and open it in the system viewer"><svg class="tool-icon"><use href="#ti-refresh"/></svg><span class="tlbl">Compile</span></button>
   <span class="zoomgroup">
     <button id="zoomout" class="icon-only" title="Zoom out (⌘−)" aria-label="Zoom out"><svg class="tool-icon"><use href="#ti-minus"/></svg></button><span id="zoom">125%</span><button id="zoomin" class="icon-only" title="Zoom in (⌘+)" aria-label="Zoom in"><svg class="tool-icon"><use href="#ti-plus"/></svg></button>
   </span>
@@ -1662,7 +1737,7 @@ body.wb-dark #overleaf.connected { color: #73d69a; }
 </div>
 <div id="reader">
   <aside id="tikzpanel" aria-label="TikZ picture editor" hidden></aside>
-  <main><div id="pages" tabindex="-1"></div></main>
+  <main><div id="compileerrorlist" hidden></div><div id="pages" tabindex="-1"></div></main>
   <aside id="commentpanel" aria-label="Paper comments">
     <div id="commentgrip" title="Drag to resize · double-click to reset"></div>
     <div class="cp-head"><span class="cp-avatar" aria-hidden="true"><svg class="tool-icon"><use href="#ti-comment"/></svg></span><button id="commentheading" class="cp-heading" title="Show the attached passage"><span class="cp-title">Comment</span><span id="commenttarget" class="cp-subtitle"></span></button>

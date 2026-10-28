@@ -59,6 +59,7 @@ function closeFor(text, mask, i) {
  */
 function commandStart(text, mask, from) {
     let i = from - 1;
+    while (i >= 0 && /[ \t]/.test(text[i])) i--;
     // `[a,b]` between the command and its group.
     if (text[i] === ']') {
         let depth = 0;
@@ -75,108 +76,135 @@ function commandStart(text, mask, from) {
     return from;
 }
 
+/** Matched delimiter spans, including commands whose spelling is not ink. */
+function matchedDelimiters(src, mask) {
+    const pairs = [], stacks = new Map();
+    const pair = (kind, token, closing = false) => {
+        const stack = stacks.get(kind) || [];
+        stacks.set(kind, stack);
+        if (!closing) stack.push(token);
+        else if (stack.length) pairs.push([stack.pop(), token]);
+    };
+    const envs = [];
+    let math = null;
+    for (let i = 0; i < src.length; i++) {
+        if (mask[i]) continue;
+        const start = i, c = src[i];
+        if (c === '\\') {
+            const command = /^\\(?:[A-Za-z@]+|[^])/s.exec(src.slice(i));
+            if (!command) continue;
+            const name = command[0].slice(1);
+            i += command[0].length - 1;
+            if (name === 'verb') {
+                if (src[i + 1] === '*') i++;
+                const delimiter = src[++i];
+                const end = src.indexOf(delimiter, i + 1);
+                if (end >= 0) i = end;
+            } else if (name === 'begin' || name === 'end') {
+                const arg = /^\s*\{([^{}]+)\}/.exec(src.slice(i + 1));
+                if (!arg) continue;
+                i += arg[0].length;
+                const token = { start, end: i + 1 };
+                if (name === 'begin') {
+                    if (/^(?:verbatim\*?|lstlisting|minted)$/.test(arg[1])) {
+                        const endRe = new RegExp('\\\\end\\s*\\{' + arg[1].replace('*', '\\*') + '\\}', 'g');
+                        endRe.lastIndex = i + 1;
+                        const end = endRe.exec(src);
+                        if (end) {
+                            pairs.push([token, { start: end.index, end: endRe.lastIndex }]);
+                            i = endRe.lastIndex - 1;
+                            continue;
+                        }
+                    }
+                    envs.push({ name: arg[1], token });
+                } else if (envs.length && envs[envs.length - 1].name === arg[1]) {
+                    pairs.push([envs.pop().token, token]);
+                }
+            } else if (name === 'left' || name === 'right') {
+                // A delimiter can be one character, '.', or a control word.
+                const delimiter = /^\s*(?:\\(?:[A-Za-z@]+|[^])|[^\s])/s.exec(src.slice(i + 1));
+                if (delimiter) i += delimiter[0].length;
+                pair('left', { start, end: i + 1 }, name === 'right');
+            } else if ('()[]'.includes(name) && name.length === 1) {
+                pair(name === '(' || name === ')' ? 'inline' : 'display',
+                    { start, end: i + 1 }, name === ')' || name === ']');
+            }
+            // Escaped literal braces/parentheses and control words aren't
+            // structural characters. Their arguments are scanned normally.
+            continue;
+        }
+        if (c === '$') {
+            const size = src[i + 1] === '$' ? 2 : 1;
+            const token = { start, end: start + size };
+            if (math && math.size === size) { pairs.push([math.token, token]); math = null; }
+            else if (!math) math = { size, token };
+            i += size - 1;
+            continue;
+        }
+        const opening = '{[('.includes(c), closing = '}])'.includes(c);
+        if (opening || closing) {
+            const kind = closing ? '{[('['}])'.indexOf(c)] : c;
+            pair(kind, { start, end: start + 1 }, closing);
+        }
+    }
+    return pairs;
+}
+
 /**
- * The smallest range containing [from, to) that is not broken.
- *
- * @param {string} text  the whole document
- * @param {number} from  offset, inclusive
- * @param {number} to    offset, exclusive
- * @param {{maxRounds?:number}} [opts]
- * @returns {{from:number, to:number, widened:boolean, reason:string|null}}
+ * The smallest range containing [from, to) with no half of a matched
+ * delimiter, plus directly attached sentence/phrase punctuation. A body
+ * wholly inside a construct stays a body; selecting either edge brings its
+ * partner along. Only grows, and ignores comments and escaped delimiters.
  */
 function balanceRange(text, from, to, opts = {}) {
     const src = String(text || '');
     const mask = commentMask(src);
+    const pairs = matchedDelimiters(src, mask);
     let a = Math.max(0, Math.min(from | 0, src.length));
     let b = Math.max(a, Math.min(to | 0, src.length));
-    const a0 = a;
-    const b0 = b;
+    const a0 = a, b0 = b;
     let reason = null;
-    const rounds = opts.maxRounds || 8;
-
+    if (a === b) return { from: a, to: b, widened: false, reason };
+    // Each growing pass consumes at least one previously excluded boundary.
+    // No arbitrary depth limit: nested constructs must all stay balanced.
+    const rounds = opts.maxRounds || pairs.length * 2 + 2;
     for (let round = 0; round < rounds; round++) {
-        let moved = false;
-
-        // 1. An unmatched `}` inside the range: its `{` is outside, to the left.
-        let depth = 0;
-        let needOpen = -1;
-        for (let i = a; i < b; i++) {
-            if (mask[i] || (i > 0 && src[i - 1] === '\\')) continue;
-            if (src[i] === '{') depth++;
-            else if (src[i] === '}') {
-                depth--;
-                if (depth < 0) { needOpen = i; break; }
+        const beforeA = a, beforeB = b;
+        for (const [open, close] of pairs) {
+            const hasOpen = open.start < b && open.end > a;
+            const hasClose = close.start < b && close.end > a;
+            if (!hasOpen && !hasClose) continue;
+            const left = open.start;
+            const right = close.end;
+            if (hasOpen !== hasClose || a > left || b < right) {
+                a = Math.min(a, left);
+                b = Math.max(b, right);
+                if (src[left] === '{') a = Math.min(a, commandStart(src, mask, left));
+                reason = reason || 'matched delimiters';
             }
         }
-        if (needOpen >= 0) {
-            const open = openFor(src, mask, needOpen);
-            if (open >= 0 && open < a) {
-                a = commandStart(src, mask, open);
-                reason = reason || 'a brace group began before it';
-                moved = true;
-            }
-        }
-
-        // 2. An unclosed `{`: its `}` is outside, to the right.
-        if (!moved) {
-            depth = 0;
-            let needClose = -1;
-            for (let i = b - 1; i >= a; i--) {
-                if (mask[i] || (i > 0 && src[i - 1] === '\\')) continue;
-                if (src[i] === '}') depth++;
-                else if (src[i] === '{') {
-                    depth--;
-                    if (depth < 0) { needClose = i; break; }
-                }
-            }
-            if (needClose >= 0) {
-                const close = closeFor(src, mask, needClose);
-                if (close >= b) { b = close + 1; reason = reason || 'a brace group ended after it'; moved = true; }
-            }
-        }
-
-        // 3. A command whose argument the range starts inside — the commonest
-        //    case, and the reported one: `\paragraph{` before it, `sdfsdf}`
-        //    inside. Covered by 1, but also when the range begins exactly at the
-        //    argument with no stray `}`: pull back over a bare control word.
-        if (!moved && a > 0 && src[a - 1] === '{') {
-            // The BRACE's own position, not the position after it: the command
-            // name sits before the brace, and handing this the argument's start
-            // makes it look at the brace itself and find no name.
+        // The visible argument of a command omits both non-printing braces.
+        if (a > 0 && src[a - 1] === '{' && !mask[a - 1]) {
             const start = commandStart(src, mask, a - 1);
-            if (start < a - 1) {
-                a = start;
-                reason = reason || 'it began inside a command';
-                moved = true;
+            if (start < a - 1) { a = start; reason = reason || 'a command argument'; }
+        }
+        // Even a complete brace group must take its owning control word.
+        if (src[a] === '{' && !mask[a]) {
+            const start = commandStart(src, mask, a);
+            if (start < a) { a = start; reason = reason || 'a command argument'; }
+        }
+        const punctuation = /^[.,;:!?…]+/.exec(src.slice(b));
+        if (punctuation && !mask[b] && b > a && !/\s/.test(src[b - 1])) {
+            const end = b + punctuation[0].length;
+            // A dot in 1.25 or a filename is part of its token, not a
+            // sentence terminator. Never cross whitespace to find punctuation.
+            if (end === src.length || /[\s\])}\\$'"”’]/.test(src[end])) {
+                b = end;
+                reason = reason || 'trailing punctuation';
             }
         }
-
-        // 4. `\begin{env}` / `\end{env}` must travel together.
-        if (!moved) {
-            const inner = src.slice(a, b);
-            const re = /\\(begin|end)\s*\{([^}]*)\}/g;
-            const stack = [];
-            let dangling = null;
-            let m;
-            while ((m = re.exec(inner))) {
-                if (m[1] === 'begin') stack.push(m);
-                else if (stack.length) stack.pop();
-                else { dangling = m; break; }         // an \end with no \begin
-            }
-            if (dangling) {
-                const name = dangling[2];
-                const before = src.lastIndexOf(`\\begin{${name}}`, a);
-                if (before >= 0) { a = before; reason = reason || 'an environment began before it'; moved = true; }
-            } else if (stack.length) {
-                const name = stack[stack.length - 1][2];
-                const after = src.indexOf(`\\end{${name}}`, b);
-                if (after >= 0) { b = after + `\\end{${name}}`.length; reason = reason || 'an environment ended after it'; moved = true; }
-            }
-        }
-
-        if (!moved) break;
+        if (a === beforeA && b === beforeB) break;
     }
-
     return { from: a, to: b, widened: a !== a0 || b !== b0, reason };
 }
 

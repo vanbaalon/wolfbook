@@ -2,7 +2,7 @@
 // SHOWING IT: on macOS a separate instance (its own --user-data-dir) opened
 // hidden and in the background (`open -g -j -n`), so a test run never takes
 // the screen or the focus from whoever is working. WPAPER_TEST_VISIBLE=1
-// shows it (the old `code --wait`), e.g. to watch a test.
+// launches a separate visible instance for checks that require drawing.
 //
 // The hidden instance is waited for by its report (vscode-*.json, written by
 // the test in its run directory) and then closed — only processes started
@@ -18,7 +18,7 @@ const path = require('node:path');
 
 function spawnCode(code, args, options = {}) {
     const app = code.includes('.app/') ? code.slice(0, code.indexOf('.app/') + 4) : null;
-    if (process.platform !== 'darwin' || process.env.WPAPER_TEST_VISIBLE === '1' || !app) return spawn(code, args, options);
+    if (process.platform !== 'darwin' || !app) return spawn(code, args, options);
     const profile = args[args.indexOf('--user-data-dir') + 1];
     const run = path.dirname(profile);
     // `open` hands its environment to the app. Run from inside VS Code (a
@@ -27,7 +27,8 @@ function spawnCode(code, args, options = {}) {
     const env = { ...process.env, ...(options.env || {}) };
     for (const k of Object.keys(env)) if (k === 'ELECTRON_RUN_AS_NODE' || k.startsWith('VSCODE_') || env[k] === undefined) delete env[k];
     const child = new EventEmitter();
-    const opener = spawn('open', ['-g', '-j', '-n', '-a', app, '--args', ...args.filter(a => a !== '--wait')], { stdio: 'inherit', env });
+    const visibility = process.env.WPAPER_TEST_VISIBLE === '1' ? [] : ['-g', '-j'];
+    const opener = spawn('open', [...visibility, '-n', '-a', app, '--args', ...args.filter(a => a !== '--wait')], { stdio: 'inherit', env });
     opener.once('error', e => child.emit('error', e));
     const reports = () => { try { return fs.readdirSync(run).filter(f => /^vscode-.*\.json$/.test(f)); } catch (_) { return []; } };
     const started = Date.now(), limitMs = Number(process.env.WPAPER_TEST_TIMEOUT_MS || 15 * 60 * 1000);

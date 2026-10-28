@@ -38,6 +38,13 @@ class McpResultStore {
         const item = this._items.get(String(handle));
         if (!item || item.expiresAt <= Date.now()) { this._items.delete(String(handle)); return null; }
         let value = item.value;
+        const boundedData=text=>{
+            const slice=text.slice(offset,offset+limit);
+            if (requestedFormat === 'structured' && offset === 0 && limit >= text.length) {
+                try {return JSON.parse(text);} catch (_) {}
+            }
+            return slice;
+        };
         if (path !== undefined) {
             let structured;
             try { structured = JSON.parse(value); }
@@ -49,17 +56,20 @@ class McpResultStore {
             offset = Math.max(0, Number(offset) || 0); limit = Math.max(1, Math.min(65536, Number(limit) || 8192));
             return { handle, path, manifest: resolved.manifest, offset, limit, total_chars: value.length,
                 next_offset: offset + limit < value.length ? offset + limit : null,
-                data: value.slice(offset, offset + limit), expires_at: new Date(item.expiresAt).toISOString() };
+                format:requestedFormat === 'structured' ? (offset === 0 && limit >= value.length ? 'structured' : 'json-chunk') : 'json',
+                data: boundedData(value), expires_at: new Date(item.expiresAt).toISOString() };
         }
-        const format = requestedFormat === 'json' ? 'json' : item.format;
-        if (format === 'json') {
+        let format = ['json','structured'].includes(requestedFormat) ? requestedFormat : item.format;
+        if (format === 'json' || format === 'structured') {
             try { value = JSON.stringify(JSON.parse(value), null, 2); } catch (_) { return { error: 'Result is not valid JSON.', handle }; }
         }
         offset = Math.max(0, Number(offset) || 0); limit = Math.max(1, Math.min(65536, Number(limit) || 8192));
+        const data=boundedData(value);
+        if (format === 'structured' && (offset > 0 || limit < value.length)) format='json-chunk';
         return {
             handle, ...item.metadata, format, offset, limit, total_chars: value.length,
             next_offset: offset + limit < value.length ? offset + limit : null,
-            data: value.slice(offset, offset + limit), expires_at: new Date(item.expiresAt).toISOString(),
+            data, expires_at: new Date(item.expiresAt).toISOString(),
         };
     }
     envelope(value, previewChars = 2000, format = 'text', metadata = {}) {

@@ -231,6 +231,7 @@ function abortEvaluation(self) {
 
     // Signal widget loops to skip their current dialog cycle immediately.
     self._abortPending = true;
+    const abortSession=self.session;
 
     const doAbort = () => {
         self.writeDebugLog(`[ABORT] doAbort fired | dt=${Date.now()-_abortT0}ms | queueLen=${self.executionQueue.queueLength()} | started=${self.executionQueue.queue[0]?.started}`);
@@ -282,6 +283,7 @@ function abortEvaluation(self) {
         const _retryDelays = [2000, 5000, 10000];
         let _retryIdx = 0;
         const _scheduleRetry = () => {
+            if (self.session!==abortSession || self._restartPromise) return;
             if (_retryIdx >= _retryDelays.length) {
                 // Retries exhausted — kernel is not responding to SIGINT at all.
                 // Clear isAborting so future evaluations aren't permanently blocked,
@@ -300,13 +302,14 @@ function abortEvaluation(self) {
                         'Either wait for it to finish, or restart the kernel.',
                         'Restart Kernel'
                     ).then(choice => {
-                        if (choice === 'Restart Kernel') self.restartKernel();
+                        if (choice === 'Restart Kernel' && self.session===abortSession && !self._restartPromise && !self._disposed) self.restartKernel();
                     });
                 }
                 return;
             }
             const delay = _retryDelays[_retryIdx++];
             setTimeout(() => {
+                if (self.session!==abortSession || self._restartPromise) return;
                 if (!self.isAborting) return; // abort was already handled — done
                 if (!self.session) return;
                 self.writeDebugLog(`[ABORT] retry ${_retryIdx}/${_retryDelays.length} — sending another SIGINT | dt=${Date.now()-_abortT0}ms`);
@@ -323,43 +326,35 @@ function abortEvaluation(self) {
 }
 
 function restartKernel(self) {
-    const _rstT0 = Date.now();
-    self.writeDebugLog(`[RESTART] restartKernel called | isAborting=${self.isAborting} _abortPending=${self._abortPending} queueLen=${self.executionQueue.queueLength()} session=${!!self.session}`);
-    if (self.isAborting) {
-        self.writeDebugLog('[RESTART] overriding in-progress abort');
-    }
-    // Reset ALL controller-level flags to defaults
-    self._abortPending          = false;
-    self.isAborting              = false;
-    self._evalDispatched         = false;
-    self._interruptHandlerInstalled = false;
-    self._lastMainImgDir         = null;
-    self._lastMainImgRel         = null;
-    self._refineGuardActive     = false;
-    self._dialogPrintCollector  = null;
-    self._cellEpoch             = ((self._cellEpoch || 0) + 1) & 0xFFFFFF;
-    self._dispatchEpoch         = (self._dispatchEpoch + 1) & 0xFFFFFF;
-    // Force-end ALL queued executions (including the currently running cell) so
-    // the cell spinners stop immediately.  The checkout loop's error handler will
-    // later call end(id) again but will harmlessly find the item already gone.
+    if (self._restartPromise) return self._restartPromise;
+    const started=Date.now();
+    self.writeDebugLog('[RESTART] isolated shutdown requested');
+    // Stop this controller's spinners immediately, but preserve busy/faulted
+    // evidence until shutdown has admitted the old native session's closure.
     self.executionQueue.forceEndAll();
-    self.writeDebugLog(`[RESTART] all flags reset, queue force-ended | dt=${Date.now()-_rstT0}ms`);
-
-    const hadKernel = !!self.session;
-    self.quitKernel();
-    self.writeDebugLog(`[RESTART] quitKernel done | hadKernel=${hadKernel} | dt=${Date.now()-_rstT0}ms`);
-
-    if (hadKernel || true) {
-        setTimeout(() => {
-            self.writeDebugLog(`[RESTART] launching new kernel | dt=${Date.now()-_rstT0}ms`);
-            self.launchKernel().then(() => {
-                self.writeDebugLog(`[RESTART] launchKernel resolved OK | total dt=${Date.now()-_rstT0}ms`);
-            }).catch(err => {
-                self.writeDebugLog(`[RESTART] launchKernel FAILED: ${err.message}`);
-                vscode.window.showErrorMessage(`Failed to restart kernel: ${err.message}`);
-            });
-        }, 300);
-    }
+    const work=(async()=>{
+        await self.quitKernel('restart');
+        if (self._disposed) throw new Error('Kernel controller was disposed during restart.');
+        self._abortPending=false;self.isAborting=false;self._evalDispatched=false;
+        self._interruptHandlerInstalled=false;self._lastMainImgDir=null;self._lastMainImgRel=null;
+        self._refineGuardActive=false;self._dialogPrintCollector=null;
+        self._cellEpoch=((self._cellEpoch || 0)+1)&0xFFFFFF;
+        self._dispatchEpoch=((self._dispatchEpoch || 0)+1)&0xFFFFFF;
+        await self.launchKernel();
+        // launchKernel reports initialization errors to the UI and may resolve
+        // after failure. An MCP receipt must still never claim a working kernel.
+        if (self.kernelStatusString!=='resolved' || !self.session || self.session.isOpen===false)
+            throw new Error('The replacement kernel did not finish initialization. See Wolfbook Kernel Diagnostics.');
+        self.writeDebugLog(`[RESTART] replacement ready in ${Date.now()-started} ms`);
+        return {kernel_id:self.kernelIdentity?.kernel_id || null,epoch:self._sessionEpoch,pid:self.kernelMetadata?.pid || null};
+    })();
+    self._restartPromise=work;
+    work.then(()=>{if(self._restartPromise===work)self._restartPromise=null;},error=>{
+        if(self._restartPromise===work)self._restartPromise=null;
+        self.writeDebugLog(`[RESTART] failed: ${error.message}`);
+        vscode.window.showErrorMessage(`Failed to restart this kernel: ${error.message}`);
+    });
+    return work;
 }
 
 function writeFileChecked(self, filePath, text) {

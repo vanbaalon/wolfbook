@@ -4,8 +4,8 @@
 // prepareInvocation/invoke, added to the `tools` array, declared in
 // package.json contributes.languageModelTools.
 //
-// STAGE 1 SCOPE: read the projection, and mutate it under a hash guard.
-// No rendering, no compiling, no execution of managed blocks.
+// Read semantic projections and apply guarded transactions. Optional LaTeX
+// verification compiles private overlays; managed blocks are never evaluated.
 //
 // The mutation guard is deliberately the SAME SHAPE as the notebook one at
 // tools/index.js:104 (`mutationConflict`) — a structured conflict record
@@ -26,8 +26,16 @@ const { findRoot, buildGraph } = require('../tex/texProject');
 const { checkWritable } = require('../tex/diskGuard');
 const { announceAgentEdit } = require('../tex/reviewBus');
 const { compile } = require('../tex/compileService');
+const { paperCompileEngine } = require('../tex/livePolicy');
+const { regexPositions } = require('../tex/regexSearch');
+const { CommentStore, reconcileRecord, selectionLocation, commentHash } = require('../tex/commentStore');
+const { commentInbox } = require('../tex/commentInbox');
+const { resolveCommentAnchor, uniqueOffset, changedRange } = require('../tex/commentAnchor');
+const { commentAgent } = require('../tex/commentWakeup');
+const { readerConflict, readerRanges } = require('../tex/editorActivity');
 const { diffLines, splitLines } = require('../tex/texDiff');
 const fs = require('fs');
+const os = require('os');
 
 const ok = (text) => new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(text)]);
 const jsonPart = (obj) => ok(JSON.stringify(obj, null, 2));
@@ -64,24 +72,29 @@ async function resolveTexDocument(file) {
     let hit = open.find(d => d.uri.fsPath === want);
     if (hit) return wrap(hit);
     const base = path.basename(want);
-    const sameBase = open.filter(d => path.basename(d.uri.fsPath) === base);
+    // A path is an exact address, never a hint to pick another main.tex.
+    const bareName = want === base;
+    const sameBase = bareName ? open.filter(d => path.basename(d.uri.fsPath) === base) : [];
     if (sameBase.length === 1) return wrap(sameBase[0]);
     if (sameBase.length > 1) return { ambiguous: sameBase.map(d => d.uri.fsPath) };
 
     // Not open: read from disk, still without opening an editor.
     const candidates = [];
     if (path.isAbsolute(want)) candidates.push(vscode.Uri.file(want));
-    for (const folder of vscode.workspace.workspaceFolders || []) {
+    for (const folder of path.isAbsolute(want) ? [] : vscode.workspace.workspaceFolders || []) {
         candidates.push(vscode.Uri.joinPath(folder.uri, want));
         if (!/\.tex$/i.test(want)) candidates.push(vscode.Uri.joinPath(folder.uri, want + '.tex'));
     }
+    const found = [];
     for (const uri of candidates) {
         try {
-            const bytes = await vscode.workspace.fs.readFile(uri);
-            return { doc: null, uri, fsPath: uri.fsPath, text: Buffer.from(bytes).toString('utf8') };
+            if (found.some(r => r.fsPath === uri.fsPath)) continue;
+            const doc = open.find(d => d.uri.fsPath === uri.fsPath);
+            const bytes = doc ? null : await vscode.workspace.fs.readFile(uri);
+            found.push(doc ? wrap(doc) : { doc: null, uri, fsPath: uri.fsPath, text: Buffer.from(bytes).toString('utf8') });
         } catch (_) { /* next */ }
     }
-    return null;
+    return found.length > 1 ? { ambiguous:found.map(r => r.fsPath) } : found[0] || null;
 }
 
 function wrap(doc) {
@@ -100,10 +113,13 @@ function nodeDeps() {
 
 function projectProjections(r) {
     const deps = nodeDeps();
-    const root = findRoot(r.fsPath, deps);
-    const graph = buildGraph(root.root, deps);
     const openByPath = new Map(texDocuments().map(doc => [doc.uri.fsPath, doc.getText()]));
     openByPath.set(r.fsPath, r.text);
+    const diskRead = deps.readFile, diskExists = deps.exists;
+    deps.readFile = file => openByPath.has(file) ? openByPath.get(file) : diskRead(file);
+    deps.exists = file => openByPath.has(file) || diskExists(file);
+    const root = findRoot(r.fsPath, deps);
+    const graph = buildGraph(root.root, deps);
     const projections = [];
     for (const file of graph.files) {
         let text = openByPath.get(file);
@@ -171,7 +187,8 @@ function ambiguousSelection(selector, matches) {
 }
 
 function warningKey(w) {
-    return typeof w === 'string' ? w : JSON.stringify(w);
+    // Moving an existing warning to another line is not a new parse failure.
+    return typeof w === 'string' ? w.replace(/^.*?:\d+: /, '') : JSON.stringify(w);
 }
 
 function referenceHealth(model) {
@@ -383,7 +400,25 @@ class PaperGetObjectTool {
     }
     async invoke(options) {
         const input = options.input || {};
-        if (!input.selector) return errPart('`selector` is required (an objectId, stableKey, or \\label)');
+        if (input.selectors !== undefined) {
+            if (!Array.isArray(input.selectors) || input.selectors.length < 1 || input.selectors.length > 10 ||
+                input.selectors.some(s=>typeof s !== 'string' || !s) || input.selector || input.reveal)
+                return errPart('selectors must contain 1–10 keys; do not combine a batch with selector or reveal');
+            const budget=Number(input.max_chars ?? 8000);
+            if (!Number.isInteger(budget) || budget < 1 || budget > 32000)
+                return errPart('batch max_chars is a total source budget of 1–32000');
+            return withDocument(input, async r=>{
+                const {model}=projectionOf(r.fsPath,r.text), perObject=Math.floor(budget/input.selectors.length);
+                return jsonPart({file:r.fsPath,document_hash:sha256(r.text),buffer_version:r.doc?.version ?? null,
+                    objects:input.selectors.map(selector=>{
+                        const matches=findObjects(model,selector);
+                        if (matches.length > 1) return ambiguousSelection(selector,matches);
+                        if (!matches.length) return {selector,state:'not-found'};
+                        return {selector,...summariseObject(matches[0],{includeText:true,maxText:perObject})};
+                    })});
+            });
+        }
+        if (!input.selector) return errPart('`selector` or `selectors` is required (objectId, stableKey, or \\label)');
         return withDocument(input, async (r) => {
             const { model } = projectionOf(r.fsPath, r.text);
             const matches = findObjects(model, input.selector);
@@ -445,7 +480,7 @@ class PaperGetSectionTool {
             const idx = headings.indexOf(head);
             const end = headings.slice(idx + 1).find(h => (h.level ?? 0) <= (head.level ?? 0));
             const from = head.sourceRange.startOffset;
-            const to = end ? end.sourceRange.startOffset : r.text.length;
+            const to = sectionEndOffset(model, r.text, head);
 
             const contained = model.objects.filter(o =>
                 o.sourceRange.startOffset >= from && o.sourceRange.endOffset <= to &&
@@ -454,12 +489,15 @@ class PaperGetSectionTool {
             return jsonPart({
                 file: r.fsPath,
                 section: summariseObject(head),
+                textScope: 'heading-and-body',
+                sectionIdentityScope: 'heading-only',
                 startLine: head.sourceRange.startLine,
-                endLine: end ? end.sourceRange.startLine - 1 : r.text.split('\n').length,
+                endLine: Math.max(head.sourceRange.startLine, lineCount(r.text.slice(0, to)) - (r.text[to - 1] === '\n' ? 1 : 0)),
                 objects: contained.map(o => summariseObject(o)),
                 text: input.include_text
                     ? r.text.slice(from, Math.min(to, from + (input.max_chars ?? 8000)))
                     : undefined,
+                textTruncated: input.include_text ? to - from > (input.max_chars ?? 8000) : undefined,
             });
         });
     }
@@ -585,8 +623,14 @@ class PaperSearchTool {
                     Number(query.to_line ?? input.to_line ?? Number.MAX_SAFE_INTEGER));
                 const maxDepth = Number(query.max_depth ?? input.max_depth ?? Number.MAX_SAFE_INTEGER);
                 const limit = Math.max(1, Math.min(100, Number(query.limit ?? input.limit_per_query ?? input.limit ?? 25)));
+                let positions = null;
+                if (re && !labelPrefix) {
+                    try { positions = await regexPositions(re.source, allObjects.map(o =>
+                        `${o.text || ''}\n${o.title || ''}\n${o.label || (o.kind === 'label' ? o.name : '')}`)); }
+                    catch (error) { results.push({index:qi, error:error.message}); continue; }
+                }
                 const hits = [];
-                for (const o of allObjects) {
+                for (const [oi, o] of allObjects.entries()) {
                     if (kinds ? !kinds.has(o.kind) : !ADDRESSABLE.has(o.kind)) continue;
                     if (sectionFile && o.sourceRange.file !== sectionFile) continue;
                     if (o.sourceRange.startLine < fromLine || o.sourceRange.startLine > toLine) continue;
@@ -596,10 +640,10 @@ class PaperSearchTool {
                     const hay = `${o.text || ''}\n${o.title || ''}\n${label}`;
                     const match = labelPrefix
                         ? String(label).startsWith(String(labelPrefix))
-                        : (re ? (re.lastIndex = 0, re.test(hay)) : hay.toLowerCase().includes(needle));
+                        : (positions ? positions[oi] >= 0 : hay.toLowerCase().includes(needle));
                     if (!match) continue;
                     const s = summariseObject(o);
-                    s.excerpt = excerpt(o.text || o.title || label, String(q || labelPrefix), re);
+                    s.excerpt = excerpt(o.text || o.title || label, String(q || labelPrefix), null, positions?.[oi]);
                     hits.push(s);
                     if (hits.length >= limit) break;
                 }
@@ -618,8 +662,8 @@ class PaperSearchTool {
     }
 }
 
-function excerpt(text, q, re) {
-    const i = re ? text.search(re) : text.toLowerCase().indexOf(q.toLowerCase());
+function excerpt(text, q, re, at) {
+    const i = at ?? (re ? text.search(re) : text.toLowerCase().indexOf(q.toLowerCase()));
     if (i < 0) return text.slice(0, 160);
     const from = Math.max(0, i - 60);
     return (from ? '…' : '') + text.slice(from, i + 120).replace(/\s+/g, ' ') + '…';
@@ -691,6 +735,183 @@ const _transactions = new Map();
 const _journal = [];
 const TX_TTL_MS = 60 * 60 * 1000;
 const TX_MAX = 32;
+const _applyQueues = new Map();
+
+class PaperListenCommentsTool {
+    async prepareInvocation(options) {
+        return { invocationMessage:`Paper comments: ${options.input?.action || 'start'}` };
+    }
+    async invoke(options, token) {
+        const input=options.input || {}, action=input.action || 'start';
+        try {
+            const inbox=commentInbox();
+            if (action === 'start') {
+                if (!input.file) return errPart('file is required to start a comment listener');
+                const agent=commentAgent(input.agent,input._activityContext?.agentName);
+                return await withDocument(input, async r => jsonPart(await inbox.start(r.fsPath,input.include_existing === true,agent,
+                    input._activityContext?.agentSessionId)));
+            }
+            if (!input.listener_id) return errPart('listener_id is required');
+            if (action === 'stop') {
+                if (input.file) inbox.get(input.listener_id, input.file);
+                return jsonPart(inbox.stop(input.listener_id));
+            }
+            const listener=inbox.get(input.listener_id,input.file);
+            if (action === 'cancel_wait' && input._operationId) return jsonPart(inbox.cancelWait(listener.id,input._operationId));
+            if (action === 'status') return jsonPart({...inbox.status(listener.id,input.projection === 'full'), reader_ranges:readerRanges(listener.file)});
+            if (action === 'release') return jsonPart(inbox.release(listener.id,input.delivery_id));
+            if (action === 'ack') {
+                return await withDocument({file:listener.file}, async r =>
+                    jsonPart(acknowledgeCommentEdit(r, listener.id, input.delivery_id, input.operation_id)));
+            }
+            if (action === 'context') {
+                const {delivery}=inbox.claim(listener.id,input.delivery_id);
+                const ids=input.comment_ids ?? [input.comment_id];
+                if (!Array.isArray(ids) || !ids.length || ids.length > 10 || new Set(ids).size !== ids.length ||
+                    ids.some(id=>typeof id !== 'string'))
+                    return jsonPart({state:'invalid',reason:'context requires comment_id or 1–10 distinct comment_ids'});
+                const comments=ids.map(id=>delivery.comments.find(c=>c.id === id));
+                if (comments.some(c=>!c)) return jsonPart({state:'not-found', reason:'comment_id is not part of this delivery'});
+                return await withDocument({file:listener.file}, async r => {
+                    const offset=Number(input.offset ?? 0), limit=Number(input.limit ?? 8000);
+                    if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < ids.length || limit > 8000)
+                        return jsonPart({state:'invalid',reason:'context offset must be nonnegative and limit must be 1–8000'});
+                    const each=Math.floor(limit/ids.length);
+                    const contexts=comments.map(comment=>{
+                        const anchor=resolveCommentAnchor(r.fsPath,r.text,comment,r.doc?.version),span=anchor.editable_span;
+                        if (span) {
+                            const source=r.text.slice(span.startOffset,span.endOffset);
+                            span.text=source.slice(offset,offset+each); span.offset=offset;
+                            span.truncated=offset+span.text.length < source.length; span.total_length=source.length;
+                            if (readerConflict(r.fsPath,[{start:span.startOffset,end:span.endOffset}])) {
+                                anchor.text_status=anchor.status; anchor.status='user-editing';
+                            }
+                        }
+                        return {comment_id:comment.id,text:comment.text.slice(offset,offset+each),
+                            text_truncated:offset+each < comment.text.length,author:comment.author,createdAt:comment.createdAt,
+                            updatedAt:comment.updatedAt,source:comment.source,revision:comment.revision,
+                            ...(!span ? {quote:(comment.selection?.quote || comment.cell?.source || '').slice(offset,offset+each)} : {}),anchor};
+                    });
+                    return jsonPart({file:r.fsPath,document_hash:sha256(r.text),buffer_version:r.doc?.version ?? null,
+                        ...(input.comment_ids ? {contexts} : contexts[0])});
+                });
+            }
+            if (action !== 'next') return errPart('action must be start, next, context, ack, release, status, or stop');
+            const response=await inbox.next(listener.id,{waitSeconds:input.wait_seconds ?? 45,
+                maxComments:input.max_comments ?? 1,token,requestId:input._operationId});
+            if (response.state !== 'comments') return jsonPart(response);
+            return await withDocument({file:listener.file}, async r => {
+                const p=projectionOf(r.fsPath,r.text);
+                const record={cells:[...new Map(response.comments.map(c => [c.cellId,c.cell])).values()],comments:response.comments};
+                const {bindings}=reconcileRecord(record,p.model.objects);
+                return jsonPart({...response,document_hash:sha256(r.text),buffer_version:r.doc?.version ?? null,reader_ranges:readerRanges(r.fsPath),
+                    comments:response.comments.map(c => {
+                        const obj=bindings.get(c.cellId), cell=c.cell;
+                        const anchor=resolveCommentAnchor(r.fsPath,r.text,c,r.doc?.version);
+                        if (anchor.editable_span) {
+                            const span=anchor.editable_span;
+                            if (readerConflict(r.fsPath,[{start:span.startOffset,end:span.endOffset}])) {
+                                anchor.text_status=anchor.status; anchor.status='user-editing';
+                            }
+                        }
+                        anchor.context_handle={tool:'paper_listenComments',action:'context',listener_id:listener.id,
+                            delivery_id:response.delivery_id,comment_id:c.id};
+                        const summary=obj ? summariseObject(obj,{includeText:true,maxText:8000}) : null;
+                        const line=obj?.sourceRange.startLine || cell.line;
+                        const location=c.selection ? selectionLocation(c.selection,obj?.text || cell.source,line)
+                            : {line,endLine:obj?.sourceRange.endLine || cell.endLine};
+                        if (input.projection !== 'full') {
+                            const {context,equation_labels,line:anchorLine,endLine:anchorEnd,...guard}=anchor;
+                            const budget=Math.floor(2000/response.comments.length);
+                            if (guard.editable_span) {
+                                const span=guard.editable_span;
+                                guard.editable_span={...span,text:span.text.slice(0,budget),
+                                    truncated:span.truncated || span.text.length > budget};
+                            }
+                            return {id:c.id,comment_hash:c.comment_hash,text:c.text.slice(0,budget),
+                                ...(c.text.length > budget ? {text_truncated:true} : {}),
+                                ...location,...(anchorLine ? {line:anchorLine,endLine:anchorEnd} : {}),detached:!obj,anchor:guard,
+                                object:obj ? {objectId:obj.objectId,stableKey:obj.stableKey,kind:obj.kind,sourceHash:obj.sourceHash} : null};
+                        }
+                        return {id:c.id,comment_hash:c.comment_hash,text:c.text,author:c.author,
+                            createdAt:c.createdAt,updatedAt:c.updatedAt,source:c.source,revision:c.revision,
+                            selection:c.selection ? {...c.selection,quote:c.selection.quote.slice(0,8000)} : undefined,
+                            quote:(c.selection?.quote || cell.source).slice(0,8000),
+                            quoteTruncated:(c.selection?.quote || cell.source).length > 8000,
+                            file:r.fsPath,...location, ...(anchor.line ? {line:anchor.line,endLine:anchor.endLine} : {}),detached:!obj,anchor,
+                            object:summary,
+                            next:anchor.editable_span ? 'Apply patches with delivery_id, expected_span_hash and verify:true; acknowledge:true optionally consumes this comment after verification. Open reader ranges take priority.'
+                                : 'Resolve the missing or ambiguous exact quote before editing; never guess from an old line number.'};
+                    })});
+            });
+        } catch (error) { return errPart(error.message || String(error)); }
+    }
+}
+
+function acknowledgeCommentEdit(r, listenerId, deliveryId, operationId, commentIds) {
+    const inbox=commentInbox();
+    const replay=inbox.acknowledged(listenerId,deliveryId,operationId);
+    if (replay) return replay;
+    const {delivery}=inbox.claim(listenerId,deliveryId);
+    const entry=_journal.find(e => e.operationId === operationId);
+    if (!entry || entry.file !== r.fsPath || entry.action === 'undo' || entry.rolledBack ||
+        !entry.verification?.ok || !entry.verification?.latex?.ok || Date.parse(entry.timestamp) < delivery.issued_at)
+        return {state:'not-consumed',comments_deleted:0,
+            reason:'A successful LaTeX-verified edit for this file after delivery is required; comments were preserved.'};
+    if (sha256(r.text) !== entry.afterHash && !entry.effects?.every(e => e.unique && e.pattern &&
+        r.text.indexOf(e.pattern) >= 0 && r.text.indexOf(e.pattern,r.text.indexOf(e.pattern)+1) < 0))
+        return {state:'not-consumed',comments_deleted:0,reason:'The verified edit is no longer intact or uniquely identifiable.'};
+    if (entry.commentClaim && entry.commentClaim.deliveryId !== deliveryId)
+        return {state:'not-consumed',comments_deleted:0,reason:'This patch operation belongs to a different delivery.'};
+    commentIds ||= entry.commentClaim?.commentIds;
+    const comments=commentIds ? delivery.comments.filter(c => commentIds.includes(c.id)) : delivery.comments;
+    const consumed=new CommentStore().consume(r.fsPath,comments);
+    // A partial combined apply leaves unhandled comments in this delivery.
+    if (consumed.ok && comments.length === delivery.comments.length) inbox.complete(listenerId,deliveryId);
+    else inbox.release(listenerId,deliveryId);
+    const receipt={...consumed,listener_id:listenerId,delivery_id:deliveryId,file:r.fsPath,operation_id:operationId};
+    if (consumed.ok) inbox.rememberAcknowledgment(listenerId,deliveryId,operationId,receipt);
+    return receipt;
+}
+
+async function withPaperWrite(r, fn) {
+    const previous = _applyQueues.get(r.fsPath) || Promise.resolve();
+    let release;
+    const pending = new Promise(resolve => { release = resolve; });
+    _applyQueues.set(r.fsPath, pending);
+    await previous;
+    try {
+        if (r.doc) r.text = r.doc.getText();
+        return await fn();
+    } finally {
+        release();
+        if (_applyQueues.get(r.fsPath) === pending) _applyQueues.delete(r.fsPath);
+    }
+}
+
+async function applyAgentWorkspaceEdit(r, edit, baseText, count) {
+    announceAgentEdit({file:r.fsPath, baseText, phase:'begin', source:'paper_applyEdit'});
+    try { return await vscode.workspace.applyEdit(edit); }
+    finally { announceAgentEdit({file:r.fsPath, baseText, phase:'end', source:'paper_applyEdit',
+        note:`${count} semantic edit${count === 1 ? '' : 's'}`}); }
+}
+
+function verificationOptions(verify) {
+    if (verify === true) return { parse:true, references:true, latex:true, rollback_on_failure:true };
+    if (verify === false) return { parse:false, references:false, latex:false, rollback_on_failure:false };
+    if (verify != null && (typeof verify !== 'object' || Array.isArray(verify)))
+        throw Error('verify must be a boolean or a verification options object');
+    return { rollback_on_failure:true, ...(verify || {}) };
+}
+
+function separatedInsertion(text, at, fragment, paragraph = false) {
+    if (!fragment) return fragment;
+    const separator = paragraph ? '\n\n' : '\n';
+    const left = text.slice(0, at), right = text.slice(at);
+    if (left && !left.endsWith(separator) && !fragment.startsWith(separator)) fragment = separator + fragment;
+    if (right && !right.startsWith(separator) && !fragment.endsWith(separator)) fragment += separator;
+    return fragment;
+}
 
 function trimTransactions() {
     const now = Date.now();
@@ -718,11 +939,15 @@ function changeSummary(beforeText, afterText) {
 }
 
 function deltaList(before, after, key) {
-    const a = new Set((before || []).map(key));
-    const b = new Set((after || []).map(key));
+    const excess = (left, right) => {
+        const counts = new Map();
+        for (const x of right || []) counts.set(key(x), (counts.get(key(x)) || 0) + 1);
+        return (left || []).filter(x => { const k = key(x), n = counts.get(k) || 0;
+            if (!n) return true; counts.set(k, n - 1); return false; });
+    };
     return {
-        introduced: (after || []).filter(x => !a.has(key(x))),
-        resolved: (before || []).filter(x => !b.has(key(x))),
+        introduced: excess(after, before),
+        resolved: excess(before, after),
     };
 }
 
@@ -736,13 +961,19 @@ function projectionDelta(beforeProjection, afterProjection) {
         warnings: warningDelta,
         references: {
             unresolved: deltaList(beforeRefs.unresolvedRefs, afterRefs.unresolvedRefs,
-                x => x.stableKey || `${x.target}:${x.command}`),
-            duplicates: deltaList(beforeRefs.duplicateLabels, afterRefs.duplicateLabels,
-                x => x.name),
+                x => `${x.target}:${x.command}`),
+            duplicates: duplicateDelta(beforeRefs.duplicateLabels, afterRefs.duplicateLabels),
             before: beforeRefs,
             after: afterRefs,
         },
     };
+}
+
+function duplicateDelta(before, after) {
+    const a = new Map(before.map(x => [x.name, x.lines.length]));
+    const b = new Map(after.map(x => [x.name, x.lines.length]));
+    return {introduced:after.filter(x => x.lines.length > (a.get(x.name) || 1)),
+        resolved:before.filter(x => x.lines.length > (b.get(x.name) || 1))};
 }
 
 function projectReferenceDelta(project, currentFile, beforeModel, afterModel) {
@@ -766,8 +997,8 @@ function projectReferenceDelta(project, currentFile, beforeModel, afterModel) {
     const after = referenceHealth({ objects: afterObjects });
     return {
         unresolved: deltaList(before.unresolvedRefs, after.unresolvedRefs,
-            x => x.stableKey || `${x.target}:${x.command}`),
-        duplicates: deltaList(before.duplicateLabels, after.duplicateLabels, x => x.name),
+            x => `${x.target}:${x.command}`),
+        duplicates: duplicateDelta(before.duplicateLabels, after.duplicateLabels),
         before, after,
     };
 }
@@ -776,7 +1007,9 @@ function sectionEndOffset(model, text, head) {
     const headings = model.objects.filter(o => o.kind === 'section-heading');
     const i = headings.indexOf(head);
     const next = headings.slice(i + 1).find(o => (o.level ?? 0) <= (head.level ?? 0));
-    return next ? next.sourceRange.startOffset : text.length;
+    // Trailing material and the document terminator are not section content.
+    const bodyEnd = model.bodyEndOffset ?? text.length;
+    return Math.min(next ? next.sourceRange.startOffset : text.length, bodyEnd);
 }
 
 function oneObject(model, selector) {
@@ -816,15 +1049,20 @@ function planPaperTransaction(r, input) {
 
     const changes = [];
     const summaries = [];
-    const deletedLabels = [];
     for (let i = 0; i < edits.length; i++) {
         const edit = edits[i] || {};
+        for (const key of ['new_text', 'prefix', 'suffix', 'environment', 'new', 'new_label']) {
+            if (typeof edit[key] === 'string' && /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(edit[key]))
+                return { error:{ state:'invalid', edit:i, reason:`${key} contains a control character; send the literal LaTeX with JSON-escaped backslashes` } };
+        }
         const op = edit.operation || 'replace';
         if (op === 'rename_label') {
             const oldName = String(edit.old || edit.selector || '');
             const newName = String(edit.new || edit.new_label || '');
             if (!oldName || !newName) return { error: { state: 'invalid', edit: i,
                 reason: 'rename_label requires `old` and `new`' } };
+            if (/[\\{}%,\s]/.test(newName)) return { error:{ state:'invalid', edit:i,
+                reason:'new label must be a literal key without whitespace, commas, braces, comments or commands' } };
             if (model.objects.some(o => o.kind === 'label' && o.name === newName)) {
                 return { error: { state: 'conflict', edit: i, reason: `label ${newName} already exists` } };
             }
@@ -853,9 +1091,16 @@ function planPaperTransaction(r, input) {
             const targets = model.objects.filter(o =>
                 (o.kind === 'label' && o.name === oldName) ||
                 (edit.update_internal_references !== false && o.kind === 'ref' && o.target === oldName));
+            const seen = new Set();
             for (const target of targets) {
+                const rangeKey = `${target.sourceRange.startOffset}:${target.sourceRange.endOffset}`;
+                if (seen.has(rangeKey)) continue;
+                seen.add(rangeKey);
                 const before = r.text.slice(target.sourceRange.startOffset, target.sourceRange.endOffset);
-                const after = before.replace(`{${oldName}}`, `{${newName}}`);
+                const after = before.replace(/\{([^{}]*)\}$/, (whole, arg) => '{' + arg.split(',')
+                    .map(part => part.trim() === oldName ? part.replace(oldName, () => newName) : part).join(',') + '}');
+                if (after === before) return { error:{ state:'invalid', edit:i,
+                    reason:`cannot safely locate the label argument in ${before}` } };
                 changes.push({ start: target.sourceRange.startOffset, end: target.sourceRange.endOffset,
                     text: after, before, editIndex: i, operation: op });
             }
@@ -879,19 +1124,18 @@ function planPaperTransaction(r, input) {
             changes.push({ start, end, text: edit.new_text, before, editIndex: i, operation: op });
         } else if (op === 'delete') {
             changes.push({ start, end, text: '', before, editIndex: i, operation: op });
-            if (obj.label) deletedLabels.push({ name: obj.label, editIndex: i });
         } else if (op === 'insert_before' || op === 'insert_after') {
             if (typeof edit.new_text !== 'string') return { error: { state: 'invalid', edit: i,
                 reason: `${op} requires \`new_text\`` } };
             const at = op === 'insert_before' ? start : end;
-            changes.push({ start: at, end: at, text: edit.new_text, before: '', editIndex: i, operation: op });
+            changes.push({ start: at, end: at, text: separatedInsertion(r.text, at, edit.new_text), before: '', editIndex: i, operation: op });
         } else if (op === 'append_to_section') {
             if (obj.kind !== 'section-heading') return { error: { state: 'invalid', edit: i,
                 reason: 'append_to_section selector must resolve to a section heading' } };
             if (typeof edit.new_text !== 'string') return { error: { state: 'invalid', edit: i,
                 reason: 'append_to_section requires `new_text`' } };
             const at = sectionEndOffset(model, r.text, obj);
-            changes.push({ start: at, end: at, text: edit.new_text, before: '', editIndex: i, operation: op });
+            changes.push({ start: at, end: at, text: separatedInsertion(r.text, at, edit.new_text), before: '', editIndex: i, operation: op });
         } else if (op === 'move_before' || op === 'move_after') {
             const targetFound = oneObject(model, edit.target_selector);
             if (targetFound.error) return { error: { ...targetFound.error, edit: i, role: 'target' } };
@@ -900,7 +1144,7 @@ function planPaperTransaction(r, input) {
             if (at >= start && at <= end) return { error: { state: 'invalid', edit: i,
                 reason: 'cannot move an object into itself' } };
             changes.push({ start, end, text: '', before, editIndex: i, operation: op });
-            changes.push({ start: at, end: at, text: before, before: '', editIndex: i, operation: op });
+            changes.push({ start: at, end: at, text: separatedInsertion(r.text, at, before, obj.kind === 'paragraph'), before: '', editIndex: i, operation: op });
         } else if (op === 'wrap') {
             const endFound = edit.end_selector ? oneObject(model, edit.end_selector) : { object: obj };
             if (endFound.error) return { error: { ...endFound.error, edit: i, role: 'end' } };
@@ -919,6 +1163,11 @@ function planPaperTransaction(r, input) {
             stableKey: obj.stableKey, sourceHash: sha256(before) });
     }
 
+    return finishPaperPlan(r, {legacy, edits, changes, summaries, beforeProjection}, getProject);
+}
+
+function finishPaperPlan(r, {legacy=false, edits, changes, summaries, beforeProjection}, getProject=() => projectProjections(r)) {
+    const model=beforeProjection.model, deletedLabels=[];
     const ordered = [...changes].sort((a, b) => b.start - a.start || b.end - a.end || b.editIndex - a.editIndex);
     for (let i = 0; i < ordered.length - 1; i++) {
         const right = ordered[i]; const left = ordered[i + 1];
@@ -935,6 +1184,13 @@ function planPaperTransaction(r, input) {
     const delta = projectionDelta(beforeProjection, afterProjection);
     delta.references = projectReferenceDelta(getProject(), r.fsPath,
         beforeProjection.model, afterProjection.model);
+    // A multi-row align owns several labels. Replacement can remove them too.
+    for (const label of model.objects.filter(o => o.kind === 'label')) {
+        if (afterProjection.model.objects.some(o => o.kind === 'label' && o.name === label.name)) continue;
+        const change = changes.find(c => c.start < label.sourceRange.endOffset && c.end > label.sourceRange.startOffset ||
+            c.start === c.end && c.start > label.sourceRange.startOffset && c.start < label.sourceRange.endOffset);
+        if (change) deletedLabels.push({name:label.name, editIndex:change.editIndex});
+    }
     for (const deleted of deletedLabels) {
         const stillReferenced = afterProjection.model.objects.some(o => o.kind === 'ref' && o.target === deleted.name);
         const project = getProject();
@@ -954,6 +1210,57 @@ function planPaperTransaction(r, input) {
         beforeText: r.text, afterText: nextText, delta };
 }
 
+function planCommentPatches(r, input) {
+    if (!Array.isArray(input.patches) || !input.patches.length || input.patches.length > 20)
+        return {error:{state:'invalid',reason:'patches must contain 1–20 guarded replacements'}};
+    if (input.edits || input.selector || input.transaction_id)
+        return {error:{state:'invalid',reason:'Do not mix patches with semantic edits or preview transactions'}};
+    if (input.expected_document_hash && input.expected_document_hash !== sha256(r.text))
+        return {error:{state:'conflict',reason:'document hash changed',document_hash:sha256(r.text)}};
+    let claim;
+    if (input.delivery_id) {
+        try { claim=commentInbox().claimDelivery(input.delivery_id,r.fsPath); }
+        catch (error) { return {error:{state:'conflict',reason:error.message}}; }
+    } else if (input.acknowledge) return {error:{state:'invalid',reason:'acknowledge requires delivery_id'}};
+    const changes=[], summaries=[], commentIds=new Set();
+    const currentComments=claim ? new CommentStore().read(r.fsPath).comments : [];
+    for (let i=0;i<input.patches.length;i++) {
+        const p=input.patches[i];
+        if (!p || typeof p.expected_old_text !== 'string' || !p.expected_old_text || typeof p.replacement !== 'string' ||
+            typeof p.expected_span_hash !== 'string') return {error:{state:'invalid',edit:i,
+                reason:'Each patch requires nonempty expected_old_text, replacement and expected_span_hash'}};
+        if (/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(p.replacement))
+            return {error:{state:'invalid',edit:i,reason:'replacement contains a control character; use JSON-escaped LaTeX backslashes'}};
+        let scope=r.text, base=0;
+        if (claim) {
+            const candidates=claim.delivery.comments.filter(c => !p.comment_id || p.comment_id === c.id).map(c =>
+                ({comment:c,anchor:resolveCommentAnchor(r.fsPath,r.text,c,r.doc?.version)})).filter(({anchor}) =>
+                anchor.editable_span?.source_hash === p.expected_span_hash &&
+                r.text.slice(anchor.editable_span.startOffset,anchor.editable_span.endOffset).includes(p.expected_old_text));
+            if (candidates.length !== 1) return {error:{state:'conflict',edit:i,
+                reason:'The delivered source span is missing, ambiguous, or changed; call next/context again.',
+                anchors:claim.delivery.comments.map(c => ({comment_id:c.id,...resolveCommentAnchor(r.fsPath,r.text,c,r.doc?.version)}))}};
+            const {comment,anchor}=candidates[0];
+            if (!currentComments.some(c => c.id === comment.id && commentHash(c) === comment.comment_hash))
+                return {error:{state:'conflict',edit:i,reason:'The comment was edited or deleted; no edit was applied.'}};
+            base=anchor.editable_span.startOffset;scope=r.text.slice(base,anchor.editable_span.endOffset);
+            commentIds.add(comment.id);
+        } else if (sha256(p.expected_old_text) !== p.expected_span_hash)
+            return {error:{state:'conflict',edit:i,reason:'expected_span_hash must match the exact expected_old_text when no delivery is supplied'}};
+        const found=uniqueOffset(scope,p.expected_old_text);
+        if (found.state !== 'unique') return {error:{state:'conflict',edit:i,anchor_status:found.state,
+            reason:'The exact expected_old_text must occur once in the guarded span; no edit was applied.'}};
+        const change=changedRange(base+found.start,p.expected_old_text,p.replacement);
+        if (!change.before && !change.text) return {error:{state:'invalid',edit:i,reason:'Patch makes no change'}};
+        changes.push({...change,editIndex:i,operation:'patch'});
+        summaries.push({index:i,operation:'patch',comment_id:p.comment_id,
+            startOffset:change.start,endOffset:change.end,sourceHash:sha256(p.expected_old_text)});
+    }
+    const plan=finishPaperPlan(r,{edits:input.patches,changes,summaries,beforeProjection:projectionOf(r.fsPath,r.text)});
+    if (!plan.error && claim) plan.commentClaim={listenerId:claim.listener.id,deliveryId:input.delivery_id,commentIds:[...commentIds]};
+    return plan;
+}
+
 function storeTransaction(r, plan, verify) {
     trimTransactions();
     const id = `paper_tx_${crypto.randomUUID()}`;
@@ -966,9 +1273,52 @@ function storeTransaction(r, plan, verify) {
         afterHash: sha256(plan.afterText), summaries: plan.summaries, delta: plan.delta,
         replaceStart: start, replaceEnd: end,
         replacementText: plan.afterText.slice(start, afterEnd),
-        verify: verify || null,
+        changes: coalesceChanges(plan.changes),
+        verify: verify ?? null,
     });
     return id;
+}
+
+// Keep disjoint replacements disjoint in the WorkspaceEdit. Replacing the
+// entire span between two edits swallowed unrelated open mini-editors and
+// forced the incremental engine to reprocess otherwise unchanged paragraphs.
+function coalesceChanges(changes) {
+    const out=[];
+    for (const c of [...changes].sort((a,b) => a.start-b.start || a.end-b.end || a.editIndex-b.editIndex)) {
+        const previous=out.at(-1);
+        if (previous && previous.end===c.start) {
+            previous.end=c.end; previous.text+=c.text; previous.before+=c.before;
+        } else out.push({...c});
+    }
+    return out;
+}
+
+function workspaceForChanges(r, changes) {
+    const edit=new vscode.WorkspaceEdit();
+    for (const c of [...changes].sort((a,b) => b.start-a.start)) edit.replace(r.doc.uri,
+        new vscode.Range(r.doc.positionAt(c.start),r.doc.positionAt(c.end)),c.text);
+    return edit;
+}
+
+function reverseChanges(changes) {
+    let delta=0;
+    return [...changes].sort((a,b) => a.start-b.start).map(c => {
+        const start=c.start+delta;
+        delta+=c.text.length-(c.end-c.start);
+        return {start,end:start+c.text.length,text:c.before,before:c.text};
+    });
+}
+
+function changeEffects(text, changes) {
+    let delta=0;
+    return [...changes].sort((a,b) => a.start-b.start).map(c => {
+        const start=c.start+delta;
+        delta+=c.text.length-(c.end-c.start);
+        let pattern=c.text;
+        const unique=p => !!p && text.indexOf(p) >= 0 && text.indexOf(p,text.indexOf(p)+1) < 0;
+        if (!unique(pattern)) pattern=text.slice(Math.max(0,start-48),Math.min(text.length,start+c.text.length+48));
+        return {pattern,unique:unique(pattern)};
+    });
 }
 
 async function verifyAppliedPaper(r, beforeProjection, verify = {}) {
@@ -990,19 +1340,23 @@ async function verifyAppliedPaper(r, beforeProjection, verify = {}) {
         },
     };
     if (verify.latex) {
-        const deps = nodeDeps();
-        const rootInfo = findRoot(r.fsPath, deps);
-        const graph = buildGraph(rootInfo.root, deps);
+        const project = projectProjections({ ...r, text:afterText });
+        const rootInfo = project.root, graph = project.graph;
         const overlay = new Map();
         for (const doc of texDocuments()) overlay.set(doc.uri.fsPath, doc.getText());
         overlay.set(r.fsPath, afterText);
         const built = await compile({
             root: rootInfo.root, sourceFiles: graph.files, overlay,
-            engine: verify.engine || 'pdflatex', force: true,
+            // Verification must not queue ahead of the reader's cold rebuild,
+            // replace its PDF/aux files, or occupy its compile gate.
+            outDir:path.join(os.tmpdir(),'wolfbook-paper-verification',sha256(rootInfo.root).slice(0,20)),
+            engine: verify.engine || paperCompileEngine(overlay.get(rootInfo.root) || fs.readFileSync(rootInfo.root, 'utf8'),
+                vscode.workspace.getConfiguration('wolfbook.tex').get('engine', 'pdflatex')), force: true,
             timeoutMs: verify.timeout_ms || 180000,
         });
         out.latex = {
-            ok: built.ok, engine: built.engine, exit: built.exit, errors: built.errors,
+            ok: built.ok === true && !(Array.isArray(built.errors) ? built.errors.length : built.errors) && !built.stopped && !built.stopReason &&
+                !built.diagnostics?.some(d => d.severity === 'error'), engine: built.engine, exit: built.exit, errors: built.errors,
             warnings: built.warnings, stopped: built.stopped, stopReason: built.stopReason,
             pdfPath: built.pdfPath, pdfBytes: built.pdfBytes, pdfHash: built.pdfHash,
             logPath: built.logPath, durationMs: built.ms,
@@ -1084,6 +1438,14 @@ class PaperApplyEditTool {
                 verification: entry.verification, rolledBack: entry.rolledBack,
             })) });
         }
+        if (input.delivery_id && !input.file && Array.isArray(input.patches)) {
+            try { input.file=commentInbox().claimDelivery(input.delivery_id).listener.file; }
+            catch (error) { return jsonPart({state:'conflict',reason:error.message}); }
+        }
+        if (input.acknowledge && (!input.delivery_id || !Array.isArray(input.patches)))
+            return jsonPart({state:'invalid',reason:'Combined acknowledgment requires patches and delivery_id'});
+        if (input.transaction_id && Array.isArray(input.patches))
+            return jsonPart({state:'invalid',reason:'Do not mix patches and a preview transaction'});
         if (input.transaction_id && !input.file) {
             const stored = _transactions.get(String(input.transaction_id));
             if (stored) input.file = stored.file;
@@ -1092,13 +1454,13 @@ class PaperApplyEditTool {
             const entry = _journal.find(x => x.undoToken === String(input.undo_token));
             if (entry) input.file = entry.file;
         }
-        if (!input.transaction_id && input.action !== 'undo' && !Array.isArray(input.edits) && !input.selector) {
-            return errPart('`transaction_id`, `selector`, or `edits` is required');
+        if (!input.transaction_id && input.action !== 'undo' && !Array.isArray(input.edits) && !Array.isArray(input.patches) && !input.selector) {
+            return errPart('`transaction_id`, `selector`, `edits`, or `patches` is required');
         }
-        if (!input.transaction_id && input.action !== 'undo' && !Array.isArray(input.edits) &&
+        if (!input.transaction_id && input.action !== 'undo' && !Array.isArray(input.edits) && !Array.isArray(input.patches) &&
             typeof input.new_text !== 'string') return errPart('`new_text` is required');
 
-        return withDocument(input, async (r) => {
+        return withDocument(input, async (r) => withPaperWrite(r, async () => {
             if (!r.doc) {
                 // Open a buffer in THIS host, never via the OS or a different
                 // window. Refresh source before stale-hash validation below.
@@ -1109,6 +1471,7 @@ class PaperApplyEditTool {
             let beforeProjection;
             let legacy = false;
             let unguarded = false;
+            let commentClaim;
 
             if (input.action === 'undo') {
                 const undoToken = String(input.undo_token || '');
@@ -1122,6 +1485,7 @@ class PaperApplyEditTool {
                     beforeHash: entry.afterHash, afterText: entry.beforeText,
                     afterHash: entry.beforeHash, summaries: [{ operation: 'undo', operationId: entry.operationId }],
                     replaceStart: 0, replaceEnd: r.text.length, replacementText: entry.beforeText };
+                if (entry.changes) tx.changes=reverseChanges(entry.changes);
                 beforeProjection = projectionOf(r.fsPath, r.text);
             } else if (input.transaction_id) {
                 tx = _transactions.get(String(input.transaction_id));
@@ -1132,13 +1496,14 @@ class PaperApplyEditTool {
                     document_hash: sha256(r.text), expected_hash: tx.beforeHash });
                 beforeProjection = projectionOf(r.fsPath, r.text);
             } else {
-                const plan = planPaperTransaction(r, input);
+                const plan = Array.isArray(input.patches) ? planCommentPatches(r,input) : planPaperTransaction(r, input);
                 if (plan.error) return jsonPart(plan.error);
-                const id = storeTransaction(r, plan, input.verify);
+                const id = storeTransaction(r, plan, input.verify ?? (Array.isArray(input.patches) ? true : undefined));
                 tx = _transactions.get(id);
                 beforeProjection = plan.beforeProjection;
                 legacy = plan.legacy;
-                unguarded = plan.edits.some(e => e.expected_source_hash == null &&
+                commentClaim=plan.commentClaim;
+                unguarded = !Array.isArray(input.patches) && plan.edits.some(e => e.expected_source_hash == null &&
                     e.expected_object_id == null && e.expected_stable_key == null &&
                     (e.operation || 'replace') !== 'rename_label');
             }
@@ -1170,51 +1535,41 @@ class PaperApplyEditTool {
                 });
             }
 
-            // SAY IT BEFORE WRITING, TOO. This edit goes through the open
-            // buffer, so the change event it provokes looks exactly like the
-            // reader typing — and the review mirrors the reader's typing into
-            // its baseline, which would agree to this edit on their behalf and
-            // leave nothing to review. `r.text` is the document as it stands
-            // now, which is the baseline this change is against.
-            try {
-                announceAgentEdit({
-                    file: r.fsPath, baseText: r.text, phase: 'begin',
-                    source: 'paper_applyEdit',
-                });
-            } catch (_) { /* announcing is never worth failing an edit */ }
+            const verifyOptions = verificationOptions(input.verify ?? tx.verify ?? (input.action === 'undo' ? false : undefined));
+            const changes=tx.changes || [{start:tx.replaceStart,end:tx.replaceEnd,text:tx.replacementText,
+                before:r.text.slice(tx.replaceStart,tx.replaceEnd)}];
+            const busy=readerConflict(r.fsPath,changes);
+            if (busy) return jsonPart({...busy,buffer_version:r.doc.version,
+                affected_ranges:changes.map(c => ({startOffset:c.start,endOffset:c.end,current_source:r.text.slice(c.start,c.end).slice(0,1000)}))});
+            const we=workspaceForChanges(r,changes);
+            const applied = await applyAgentWorkspaceEdit(r, we, r.text, tx.summaries.length);
+            if (!applied) return jsonPart(readerConflict(r.fsPath,changes) || {state:'conflict',file:r.fsPath,
+                reason:'WorkspaceEdit was rejected by the editor; no verified edit or acknowledgment was made.',
+                buffer_version:r.doc.version,document_hash:sha256(r.doc.getText()),
+                ranges:changes.map(c => ({startOffset:c.start,endOffset:c.end,current_source:r.doc.getText().slice(c.start,c.end).slice(0,8000)})),
+                remedy:'Refresh the guarded source span and retry after the conflicting draft closes.'});
 
-            const range = new vscode.Range(
-                r.doc.positionAt(tx.replaceStart), r.doc.positionAt(tx.replaceEnd));
-            const we = new vscode.WorkspaceEdit();
-            we.replace(r.doc.uri, range, tx.replacementText);
-            const applied = await vscode.workspace.applyEdit(we);
-            if (!applied) return errPart('WorkspaceEdit was rejected by the editor');
-
-            const verifyOptions = input.verify || tx.verify || {};
-            const verification = await verifyAppliedPaper(r, beforeProjection, verifyOptions);
+            const appliedText = r.doc.getText();
+            const appliedHash = sha256(appliedText);
+            let verification;
+            try { verification = await verifyAppliedPaper(r, beforeProjection, verifyOptions); }
+            catch (error) { verification = {ok:false, error:error.message || String(error)}; }
             let rolledBack = false;
+            let sourceConflict = sha256(r.doc.getText()) !== appliedHash;
             if (!verification.ok && verifyOptions.rollback_on_failure) {
-                const rollback = new vscode.WorkspaceEdit();
-                rollback.replace(r.doc.uri, new vscode.Range(
-                    r.doc.positionAt(0), r.doc.positionAt(r.doc.getText().length)), tx.beforeText);
-                rolledBack = await vscode.workspace.applyEdit(rollback);
+                if (!sourceConflict) {
+                    const rollback=workspaceForChanges(r,reverseChanges(changes));
+                    rolledBack = await applyAgentWorkspaceEdit(r, rollback, appliedText, 1);
+                } else verification.rollbackSkipped = 'the buffer changed during verification; newer edits were preserved';
             }
-            if (!rolledBack && input.save) {
-                try { await r.doc.save(); } catch (_) { /* dirty tab is not an error */ }
+            let saved = false;
+            if (!rolledBack && verification.ok && !sourceConflict && input.save) {
+                // Recheck disk after an asynchronous compile, not just before it.
+                let currentDisk = null;
+                try { currentDisk = fs.readFileSync(r.fsPath, 'utf8'); } catch (_) {}
+                if (currentDisk !== diskText) sourceConflict = true;
+                else try { saved = await r.doc.save() === true; } catch (_) { /* receipt reports unsaved */ }
             }
-
-            // THE READER MUST BE ABLE TO SEE THIS. An edit made here goes
-            // through the open buffer, so the file watcher never fires and the
-            // review would never hear about the one tool the agent is told to
-            // use. `r.text` is the document as it was before the replacement,
-            // which is the baseline a review opens with.
-            try {
-                announceAgentEdit({
-                    file: r.fsPath, baseText: r.text, phase: 'end',
-                    source: 'paper_applyEdit',
-                    note: `${tx.summaries.length} semantic edit${tx.summaries.length === 1 ? '' : 's'}`,
-                });
-            } catch (_) { /* announcing is never worth failing an applied edit */ }
 
             const after = r.doc.getText();
             const operationId = `paper_edit_${crypto.randomUUID()}`;
@@ -1222,13 +1577,18 @@ class PaperApplyEditTool {
             const entry = {
                 operationId, transactionId: tx.id, undoToken, file: r.fsPath,
                 timestamp: new Date().toISOString(), edits: tx.summaries,
-                beforeHash: tx.beforeHash, afterHash: sha256(after),
+                beforeHash: tx.beforeHash, afterHash: rolledBack ? sha256(after) : appliedHash,
                 beforeText: tx.beforeText, verification, rolledBack,
+                action:input.action || 'apply', sourceConflict,
+                changes, commentClaim,
+                effects:changeEffects(appliedText,changes),
             };
             _journal.push(entry);
             if (input.transaction_id) _transactions.delete(String(input.transaction_id));
 
             const result = {
+                state: sourceConflict ? 'source-changed-during-verification' : rolledBack ? 'rolled-back' :
+                    verification.ok ? 'applied' : 'verification-failed',
                 applied: !rolledBack,
                 rolledBack: rolledBack || undefined,
                 operation_id: operationId,
@@ -1238,7 +1598,9 @@ class PaperApplyEditTool {
                 edits: tx.summaries,
                 previous_document_hash: tx.beforeHash,
                 document_hash: sha256(after),
-                saved: !!input.save && !rolledBack,
+                verification_document_hash: appliedHash,
+                saved,
+                source_conflict: sourceConflict || undefined,
                 unguarded: unguarded || undefined,
                 unguarded_note: unguarded
                     ? 'applied WITHOUT a hash guard — pass expected_source_hash next time so a ' +
@@ -1246,6 +1608,11 @@ class PaperApplyEditTool {
                     : undefined,
                 verification,
             };
+            if (input.acknowledge && commentClaim) {
+                r.text=after;
+                try { result.acknowledgment=acknowledgeCommentEdit(r,commentClaim.listenerId,commentClaim.deliveryId,operationId,commentClaim.commentIds); }
+                catch (error) { result.acknowledgment={state:'not-consumed',comments_deleted:0,reason:error.message}; }
+            }
             if (legacy && tx.summaries.length === 1) {
                 result.stable_key = tx.summaries[0].stableKey;
                 result.new_source_hash = sha256(input.new_text);
@@ -1253,7 +1620,7 @@ class PaperApplyEditTool {
                     ? verification.parse.introducedWarnings : undefined;
             }
             return jsonPart(result);
-        });
+        }));
     }
 }
 
@@ -1266,6 +1633,7 @@ module.exports = {
     PaperMathematicaBlocksTool,
     PaperPreviewEditTool,
     PaperApplyEditTool,
+    PaperListenCommentsTool,
     // exported for tests
     texMutationConflict,
     findObject,

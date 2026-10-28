@@ -8,7 +8,9 @@ const { makeVscodeStub } = require('./_stub-vscode');
 const stub = makeVscodeStub();
 stub.workspace.textDocuments = [];
 let configuredMapEngine = 'wlatex';
+let configuredCompiler = 'pdflatex';
 let configuredTimeout = 180000;
+let configuredAuthoritativeDelay = 0;
 const observedTimeouts = [], observedEngines = [], notices = [], warnings = [];
 stub.window.showInformationMessage = async message => { notices.push(message); };
 // The writer's answer to "preview with WLaTeX anyway?" (undefined: dismissed).
@@ -19,7 +21,7 @@ class EditRange { constructor(l0, c0, l1, c1) { Object.assign(this, { l0, c0, l1
 stub.WorkspaceEdit = class { constructor() { this.edits = []; } replace(uri, range, text) { this.edits.push({ uri, range, text }); } };
 const docOf = file => { const lines = () => fs.readFileSync(file, 'utf8').split('\n');
     return { uri: { fsPath: file }, get lineCount() { return lines().length; }, lineAt: n => ({ text: lines()[n] }) }; };
-stub.workspace.openTextDocument = async file => docOf(file);
+stub.workspace.openTextDocument = async file => docOf(file.fsPath || file);
 stub.workspace.applyEdit = async edit => {
     for (const { uri, range, text } of edit.edits) {
         const lines = fs.readFileSync(uri.fsPath, 'utf8').split('\n');
@@ -30,15 +32,18 @@ stub.workspace.applyEdit = async edit => {
 };
 let installed = true, constructorCalls = 0;
 stub.workspace.getConfiguration = () => ({ get: (key, fallback) =>
-    ({ compileTimeoutMs:configuredTimeout, mapEngine: configuredMapEngine, wlatexDirectory: '/built/wlatex', authoritativeDelayMs: 0 })[key] ?? fallback });
+    ({ engine:configuredCompiler, compileTimeoutMs:configuredTimeout, mapEngine: configuredMapEngine, wlatexDirectory: '/built/wlatex', authoritativeDelayMs: configuredAuthoritativeDelay })[key] ?? fallback });
 let nativeCalls = 0, conventionalCalls = 0, cancel = false, nativeFailure = false, nativeSettled = false, nativeDocumentError = false;
+let buildHook, conventionalResult;
 const oldLoad = Module._load;
 Module._load = function (req, ...args) {
     if (req === 'vscode') return stub;
+    if (req === './nativeRuntime') return { hasNativeRuntime: () => installed };
     if (req === './nativeCompileService') return { NativeBuildLane: class {
         constructor() { constructorCalls++; if (!installed) throw Error('runtime missing'); this.directory = '/built/wlatex'; }
         async compile(o) {
             nativeCalls++;
+            if (buildHook) await buildHook(o, 'native');
             observedTimeouts.push(['native', o.timeoutMs]);
             if (nativeFailure) throw Error('runtime cannot start');
             if (cancel) throw Object.assign(Error('superseded'), { name: 'AbortError' });
@@ -50,18 +55,19 @@ Module._load = function (req, ...args) {
                 pageCount:1, rerunWanted:!nativeSettled, diagnostics:[] };
         }
         invalidate() { this.invalidated = true; }
+        async noteChange() {}
         async close() {}
     } };
     const result = oldLoad.call(this, req, ...args);
     if (req === './compileService') return { ...result,
         loadGeneration: () => null, saveGeneration: () => false,
-        compile: async o => { conventionalCalls++; observedTimeouts.push(['conventional', o.timeoutMs]); observedEngines.push(o.engine); return { ok:true, generation:100,
-            pdfPath:'unused', sourceSnapshotHash:o.sourceSnapshotHash, pageCount:1, diagnostics:[] }; } };
+        compile: async o => { conventionalCalls++; if (buildHook) await buildHook(o, 'conventional'); observedTimeouts.push(['conventional', o.timeoutMs]); observedEngines.push(o.engine); return { ok:true, generation:100,
+            pdfPath:'unused', sourceSnapshotHash:o.sourceSnapshotHash, pageCount:1, errors:0, diagnostics:[], ...(conventionalResult || {}) }; } };
     return result;
 };
-let RenderCoordinator, TexViewer;
+let RenderCoordinator, TexViewer, renderDiagnostics;
 try {
-    ({ RenderCoordinator } = require('../../tex/renderUi'));
+    ({ RenderCoordinator, renderDiagnostics } = require('../../tex/renderUi'));
     ({ TexViewer } = require('../../tex/texViewer'));
 } finally { Module._load = oldLoad; }
 
@@ -79,19 +85,326 @@ function fixture() {
     } };
 }
 
+test('save metadata alone cannot mark either rendering mode behind or invalidate its map', () => {
+    for (const native of [false, true]) {
+        const f = fixture(); let invalidated = 0;
+        try {
+            Object.assign(f.state, { sourceAhead: false, lastEditAt: 123,
+                map: { native, noteEdit: () => { invalidated++; } },
+                nativeLane: native ? { noteChange: async () => { invalidated++; }, close: async () => {} } : null });
+            f.coordinator.noteChange({ document: f.doc, contentChanges: [] });
+            assert.equal(f.state.sourceAhead, false);
+            assert.equal(f.state.lastEditAt, 123);
+            assert.equal(invalidated, 0);
+        } finally { f.close(); }
+    }
+});
+
+test('blank-line typing with a current PDF schedules no preview or full compile but keeps native source edits', async t=>{
+    t.mock.timers.enable({apis:['Date','setTimeout'],now:1000});
+    const {snapshotSources}=require('../../tex/compileService');
+    for (const native of [false,true]) {
+        const f=fixture();let text='Paragraph.\n\nNext.',builds=0,previews=0,sourceEdits=0,mapReads=0;
+        try {
+            fs.writeFileSync(f.state.root,text);
+            Object.assign(f.doc,{getText:()=>text,isDirty:true,version:1});
+            stub.workspace.textDocuments=[f.doc];
+            f.state.generation={ok:true,sourceSnapshotHash:snapshotSources(f.state.files),pdfPath:'PDF'};
+            f.state.sourceAhead=false;
+            f.state.map=native ? {native:true,noteEdit(){},available:true} : null;
+            f.state.nativeLane=native ? {async noteChange(){sourceEdits++;},async close(){}} : null;
+            f.coordinator._scheduleNativeRefresh=()=>{mapReads++;};
+            f.coordinator._schedulePreview=()=>{previews++;return true;};
+            f.coordinator.build=async()=>{builds++;};
+            const at=text.indexOf('\n\n')+1;
+            text=text.slice(0,at)+' '+text.slice(at);f.doc.version++;
+            const impact=f.coordinator.noteChange({document:f.doc,contentChanges:[{
+                rangeOffset:at,rangeLength:0,text:' ',range:{start:{line:1},end:{line:1}}}]});
+            assert.equal(impact.renderChanged,false);
+            f.coordinator.scheduleLive(f.doc);t.mock.timers.tick(10000);
+            await Promise.resolve();
+            assert.equal(builds,0);assert.equal(previews,0);
+            assert.equal(f.state.sourceAhead,false);
+            assert.equal(f.coordinator.isCurrent(f.state,snapshotSources(f.state.files,new Map([[f.state.root,text]]))),true);
+            assert.equal(sourceEdits,native?1:0,'native coordinates still follow actual buffer bytes');
+            assert.equal(mapReads,native?1:0,'only source-coordinate refresh remains; no typesetting');
+        } finally {stub.workspace.textDocuments=[];f.close();}
+    }
+});
+
+test('full builds wait for a real pause during mini-editor typing or Pro live preview', t => {
+    t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1000 });
+    for (const [pro, origin] of [[true, 'editor'], [true, 'mini-editor'], [false, 'mini-editor'], [false, 'editor']]) {
+        const f = fixture(); let builds = 0, previews = 0;
+        try {
+            f.coordinator.noteChange({ document: f.doc,
+                contentChanges: [{ range: { start: { line: 0 }, end: { line: 0 } }, text: 'x' }] }, { origin });
+            assert.equal(f.state.lastEditOrigin, origin, 'the edit origin reaches the scheduling policy');
+            f.coordinator._schedulePreview = () => { if (pro) previews++; return pro; };
+            f.coordinator.build = async () => { builds++; };
+            for (let i = 0; i < 30; i++) {
+                f.coordinator.scheduleLive(f.doc);
+                t.mock.timers.tick(500);
+            }
+            assert.equal(builds, 0, `${pro ? 'Pro' : 'standard'} ${origin}: no deadline-forced full build`);
+            if (pro) assert.equal(previews, 30, 'live preview still follows every edit');
+            t.mock.timers.tick(2500);
+            assert.equal(builds, 1, 'one full build after the typing pause');
+        } finally { f.close(); }
+    }
+});
+
+test('automatic full builds are invisible, merge current results and discard results after typing resumes', async () => {
+    const oldEngine = configuredMapEngine;
+    try {
+        for (const engine of ['wlatex', 'off']) {
+            configuredMapEngine = engine;
+            for (const resumed of [false, true]) {
+                const f = fixture();
+                let release, started;
+                const entered = new Promise(resolve => { started = resolve; });
+                const held = new Promise(resolve => { release = resolve; });
+                let signal;
+                buildHook = async opts => { signal = opts.signal; started(); await held; };
+                const prior = { generation: 0, sourceSnapshotHash: 'older', ok: true, pdfPath: 'unused' };
+                f.state.generation = prior;
+                f.state.map = { available: true };
+                const viewer = new TexViewer({}, f.coordinator, {}), posted = [];
+                viewer.root = f.state.root;
+                viewer._webviewReady = true;
+                viewer.panel = { webview: { postMessage: msg => { posted.push(msg); return true; } } };
+                viewer._postEngine = () => {};
+                viewer._postNativeMapState = () => {};
+                let pending;
+                try {
+                    pending = f.coordinator.build(f.doc, { live: true, authoritative: true });
+                    await entered;
+                    await viewer.refresh();
+                    assert.ok(!posted.some(m => m.type === 'compileState' && m.compiling),
+                        `${engine}: the actual viewer never requests the blue shade`);
+                    assert.equal(f.state.generation, prior, 'the existing paper stays on screen while building');
+                    if (resumed) {
+                        f.coordinator.noteChange({ document: f.doc,
+                            contentChanges: [{ range: { start: { line: 0 }, end: { line: 0 } }, text: 'x' }] });
+                        assert.ok(signal.aborted, `${engine}: typing immediately kills the automatic build`);
+                    }
+                    release(); // Simulate a worker replying even after cancellation.
+                    await pending;
+                    if (resumed) {
+                        assert.equal(f.state.generation, prior, 'a late obsolete PDF is never merged');
+                        assert.ok(f.state.sourceAhead, 'the new text still needs its own idle build');
+                    } else {
+                        assert.notEqual(f.state.generation, prior, 'the current PDF merges after idle');
+                        assert.equal(f.state.sourceAhead, false);
+                    }
+                } finally {
+                    release();
+                    await pending?.catch(() => {});
+                    buildHook = null;
+                    f.close();
+                }
+            }
+        }
+    } finally { configuredMapEngine = oldEngine; buildHook = null; }
+});
+
+test('typing during asynchronous preparation prevents an obsolete automatic build from starting', async () => {
+    const f = fixture(), oldEngine = configuredMapEngine;
+    let release, entered;
+    const started = new Promise(resolve => { entered = resolve; });
+    const held = new Promise(resolve => { release = resolve; });
+    let pending;
+    try {
+        configuredMapEngine = 'off';
+        const prior = f.state.generation = { generation: 0, sourceSnapshotHash: 'older' };
+        f.state.nativeLane = { close: async () => { entered(); await held; } };
+        const before = conventionalCalls;
+        pending = f.coordinator.build(f.doc, { live: true });
+        await started;
+        f.coordinator.noteChange({ document: f.doc,
+            contentChanges: [{ range: { start: { line: 0 }, end: { line: 0 } }, text: 'x' }] });
+        release();
+        await pending;
+        assert.equal(conventionalCalls, before, 'no compiler is launched for text superseded during preparation');
+        assert.equal(f.state.generation, prior);
+    } finally { release(); await pending?.catch(() => {}); configuredMapEngine = oldEngine; f.close(); }
+});
+
+test('a native background settlement does not display compile progress', async () => {
+    const f = fixture();
+    const oldProgress = stub.window.withProgress;
+    let progress = 0;
+    stub.window.withProgress = (_options, task) => {
+        progress++;
+        return task({ report() {} }, { onCancellationRequested() {} });
+    };
+    try {
+        f.state.generation = { runner: 'wlatex', sourceSnapshotHash: 'older', generation: 0 };
+        await f.coordinator.build(f.doc, { authoritative: true });
+        assert.equal(progress, 0, 'only a deliberate Compile or first open needs progress');
+        assert.ok(f.state.generation.generation > 0, 'the idle native build still completes');
+    } finally { stub.window.withProgress = oldProgress; f.close(); }
+});
+
+test('a queued Pro settlement retains its cooldown instead of acquiring a conventional deadline', t => {
+    t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 20000 });
+    const f = fixture(); let builds = 0;
+    try {
+        f.state.nativeLane = { interactive: true, close: async () => {} };
+        f.coordinator.build = async () => { builds++; };
+        f.coordinator._liveFirst.set(f.state.root, 1000);
+        f.coordinator.scheduleLive(f.doc, 5000);
+        t.mock.timers.tick(4000);
+        assert.equal(builds, 0, 'a previous deadline cannot shorten the explicit cooldown');
+        t.mock.timers.tick(1000);
+        assert.equal(builds, 1);
+    } finally { f.close(); }
+});
+
+test('a native map request has a bounded deadline even when the worker never replies', async () => {
+    const f = fixture(); let release;
+    try {
+        const source = {};
+        f.state.map = { native: true, available: false, materializedPages: [] };
+        f.state.generation = { nativeSource: source };
+        f.state.nativeLane = { source, close: async () => {}, refresh: () => new Promise(r => { release = r; }) };
+        const answer = await Promise.race([
+            f.coordinator.ensureNativeMap(f.state, 20),
+            new Promise(r => setTimeout(() => r('hung'), 200)),
+        ]);
+        assert.equal(answer, false, 'the click returns instead of hanging behind the worker');
+    } finally { release?.(null); f.close(); }
+});
+
+test('switching Pro off stops previews immediately and disposal cancels all delayed native work', async () => {
+    const f = fixture(); let refreshed = 0;
+    try {
+        const lane = { interactive: true, close: async () => {} };
+        f.state.nativeLane = lane;
+        f.coordinator.proDisabled = true;
+        assert.equal(f.coordinator._schedulePreview(f.state.root, f.state), false);
+        f.coordinator.proDisabled = false;
+        f.coordinator._runNativeRefresh = async () => { refreshed++; };
+        f.coordinator._scheduleNativeRefresh(f.state, lane, 10);
+        f.coordinator.dispose();
+        await new Promise(resolve => setTimeout(resolve, 30));
+        assert.equal(refreshed, 0, 'no map work after coordinator disposal');
+        assert.equal(f.coordinator._previewTimers.size, 0);
+    } finally { f.close(); }
+});
+
+test('an older completed preview cannot claim to contain a later keystroke', async () => {
+    const f = fixture(); let release;
+    try {
+        f.state.lastEditAt = 100;
+        const lane = { close: async () => {}, interactiveBuild: () => new Promise(r => { release = r; }) };
+        f.state.nativeLane = lane;
+        const pending = f.coordinator._runInteractive(f.state, lane, f.state.root, {});
+        f.state.lastEditAt = 200;
+        release({ ok: true, diagnostics: [], report: {}, pageCount: 1 });
+        await pending;
+        assert.ok(f.state.livePreviewAt < f.state.lastEditAt, 'preview freshness belongs to its input text');
+    } finally { f.close(); }
+});
+
+test('rendering configuration changes retire the old lane and invalidate pending preparation', async () => {
+    const f = fixture(); let closed = false;
+    try {
+        f.state.nativeLane = { close: async () => { closed = true; } };
+        f.state.buildPreparation = 4;
+        f.state.nativeRefusedSnapshot = 'old-source';
+        assert.equal(f.coordinator.configurationChanged({ affectsConfiguration: key => key === 'wolfbook.tex.mapEngine' }), true);
+        assert.equal(f.state.nativeLane, null);
+        assert.equal(f.state.buildPreparation, 5);
+        assert.equal(f.state.nativeRefusedSnapshot, null);
+        await Promise.resolve();
+        assert.equal(closed, true);
+        assert.equal(f.coordinator.configurationChanged({ affectsConfiguration: () => false }), false);
+    } finally { f.close(); }
+});
+
+test('fresh WPaper waits for the webview ready handshake before shipping a PDF', async () => {
+    const viewer = Object.create(TexViewer.prototype);
+    const messages = [];
+    Object.assign(viewer, { panel: {}, root: '/paper.tex', _webviewReady: false,
+        coord: { roots: new Map() }, _post: message => messages.push(message) });
+    await viewer.refresh({ force: true });
+    assert.deepEqual(messages, []);
+});
+
 test('native previews select sidecar; authoritative and explicit builds select configured compiler', async () => {
     const f = fixture();
+    const before = { native: nativeCalls, conventional: conventionalCalls };
     try {
         await f.coordinator.build(f.doc, { live:true, quiet:true });
-        assert.equal(nativeCalls, 1);
-        assert.equal(conventionalCalls, 0);
+        assert.equal(nativeCalls, before.native + 1);
+        assert.equal(conventionalCalls, before.conventional);
         assert.equal(f.state.generation.runner, 'wlatex');
         assert.equal(f.state.sourceAhead, false);
         await f.coordinator.build(f.doc, { authoritative:true, quiet:true });
-        assert.equal(conventionalCalls, 1);
+        assert.equal(conventionalCalls, before.conventional + 1);
         await f.coordinator.build(f.doc, { force:true, quiet:true });
-        assert.equal(conventionalCalls, 2);
+        assert.equal(conventionalCalls, before.conventional + 2);
     } finally { f.close(); }
+});
+
+test('viewer Compile publishes one pass before any necessary quiet convergence, using the same engine', async t => {
+    t.mock.timers.enable({ apis:['Date','setTimeout'], now:1000 });
+    const f = fixture(), calls = [], beforeNative = nativeCalls;
+    let release, settling;
+    const gate = new Promise(resolve => { release = resolve; });
+    const original = f.coordinator.buildAuthoritative.bind(f.coordinator);
+    f.coordinator.buildAuthoritative = (...args) => settling = original(...args);
+    configuredAuthoritativeDelay = 4000;
+    f.coordinator._capOk = true;
+    conventionalResult = { runner:'latexmk', engine:'pdflatex', pdfHash:'first', passes:1, passesLimited:true, rerunWanted:true };
+    buildHook = async (opts, producer) => {
+        calls.push({ ...opts, producer });
+        if (calls.length > 1) await gate;
+    };
+    try {
+        await f.coordinator.build(f.doc, { force:true, firstPass:true, quiet:true });
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].maxPasses, 1);
+        assert.equal(f.state.generation.pdfHash, 'first', 'the first PDF is published without waiting for convergence');
+        assert.equal(f.state.compiling, false);
+        t.mock.timers.tick(3999);
+        assert.equal(calls.length, 1, 'no immediate duplicate compile');
+        conventionalResult = { runner:'latexmk', engine:'pdflatex', pdfHash:'settled', passes:2, passesLimited:false, rerunWanted:false };
+        t.mock.timers.tick(1);
+        for (let i=0; i<30 && calls.length<2; i++) await Promise.resolve();
+        assert.equal(calls.length, 2);
+        assert.equal(calls[1].maxPasses, null, 'only the follow-up may converge fully');
+        assert.equal(calls[1].engine, 'pdflatex');
+        assert.equal(nativeCalls, beforeNative, 'Pro does not replace the manual compiler during convergence');
+        assert.equal(f.state.backgroundCompiling, true);
+        assert.equal(f.state.forcedCompiling, false);
+        assert.equal(f.state.generation.pdfHash, 'first', 'the usable first PDF stays visible while settling');
+        release(); await settling;
+        assert.equal(f.state.generation.pdfHash, 'settled');
+        t.mock.timers.tick(60000); await Promise.resolve();
+        assert.equal(calls.length, 2, 'a settled result never schedules another build');
+    } finally {
+        release(); if (settling) await settling;
+        configuredAuthoritativeDelay = 0; buildHook = null; conventionalResult = null; f.close();
+    }
+});
+
+test('a clean viewer first pass needs no follow-up; export/verification remain uncapped', async () => {
+    const f = fixture(), calls = [];
+    configuredAuthoritativeDelay = 4000;
+    f.coordinator._capOk = true;
+    conventionalResult = { runner:'latexmk', engine:'pdflatex', passes:1, passesLimited:false, rerunWanted:false };
+    buildHook = async opts => { calls.push(opts); };
+    try {
+        await f.coordinator.build(f.doc, { force:true, firstPass:true, quiet:true });
+        assert.equal(calls[0].maxPasses, 1);
+        assert.equal(f.coordinator._idleTimers.size, 0, 'no reference work means no background work');
+        await f.coordinator.build(f.doc, { force:true, quiet:true });
+        assert.equal(calls[1].maxPasses, null);
+        await f.coordinator.build(f.doc, { force:true, firstPass:true, authoritative:true, quiet:true });
+        assert.equal(calls[2].maxPasses, null, 'authoritative takes precedence over firstPass');
+    } finally { configuredAuthoritativeDelay = 0; buildHook = null; conventionalResult = null; f.close(); }
 });
 
 test('a save of a settled native build stays native; an unsettled one still gets latexmk', async () => {
@@ -112,6 +425,59 @@ test('a save of a settled native build stays native; an unsettled one still gets
         assert.ok(nativeCalls > nativeBefore);
         assert.equal(conventionalCalls, before.conventional);
     } finally { nativeSettled = false; f.close(); }
+});
+
+test('fontspec stays native for live builds and selects XeLaTeX for explicit Compile and fallback', async () => {
+    const f = fixture();
+    fs.writeFileSync(f.state.root, '\\documentclass{article}\n\\usepackage{fontspec}\n\\setmainfont{EBGaramond-Regular.otf}\n\\begin{document}Oxford\\end{document}');
+    const before = nativeCalls;
+    try {
+        await f.coordinator.build(f.doc, { live:true, quiet:true });
+        assert.equal(nativeCalls, before + 1, 'Unicode fonts remain supported by the live native engine');
+        assert.equal(f.state.nativeOff, null);
+        await f.coordinator.build(f.doc, { force:true, quiet:true });
+        assert.equal(observedEngines.at(-1), 'xelatex', 'explicit Compile must not run fontspec under pdfLaTeX');
+        fs.appendFileSync(f.state.root, '\n% next source');
+        nativeFailure = true;
+        await f.coordinator.build(f.doc, { live:true, quiet:true });
+        assert.equal(observedEngines.at(-1), 'xelatex', 'a producer failure uses the same compatible compiler');
+    } finally { nativeFailure = false; f.close(); }
+});
+
+test('engine declarations and font packages select the conventional compiler with Pro switched off', async () => {
+    const oldEngine = configuredMapEngine;
+    configuredMapEngine = 'auto';
+    try {
+        for (const [source, expected] of [
+            ['\\usepackage{fontspec}', 'xelatex'],
+            ['% !TEX program = xelatex\n\\usepackage{fontspec}', 'xelatex'],
+            ['% !TEX program = lualatex\n\\usepackage{fontspec}', 'lualatex'],
+            ['% !TEX program = pdflatex\n\\usepackage{fontspec}', 'pdflatex'],
+            ['% \\usepackage{fontspec}', 'lualatex'],
+            ['', 'lualatex'],
+        ]) {
+            const f = fixture();
+            fs.writeFileSync(f.state.root, source + '\n\\documentclass{article}');
+            try {
+                f.coordinator._luaOk = true;
+                await f.coordinator.build(f.doc, { force:true, quiet:true });
+                assert.equal(observedEngines.at(-1), expected, source || 'ordinary document');
+            } finally { f.close(); }
+        }
+    } finally { configuredMapEngine = oldEngine; }
+});
+
+test('full-PDF engine selection reads unsaved preamble changes and retains a configured LuaLaTeX', async () => {
+    const f = fixture(); const docs = stub.workspace.textDocuments;
+    try {
+        stub.workspace.textDocuments = [{ uri:f.doc.uri, isDirty:true, version:1,
+            getText:() => '\\documentclass{article}\n\\usepackage{fontspec}' }];
+        await f.coordinator.build(f.doc, { force:true, quiet:true });
+        assert.equal(observedEngines.at(-1), 'xelatex', 'fontspec was added in the buffer, not on disk');
+        configuredCompiler = 'lualatex';
+        await f.coordinator.build(f.doc, { force:true, quiet:true });
+        assert.equal(observedEngines.at(-1), 'lualatex');
+    } finally { configuredCompiler = 'pdflatex'; stub.workspace.textDocuments = docs; f.close(); }
 });
 
 test('a paper for another engine leaves the native lane: declared, or proven by a native-only failure', async () => {
@@ -139,15 +505,19 @@ test('a paper for another engine leaves the native lane: declared, or proven by 
         assert.equal(conventionalCalls, conventional0 + 3);
         assert.equal(f.state.generation.ok, true);
         assert.match(f.state.nativeOff, /cannot build this paper/);
-        // The next pause does not try WLaTeX again for the same preamble...
-        fs.appendFileSync(f.state.root, ' more body text');
+        // Repeating this exact source does not pay for the same failure.
         await f.coordinator.build(f.doc, { live:true, quiet:true });
         assert.equal(nativeCalls, native0 + 1);
-        // ...but a changed preamble does.
+        // A corrected body retries Pro even when the preamble is unchanged.
         nativeDocumentError = false;
-        fs.writeFileSync(f.state.root, '\\documentclass{article}\n\\begin{document}y');
+        fs.appendFileSync(f.state.root, ' more body text');
         await f.coordinator.build(f.doc, { live:true, quiet:true });
         assert.equal(nativeCalls, native0 + 2);
+        assert.equal(f.state.nativeOff, null);
+        // A changed preamble also retries it.
+        fs.writeFileSync(f.state.root, '\\documentclass{article}\n\\begin{document}y');
+        await f.coordinator.build(f.doc, { live:true, quiet:true });
+        assert.equal(nativeCalls, native0 + 3);
         assert.equal(f.state.nativeOff, null);
         // Each reason was said once: the declared engine and the failed build
         // as notices, the one only shown (\pdfoutput) as a warning with a choice.
@@ -157,6 +527,141 @@ test('a paper for another engine leaves the native lane: declared, or proven by 
         assert.match(offered[0].message, /written for pdflatex \(\\pdfoutput=1, line 1\).*may differ slightly.*line 1 to "\\ifdefined\\pdfoutput\\pdfoutput=1\\fi"/);
         assert.deepEqual(offered[0].choices, ['Preview with WLaTeX', 'Keep pdflatex', 'Show log']);
     } finally { nativeDocumentError = false; f.close(); }
+});
+
+test('a best-effort pdfLaTeX PDF with document errors cannot disable Pro; corrected body text stays native', async () => {
+    const f = fixture();
+    const beforeNotices = notices.length;
+    nativeDocumentError = true;
+    conventionalResult = { errors:12, diagnostics:[{ severity:'error', message:'Argument of \\math@egroup has an extra }.' }] };
+    try {
+        await f.coordinator.build(f.doc, { live:true, quiet:true });
+        assert.equal(f.state.nativeOff, null, 'writing a PDF with twelve errors does not prove compatibility');
+        assert.ok(!f.state.nativeIncompatible);
+        assert.ok(f.state.nativeLane, 'the live lane survives a temporary syntax error');
+        assert.equal(notices.length, beforeNotices, 'typing errors produce no incompatibility popup');
+        const nativeBefore = nativeCalls;
+        nativeDocumentError = false; conventionalResult = undefined;
+        fs.appendFileSync(f.state.root, '\n% corrected body');
+        await f.coordinator.build(f.doc, { live:true, quiet:true });
+        assert.equal(nativeCalls, nativeBefore + 1);
+        assert.equal(f.state.generation.runner, 'wlatex');
+    } finally { nativeDocumentError = false; conventionalResult = undefined; f.close(); }
+});
+
+test('engine comparisons of old text cannot disable Pro when typing continues during a priority build', async () => {
+    const f = fixture();
+    nativeDocumentError = true;
+    let changed = false;
+    buildHook = async (_o, kind) => {
+        if (changed || kind !== 'conventional') return;
+        // The comparison compiler runs after the native failure. Its result
+        // still describes the frozen earlier source, not the new keystroke.
+        if (!changed) {
+            changed = true;
+            fs.appendFileSync(f.state.root, '\n% new key');
+            f.coordinator.noteChange({ document:f.doc, contentChanges:[{ range:{ start:{ line:0 }, end:{ line:0 } }, text:'x' }] });
+        }
+    };
+    try {
+        await f.coordinator.build(f.doc, { live:true, quiet:true, priority:true });
+        assert.equal(changed, true);
+        assert.equal(f.state.nativeOff, null, 'an obsolete comparison never becomes current engine policy');
+        assert.ok(!f.state.nativeIncompatible);
+        assert.ok(!f.state.nativeIncompatibleTried, 'obsolete comparisons leave no backoff');
+    } finally { nativeDocumentError = false; buildHook = undefined; f.close(); }
+});
+
+test('a Pro document error preserves displayed provenance without passing compilation or verification', async () => {
+    const f = fixture();
+    try {
+        await f.coordinator.build(f.doc, { live:true, quiet:true });
+        const previous = f.state.generation, map = f.state.map, prevMap = f.state.prevMap, lane = f.state.nativeLane;
+        // A source edit invalidates indexed geometry until the same native
+        // source worker remaps it. A failed build must keep that worker/map.
+        fs.appendFileSync(f.state.root, '\n\\UndefinedCommand');
+        nativeDocumentError = true;
+        conventionalResult = { ok:false, pdfPath:null, errors:1, diagnostics:[{ severity:'error', message:'Undefined control sequence.' }] };
+        await f.coordinator.build(f.doc, { live:true, quiet:true });
+        assert.equal(f.state.nativeLane, lane);
+        assert.equal(f.state.map, map, 'last displayed map is not replaced with an empty map');
+        assert.equal(f.state.prevMap, prevMap, 'previous displayed provenance is not evicted');
+        assert.equal(f.state.generation.pdfPath, previous.pdfPath);
+        assert.equal(f.state.generation.pdfHash, previous.pdfHash);
+        assert.equal(f.state.generation.generation, previous.generation, 'display identity remains bound to its bytes');
+        assert.equal(f.state.generation.sourceSnapshotHash, previous.sourceSnapshotHash, 'old pixels cannot claim the failed source snapshot');
+        assert.equal(f.state.generation.ok, false, 'verification still fails');
+        assert.equal(f.state.generation.failedBuild.ok, false);
+        assert.equal(f.state.sourceAhead, true);
+        assert.match(f.state.lastError, /compile produced no PDF/);
+        assert.match(f.state.compileDiagnostics.list[0].message, /Undefined/);
+        // Multiple failures retain only the latest failed report, rather
+        // than chaining whole maps/PDFs from every attempt.
+        await f.coordinator.build(f.doc, { force:true, quiet:true });
+        assert.equal(f.state.map, map);
+        assert.equal(f.state.generation.failedBuild.failedBuild, undefined);
+        nativeDocumentError = false; conventionalResult = undefined;
+        fs.appendFileSync(f.state.root, '\n% corrected');
+        await f.coordinator.build(f.doc, { live:true, quiet:true });
+        assert.equal(f.state.generation.ok, true);
+        assert.equal(f.state.generation.failedBuild, undefined);
+        assert.equal(f.state.sourceAhead, false);
+        assert.equal(f.state.lastError, null);
+        assert.deepEqual(f.state.compileDiagnostics.list, []);
+        assert.equal(f.state.nativeLane, lane);
+    } finally { nativeDocumentError = false; conventionalResult = undefined; f.close(); }
+});
+
+test('a temporary live TeX error crosses the badge through its reason and clears after a current successful preview', async () => {
+    const f = fixture();
+    const posts = [];
+    const lane = { interactive:true, close:async () => {}, interactiveBuild:async () => ({ ok:false,
+        diagnostics:[{ severity:'error', line:42, message:'Argument of \\math@egroup has an extra }.' }] }) };
+    const engine = () => {
+        TexViewer.prototype._postEngine.call({ coord:f.coordinator, context:{ globalState:{ get:() => true } },
+            _post:m => posts.push(m) }, f.state);
+        return posts.at(-1);
+    };
+    try {
+        f.state.nativeLane = lane; f.state.sourceRevision = 1;
+        await f.coordinator._runInteractive(f.state, lane, f.state.root, {});
+        assert.equal(f.state.nativeOff, undefined, 'temporary syntax errors do not change engine policy');
+        assert.equal(f.state.nativeLane, lane);
+        assert.match(engine().previewError, /Line 42: Argument of \\math@egroup/);
+        assert.notEqual(engine().state, 'off');
+        f.state.sourceRevision++;
+        lane.interactiveBuild = async () => ({ ok:true, diagnostics:[], pages:[], pageCount:1, report:{} });
+        await f.coordinator._runInteractive(f.state, lane, f.state.root, {});
+        assert.equal(engine().previewError, null, 'a current successful preview clears the error');
+        f.state.sourceRevision++;
+        lane.interactiveBuild = async () => { f.state.sourceRevision++; return { ok:false,
+            diagnostics:[{ severity:'error', line:42, message:'older failure' }] }; };
+        await f.coordinator._runInteractive(f.state, lane, f.state.root, {});
+        assert.equal(engine().previewError, null, 'a failure superseded by a key cannot cross the current badge');
+    } finally { f.close(); }
+});
+
+test('editor diagnostics follow the newest current report while a failed compile retains an old PDF', () => {
+    const f = fixture();
+    const oldDiagnostic = stub.Diagnostic, oldSeverity = stub.DiagnosticSeverity;
+    stub.Diagnostic = class { constructor(range,message,severity) { Object.assign(this,{range,message,severity}); } };
+    stub.DiagnosticSeverity = {Error:0,Warning:1,Information:2};
+    const doc = {...f.doc,lineCount:1,lineAt:() => ({range:{}})};
+    const projection = {get:() => ({model:{objects:[]}})};
+    const error = {file:f.state.root,line:1,severity:'error',message:'Undefined control sequence.'};
+    try {
+        f.state.sourceRevision = 2;
+        f.state.sourceAhead = true;
+        f.state.generation = {diagnostics:[error],finishedAt:100};
+        f.state.compileDiagnostics = {revision:2,sequence:5,at:100,list:[error]};
+        assert.equal(renderDiagnostics(doc,f.coordinator,projection).length,1);
+        f.state.liveDiagnostics = {revision:2,sequence:6,at:100,list:[]};
+        assert.deepEqual(renderDiagnostics(doc,f.coordinator,projection),[], 'a clean live correction clears old compile errors immediately');
+        f.state.liveDiagnostics = {revision:2,sequence:7,at:101,list:[error]};
+        assert.equal(renderDiagnostics(doc,f.coordinator,projection)[0].source,'wolfbook-tex (live)');
+        f.state.sourceRevision = 3;
+        assert.deepEqual(renderDiagnostics(doc,f.coordinator,projection),[], 'older source reports cannot annotate a new revision');
+    } finally {stub.Diagnostic=oldDiagnostic;stub.DiagnosticSeverity=oldSeverity;f.close();}
 });
 
 test('the writer may preview a pdfLaTeX paper with WLaTeX after the warning', async () => {
@@ -399,7 +904,7 @@ test('native client sends generation-bound clicks without text-layer guesses whi
     const vm = require('node:vm');
     const js = fs.readFileSync(path.resolve(__dirname, '../../../client/tex-viewer.js'), 'utf8');
     const sent = [];
-    const context = vm.createContext({ state:{ tracePaused:true, nativeMapAvailable:true, generation:7 },
+    const context = vm.createContext({ sourceFocusEpoch:0, state:{ tracePaused:true, nativeMapAvailable:true, generation:7 },
         vscode:{ postMessage:m => sent.push(m) }, pendingPaperTyping:null, paperTargetSeq:0,
         clearPaperTypingTarget() {}, wordAtPoint() { throw Error('native clicks must not guess text'); } });
     const start = js.indexOf('function sendClick(');
@@ -444,12 +949,22 @@ test('WPaper defaults do not require or initialize optional WLaTeX', async () =>
 });
 
 test('an opted-in but unavailable WLaTeX falls back without breaking normal builds', async () => {
-    const f = fixture(); const builds = conventionalCalls; installed = false;
+    const f = fixture(); const builds = conventionalCalls, warningCount = warnings.length, noticeCount = notices.length; installed = false;
     try {
         await f.coordinator.build(f.doc, { quiet:true });
         assert.equal(conventionalCalls, builds + 1);
         assert.ok(!f.state.lastError);
         assert.match(f.state.nativeUnavailable, /normal WPaper compiler/);
+        assert.equal(warnings.length, warningCount);
+        assert.equal(notices.length, noticeCount);
+        for (const disabled of [false, true]) {
+            f.coordinator.proDisabled = disabled;
+            const posts = [];
+            TexViewer.prototype._postEngine.call({ coord:f.coordinator, _post:m => posts.push(m) }, f.state);
+            assert.equal(posts.at(-1).state, null);
+            assert.equal(posts.at(-1).intro, false);
+        }
+        f.coordinator.proDisabled = false;
         await f.coordinator.build(f.doc, { quiet:true });
         assert.equal(conventionalCalls, builds + 1, 'unchanged normal generation is reusable');
     } finally { installed = true; f.close(); }
@@ -483,6 +998,7 @@ function miniFixture() {
     const f = cursorFixture();
     f.doc.uri.fsPath = 'paper.tex';
     f.doc.positionAt = offset => new NativePosition(3, offset);
+    f.doc.getText = () => 'abcdefgh';
     f.viewer._edit = { id:12, file:'paper.tex', startOffset:3, endOffset:11 };
     f.viewer._rememberEditState = () => {};
     f.viewer._noteEditorNavigation = () => {};
@@ -547,11 +1063,21 @@ function openFixture() {
     f.hit.line = 1;
     const text = f.doc.getText();
     f.doc.offsetAt = pos => pos.character;
+    f.doc.positionAt = offset => new NativePosition(0,offset);
     f.doc.getText = range => range ? text.slice(range.start.character, range.end.character) : text;
     f.viewer._editSeq = 0;
+    // This fixture has no webview transport: a recovery request waits for
+    // the test's explicit opened acknowledgement instead of probing a browser.
+    f.viewer._viewerReloading = true;
+    f.viewer._deferEditOpen = TexViewer.prototype._deferEditOpen;
+    f.viewer._replayPendingEditOpen = TexViewer.prototype._replayPendingEditOpen;
+    f.viewer._sameSourceSelection = TexViewer.prototype._sameSourceSelection;
+    f.viewer._selectionSourceCurrent = TexViewer.prototype._selectionSourceCurrent;
+    f.viewer.status = TexViewer.prototype.status;
     f.viewer._resolvePoint = TexViewer.prototype._resolvePoint;
     f.viewer._nearestEditable = TexViewer.prototype._nearestEditable;
     f.viewer._blockAt = () => ({ startLine:1, endLine:1, label:'paragraph' });
+    f.viewer._editCellStarts = TexViewer.prototype._editCellStarts;
     f.viewer._ensureDocListener = () => {};
     f.viewer._rememberEditState = () => {};
     f.viewer._editRects = () => [];
@@ -566,6 +1092,239 @@ test('an exact current native glyph opens a card while source is ahead', async (
     assert.equal(session.lastText, 'Alpha Alpha');
     assert.equal(f.posts.at(-1).type, 'editOpen');
     assert.equal(f.posts.at(-1).typingRequest, 9);
+    assert.equal(f.posts.at(-1).caretStart, 6, 'native glyph source column initializes the card');
+    assert.equal(f.posts.at(-1).caretEnd, 6, 'native opens with a collapsed caret');
+});
+
+test('right-click loads the clicked native page even when another map window is available',async()=>{
+    const f=openFixture();let page;
+    f.map.hasPage=()=>false;
+    f.viewer.coord.ensureNativeMap=async(st,timeout,want)=>{
+        assert.equal(st,f.state);assert.equal(timeout,1500);page=want;f.map.hasPage=()=>true;return true;
+    };
+    assert.ok(await f.open({page:44}));assert.equal(page,44);
+});
+
+test('a settled PDF opens the editor immediately instead of waiting for a redundant live overlay map',async()=>{
+    const f=openFixture(),identity='redundant-preview';
+    Object.assign(f.viewer,{_retireSettledPreviews:TexViewer.prototype._retireSettledPreviews,
+        _displayMatchesSource:TexViewer.prototype._displayMatchesSource,
+        _liveOverlays:new Map([[1,identity]]),_liveMapReady:new Map([[1,identity]]),
+        _ensureLiveMap:()=>{throw Error('the editor must use the current PDF without live map work');}});
+    f.state.sourceAhead=false;f.state.generation={generation:1,pdfHash:'pdf'};f.state.nativeLane={};
+    assert.ok(await f.open({overlay:identity}));
+    assert.deepEqual(f.posts.find(m=>m.type==='retireLivePreview').pages,{1:identity});
+    assert.equal(f.viewer._liveOverlays.size,0);
+});
+
+test('a newer source never loses its live overlay to the settled-preview recovery',()=>{
+    const f=openFixture(),identity='new-typing';
+    f.viewer._displayMatchesSource=TexViewer.prototype._displayMatchesSource;
+    f.viewer._liveOverlays=new Map([[1,identity]]);f.state.generation={generation:1,pdfHash:'pdf'};
+    assert.equal(TexViewer.prototype._retireSettledPreviews.call(f.viewer,f.state,1,identity),false);
+    assert.equal(f.viewer._liveOverlays.get(1),identity);assert.equal(f.posts.length,0);
+});
+
+test('preview retirement cannot erase newer ink queued behind an older visible overlay',()=>{
+    const vm=require('node:vm');
+    const src=fs.readFileSync(path.join(__dirname,'../../../client/tex-viewer.js'),'utf8');
+    const handler=src.slice(src.indexOf("case 'retireLivePreview':"),src.indexOf("case 'nativeMapState':"));
+    const state={generation:1,txdl:{pages:new Map([[44,{identity:'old'}]])},
+        txdlPending:new Map([[44,{msg:{identity:'new'}}]])};
+    let removed=0;
+    vm.runInNewContext(`switch(msg.type){${handler}}`,{state,msg:{type:'retireLivePreview',generation:1,pages:{44:'old'}},
+        removeTxdlOverlay:()=>{removed++;},restorePdfLinks(){},invalidateSelectionGeometry(){},renderReview(){},renderEditNav(){}});
+    assert.equal(removed,0);assert.equal(state.txdlPending.get(44).msg.identity,'new');
+});
+
+test('reopening a live mini-editor recovers a missed map-ready event by page identity',async()=>{
+    const f=openFixture(), identity='visible-page';
+    Object.assign(f.viewer,{_liveOverlays:new Map([[1,identity]]),_liveMapReady:new Map(),
+        _ensureLiveMap:TexViewer.prototype._ensureLiveMap});
+    f.state.nativeLane={liveMapIdentity:()=>identity};
+    f.map.hasPage=page=>page===1;
+    f.viewer._buildLiveMap=async()=>{f.viewer._liveMap=f.map;f.viewer._liveMapIdentities=new Map([[1,identity]]);};
+    const first=await f.open({overlay:identity});assert.ok(first);
+    f.viewer._edit=null;
+    f.viewer._liveMap=null;f.viewer._liveMapReady.clear();
+    const reopened=await f.open({overlay:identity});
+    assert.ok(reopened);assert.notEqual(reopened.id,first.id);
+    assert.equal(f.posts.filter(m=>m.type==='editOpen').length,2);
+});
+
+test('a hung live source worker has a bounded right-click wait and leaves the event loop free',async()=>{
+    const f=openFixture(), identity='visible-page';
+    Object.assign(f.viewer,{_liveOverlays:new Map([[1,identity]]),_liveMapReady:new Map([[1,identity]]),
+        _liveMapClickWaitMs:30,_buildLiveMap:()=>new Promise(()=>{})});
+    f.state.nativeLane={};
+    let ticks=0;const timer=setInterval(()=>ticks++,3),before=Date.now();
+    try {
+        assert.equal(await TexViewer.prototype._ensureLiveMap.call(f.viewer,1,identity),false);
+        assert.ok(Date.now()-before<500,'worker deadline actually limits awaiting the promise');
+        assert.ok(ticks>=2,'viewer events continue while waiting');
+    } finally {clearInterval(timer);}
+});
+
+test('a ready event for new ink cannot admit an older materialized live map',async()=>{
+    const f=openFixture(),identity='new-page';let reads=0;
+    f.map.hasPage=()=>true;
+    Object.assign(f.viewer,{_liveOverlays:new Map([[1,identity]]),_liveMapReady:new Map([[1,identity]]),
+        _liveMap:f.map,_liveMapIdentities:new Map([[1,'old-page']]),_buildLiveMap:async()=>{
+            reads++;f.viewer._liveMapIdentities=new Map([[1,identity]]);
+        }});
+    f.state.nativeLane={};
+    assert.equal(await TexViewer.prototype._ensureLiveMap.call(f.viewer,1,identity),true);
+    assert.equal(reads,1,'geometry is rematerialized for the identity actually visible');
+});
+
+test('a right-click map request does not wait behind a stalled background window',async()=>{
+    const f=openFixture(),identity='editor-page';let requested;
+    f.map.hasPage=()=>true;
+    Object.assign(f.viewer,{_liveOverlays:new Map([[1,identity]]),_liveMapReady:new Map([[1,identity]]),
+        _liveMapBuilding:new Promise(()=>{}),_liveMapClickWaitMs:50,
+        _buildLiveMap:async(lane,page)=>{
+            requested=page;f.viewer._liveMap=f.map;f.viewer._liveMapIdentities=new Map([[1,identity]]);
+        }});
+    f.state.nativeLane={};
+    assert.equal(await TexViewer.prototype._ensureLiveMap.call(f.viewer,1,identity),true);
+    assert.equal(requested,1);
+});
+
+test('a redraw keeps an untouched source range across surrounding edits and never guesses between repeated quotes',()=>{
+    const before='Before\nchosen fragment\nAfter chosen fragment';
+    const selected={sourceText:before,start:{line:1,character:0},end:{line:1,character:15},direction:'backward'};
+    const doc=text=>({version:2,getText:()=>text,positionAt:offset=>{
+        const lines=text.slice(0,offset).split('\n');return {line:lines.length-1,character:lines.at(-1).length};
+    }});
+    const rebase=text=>TexViewer.prototype._rebaseSelectedRange(selected,doc(text));
+    const shifted=rebase('Inserted\n'+before);
+    assert.deepEqual(shifted.start,{line:2,character:0});
+    assert.deepEqual(shifted.end,{line:2,character:15});assert.equal(shifted.direction,'backward');
+    assert.deepEqual(rebase(before+' appended').start,selected.start);
+    assert.equal(rebase(before.replace('chosen fragment','changed fragment')),null,'a changed selection is retired');
+    assert.equal(rebase(before.replace('chosen fragment\n','')),null,'the duplicate quote cannot steal the deleted range');
+});
+
+test('live editor recovery retries a preview once and replays only the same visible page',async()=>{
+    for (const changed of [false,true]) {
+        const f=openFixture(),identity='visible-page';let previews=0;
+        Object.assign(f.viewer,{_editOpenRequest:1,_liveOverlays:new Map([[1,identity]]),
+            _liveMapReady:new Map(),_liveMap:null});
+        f.viewer.coord._schedulePreview=()=>previews++;
+        f.viewer._onMessage=message=>f.open(message);
+        f.viewer._ensureLiveMap=async()=>true;
+        f.state.nativeLane={};
+        const frame={root:f.viewer.root,request:1,previous:f.viewer._edit,
+            navigation:f.viewer._nativeInverseRequest,caretRequest:f.viewer._miniCaretRequest};
+        const message={generation:1,page:1,overlay:identity,xBp:102,yTopBp:84};
+        assert.equal(TexViewer.prototype._deferLiveEditOpen.call(f.viewer,message,frame),true);
+        assert.equal(TexViewer.prototype._deferLiveEditOpen.call(f.viewer,message,frame),true);
+        assert.equal(previews,1,'repeated requests never trigger repeated full builds');
+        await f.viewer._replayPendingEditOpen();
+        assert.ok(f.viewer._pendingEditOpen,'wait for an admitted map');
+        f.map.hasPage=()=>true;f.viewer._liveMap=f.map;f.viewer._liveMapReady.set(1,identity);
+        if(changed)f.viewer._liveOverlays.set(1,'new-page');
+        await f.viewer._replayPendingEditOpen();await f.viewer._replayPendingEditOpen();
+        assert.equal(f.posts.filter(m=>m.type==='editOpen').length,changed?0:1);
+        assert.equal(f.viewer._pendingEditOpen,null);
+        clearTimeout(f.viewer._pendingEditOpenTimer);
+    }
+});
+
+test('an unchanged finalized page still replaces a paragraph fragment and its map identity',()=>{
+    const f=openFixture();
+    Object.assign(f.viewer,{shownAnything:true,_liveOverlays:new Map([[1,'fragment']]),
+        _previewPages:new Map(),_postEngine:()=>{},_postErrorAnnotations:()=>{}});
+    TexViewer.prototype._onInteractive.call(f.viewer,{root:f.viewer.root,kind:'page',page:1,
+        generation:2,changed:false,identity:'final-page',txdl:{items:[]}});
+    const page=f.posts.find(m=>m.type==='txdlPage');
+    assert.ok(page);assert.equal(page.identity,'final-page');
+    assert.equal(f.viewer._liveOverlays.get(1),'final-page');
+});
+
+test('right-click names the visible fragment rather than the live page underneath',async()=>{
+    const js=fs.readFileSync(path.resolve(__dirname,'../../../client/tex-viewer.js'),'utf8');
+    const from=js.indexOf('function sendClick('),body=js.slice(from,js.indexOf('\n}',from)+2);
+    const posted=[],fragment={canvas:{isConnected:true},msg:{mapIdentity:'fragment-map',generation:9,index:2}};
+    const context=require('vm').createContext({
+        state:{nativeMapAvailable:true,generation:3,txdl:{pages:new Map([[1,{identity:'old-page',canvas:{isConnected:true}}]])},
+            txdlFragments:new Map([[1,fragment]])},
+        sourceFocusEpoch:0,vscode:{postMessage:msg=>posted.push(msg)},Promise,
+    });
+    require('vm').runInContext(body,context);
+    for (const expected of ['fragment-map','fragment-pending:9:1:2','old-page']) {
+        if(expected.startsWith('fragment-pending'))delete fragment.msg.mapIdentity;
+        if(expected==='old-page')fragment.canvas.isConnected=false;
+        context.sendClick(1,{xBp:100,yTopBp:90},100,90,{},'editHere');
+        await new Promise(resolve=>setImmediate(resolve));
+        assert.equal(posted.at(-1).overlay,expected);
+    }
+});
+
+test('native right-click opens the selected source, preserving direction and refusing stale ranges', async () => {
+    for (const mode of ['current', 'version', 'map', 'source']) {
+        const f = openFixture();
+        f.viewer._selectionTarget = TexViewer.prototype._selectionTarget;
+        f.viewer._lastSelection = { file:f.doc.uri.fsPath, nativeMap:f.map, documentVersion:f.doc.version,
+            start:new NativePosition(0,0), end:new NativePosition(0,5), direction:'backward' };
+        if (mode === 'version') f.viewer._lastSelection.documentVersion = -1;
+        if (mode === 'map') f.viewer._lastSelection.nativeMap = { ...f.map };
+        if (mode === 'source') f.doc.getText = () => 'changed source';
+        f.viewer._resolvePoint = () => { throw new Error('must use the selection, not the clicked glyph'); };
+        await f.open({ preserveSelection:true });
+        const open = f.posts.find(m => m.type === 'editOpen');
+        if (mode === 'current') {
+            assert.ok(open);
+            assert.equal(open.text.slice(open.caretStart, open.caretEnd), 'Alpha');
+            assert.equal(open.caretDirection, 'backward');
+        } else assert.ok(!open, mode);
+    }
+});
+
+test('a mini-editor click during a same-PDF handoff retries with the new map', async () => {
+    const f = openFixture(); let release;
+    f.viewer._onMessage = message => f.open(message);
+    stub.workspace.openTextDocument = () => new Promise(resolve => { release = resolve; });
+    const opening = f.open();
+    const previous = f.map;
+    f.state.map = { ...previous };
+    f.viewer._openedGeneration = 2;
+    stub.workspace.openTextDocument = async () => f.doc;
+    release(f.doc); await opening;
+    assert.equal(f.posts.filter(m => m.type === 'editOpen').length, 1);
+    assert.equal(f.viewer._edit.lastText, 'Alpha Alpha');
+    assert.equal(f.viewer._pendingEditOpen, null);
+});
+
+test('a deferred mini-editor never reuses coordinates on changed PDF bytes', async () => {
+    const f = openFixture(); let release;
+    f.viewer._onMessage = () => { throw Error('old coordinates replayed'); };
+    stub.workspace.openTextDocument = () => new Promise(resolve => { release = resolve; });
+    const opening = f.open();
+    f.state.map = { ...f.map, view:{ artifact:{ pdf_hash:'new-pdf' } } };
+    f.viewer._openedPdfHash = 'new-pdf';
+    f.viewer._openedGeneration = 2;
+    release(f.doc); await opening;
+    assert.ok(!f.posts.some(m => m.type === 'editOpen'));
+    assert.equal(f.viewer._pendingEditOpen, null);
+    assert.ok(f.posts.some(m => m.type === 'status' && m.text === 'Page updated — right-click to edit.'));
+});
+
+test('a waiting editor opens once after recovery, and still verifies source bytes', async () => {
+    for (const changedSource of [false, true]) {
+        const f = openFixture();
+        f.viewer._openedPdfHash = 'old-pdf';
+        f.viewer._onMessage = message => f.open(message);
+        await f.open();
+        assert.ok(f.viewer._pendingEditOpen, 'the mismatched map waits for its PDF');
+        f.state.map = { ...f.map, view:{ artifact:{ pdf_hash:'old-pdf' } } };
+        f.viewer._openedGeneration = 2;
+        if (changedSource) f.doc.getText = () => 'new source text';
+        await f.viewer._replayPendingEditOpen();
+        await f.viewer._replayPendingEditOpen();
+        assert.equal(f.posts.filter(m => m.type === 'editOpen').length, changedSource ? 0 : 1);
+        assert.equal(f.viewer._pendingEditOpen, null);
+    }
 });
 
 test('a stepped card is measured on the pages as shown: a live page from its own map', () => {
@@ -658,10 +1417,11 @@ test('native selection painting is one band per printed line, touching the next,
     const context = vm.createContext({ state:{ rendered:new Set([1]), edit:true },
         document:{ querySelectorAll:() => [], createElement:() => ({ style:{}, dataset:{} }) },
         pagesEl:() => ({ querySelector:() => ({ appendChild:node => painted.push(node) }) }),
-        renderPage:async () => {}, rectToViewport:(page, rect) => rect, markToPx:mark => mark,
+        renderPage:async () => { throw Error('a selection on visible ink must not request PDF rendering'); },
+        rectToViewport:(page, rect) => rect, markToPx:mark => mark,
         textItems:() => { throw Error('native selection must not infer text rows'); },
         paintSelectionActions() {} });
-    for (const name of ['function nativeBands(', 'async function paintSelection(', 'async function paintSelectionNow(']) {
+    for (const name of ['function nativeBands(', 'function selectionGeometryCurrent(', 'async function paintSelection(', 'async function paintSelectionNow(']) {
         const start = js.indexOf(name);
         vm.runInContext(js.slice(start, js.indexOf('\n}\n', start) + 2), context);
     }
@@ -947,7 +1707,7 @@ test('an old edit completion cannot refresh or retire a replacement native worke
         const replacement = { refresh:async () => { refreshed = true; }, close:async () => {} };
         try {
             f.state.nativeLane = old;
-            f.coordinator.noteChange({ document:f.doc, contentChanges:[] });
+            f.coordinator.noteChange({ document:f.doc, contentChanges:[{ range:{ start:{line:0}, end:{line:0} }, text:'x' }] });
             f.state.nativeLane = replacement;
             finish(); await new Promise(resolve => setImmediate(resolve));
             assert.equal(f.state.nativeLane, replacement);
@@ -962,11 +1722,30 @@ test('mapping failures retire their source session even if shutdown rejects', as
     try {
         f.state.nativeLane = { noteChange:async () => { throw Error('worker exited'); },
             close:async () => { closed = true; throw Error('already dead'); } };
-        f.coordinator.noteChange({ document:f.doc, contentChanges:[] });
+        f.coordinator.noteChange({ document:f.doc, contentChanges:[{ range:{ start:{line:0}, end:{line:0} }, text:'x' }] });
         await new Promise(resolve => setImmediate(resolve));
         assert.equal(closed, true);
         assert.equal(f.state.nativeLane, null);
     } finally { f.close(); }
+});
+test('a superseded native refresh retries without retiring a healthy worker',async()=>{
+ for(const name of ['AbortError','StaleBuild','Cancelled']){
+  const f=fixture();let closed=0,retries=0;
+  const lane={source:{},refresh:async()=>{throw Object.assign(Error('Native preview source superseded'),{name});},close:async()=>closed++};
+  Object.assign(f.state,{nativeLane:lane,generation:{nativeSource:lane.source},map:{native:true,available:false}});
+  f.coordinator._scheduleNativeRefresh=()=>retries++;
+  try{await f.coordinator._runNativeRefresh(f.state,lane);assert.equal(f.state.nativeLane,lane);assert.equal(closed,0);assert.equal(retries,1);}
+  finally{f.close();}
+ }
+});
+test('a cancelled source-edit task never closes the native session or announces a compiler fallback',async()=>{
+ const f=fixture();let closes=0,retries=0;
+ const lane={noteChange:async()=>{throw Object.assign(Error('superseded'),{name:'AbortError'});},close:async()=>closes++};
+ f.state.nativeLane=lane;f.coordinator._scheduleNativeRefresh=()=>retries++;
+ try{
+  f.coordinator.noteChange({document:f.doc,contentChanges:[{range:{start:{line:0},end:{line:0}},text:'x'}]});
+  await new Promise(r=>setImmediate(r));assert.equal(f.state.nativeLane,lane);assert.equal(closes,0);assert.equal(retries,1);
+ }finally{f.close();}
 });
 
 test('disposal during native replacement prevents later construction and compilation', async () => {
@@ -1029,14 +1808,42 @@ test('native mini-input operations preserve the actual insertion position in rep
     assert.equal(context.miniInputOperation({ text:'abc', start:1, end:1, type:'insertText' }, 'unrelated', 3), null);
 });
 
-test('native mini-editor applies verified ranges and retains insertions at card boundaries', async () => {
-    for (const at of [0,1,4,'invalid']) {
+test('typing and deleting in either mini-editor sends text and caret immediately', () => {
+    const vm = require('node:vm');
+    const js = fs.readFileSync(path.resolve(__dirname, '../../../client/tex-viewer.js'), 'utf8');
+    const start = js.indexOf("ta.addEventListener('input', () => {", js.indexOf('function buildEditCard('));
+    const end = js.indexOf('\n    });', start) + '\n    });'.length;
+    for (const native of [false, true]) for (const value of ['abcd', 'ab']) {
+        const posts = [], timers = [];
+        const e = { id: 1, native, text: 'abc' };
+        let handler;
+        const context = vm.createContext({ e, state: { edit: e },
+            ta: { value, selectionStart: value.length, addEventListener: (_, fn) => { handler = fn; } },
+            beforeInput: { text: 'abc' }, miniInputOperation: () => null,
+            boundaryArm: null, debounce: null, card: {},
+            caretSnapshot: () => ({ start: value.length, end: value.length, direction: 'forward' }),
+            syncHighlight() {}, sendCaret() {}, clearTimeout() {},
+            setTimeout: fn => { timers.push(fn); return 1; },
+            vscode: { postMessage: m => posts.push(m) } });
+        vm.runInContext(js.slice(js.indexOf('function rebaseCellStarts('), js.indexOf('/** Dividers are decorations')), context);
+        vm.runInContext(js.slice(start, end), context);
+        handler();
+        assert.equal(posts.length, 1, 'no pause before the source hears typing');
+        assert.equal(timers.length, 0, 'no trailing typing debounce');
+        assert.equal(posts[0].text, value);
+        assert.equal(posts[0].caret.start, value.length);
+        assert.equal(posts[0].beforeText, 'abc');
+    }
+});
+
+test('both mini-editor engines apply verified ranges and retain insertions at card boundaries', async () => {
+    for (const native of [false, true]) for (const at of [0,1,4,'invalid']) {
         let text = 'aaaa'; let applied;
         const doc = { uri:{ fsPath:'/paper.tex' }, positionAt:n => new NativePosition(0,n),
             getText:range => range ? text.slice(range.start.character, range.end.character) : text };
         stub.workspace.openTextDocument = async () => doc;
         stub.WorkspaceEdit = class { replace(uri, range, value) { this.range=range; this.value=value; } };
-        const s = { id:1, native:true, file:'/paper.tex', startOffset:0, endOffset:4, lastText:text };
+        const s = { id:1, native, file:'/paper.tex', startOffset:0, endOffset:4, lastText:text };
         const viewer = { _edit:s, _rememberEditState() {}, _post() {},
             _applyReaderEdit:async (document, edit) => {
                 applied = edit;
@@ -1060,8 +1867,9 @@ test('native mini-editor applies verified ranges and retains insertions at card 
 
 
 test('stale native card operations cannot overwrite external changes or later save the stale block', async () => {
+    for (const native of [false, true]) {
     const source = 'External'; const posts = []; let writes = 0;
-    const s = { id:1, native:true, file:'/paper.tex', startOffset:0, endOffset:source.length, lastText:source };
+    const s = { id:1, native, file:'/paper.tex', startOffset:0, endOffset:source.length, lastText:source };
     const doc = { uri:{ fsPath:s.file }, positionAt:n => new NativePosition(0,n), getText:() => source };
     stub.workspace.openTextDocument = async () => doc;
     const viewer = { _edit:s, _post:message => posts.push(message), _applyReaderEdit:async () => { writes++; } };
@@ -1073,6 +1881,45 @@ test('stale native card operations cannot overwrite external changes or later sa
     assert.equal(await TexViewer.prototype._applyEditChangeNow.call(viewer, s, 'Old draft'), false);
     assert.equal(writes, 0);
     assert.equal(s.lastText, source);
+    }
+});
+
+test('rapid mini-editor inputs reach the source in order before Esc closes either engine session', async () => {
+    for (const native of [false, true]) {
+        let text = 'abc', release;
+        const posts = [];
+        const doc = { uri: { fsPath: '/paper.tex' }, positionAt: n => new NativePosition(0, n),
+            getText: range => range ? text.slice(range.start.character, range.end.character) : text };
+        const gate = new Promise(resolve => { release = resolve; });
+        stub.workspace.openTextDocument = async () => { await gate; return doc; };
+        stub.WorkspaceEdit = class { replace(uri, range, value) { this.range = range; this.value = value; } };
+        const s = { id: 1, native, file: doc.uri.fsPath, startOffset: 0, endOffset: 3, lastText: text };
+        const viewer = Object.create(TexViewer.prototype);
+        Object.assign(viewer, { _edit: s, _rememberEditState() {}, _post: m => posts.push(m),
+            _onEditCaret: async () => {}, _applyReaderEdit: async (_, edit) => {
+                const start = edit.range.start.character, end = edit.range.end.character;
+                text = text.slice(0, start) + edit.value + text.slice(end);
+                viewer._onEditDocChange({ document: doc,
+                    contentChanges: [{ rangeOffset: start, rangeLength: end - start, text: edit.value }] });
+                return true;
+            } });
+        const work = [];
+        let before = text;
+        for (const after of ['abcd', 'abcde', 'abcd', 'abcdf']) {
+            work.push(viewer._applyEditChange({ editId: s.id, text: after, beforeText: before,
+                caret: { start: after.length, end: after.length } }));
+            before = after;
+        }
+        const closed = viewer._closeEditSession({ editId: s.id });
+        assert.equal(viewer._edit, s, 'closing waits for the document writes');
+        release();
+        assert.ok((await Promise.all(work)).every(Boolean));
+        await closed;
+        assert.equal(text, 'abcdf');
+        assert.equal(s.endOffset, 5);
+        assert.equal(viewer._edit, null);
+        assert.equal(posts.length, 0, 'no echo, conflict or failure from our own rapid edits');
+    }
 });
 
 test('native card writes are rejected if their session closes during document opening', async () => {
@@ -1126,7 +1973,8 @@ test('native canvas reuse requires matching page identities, scale and display d
 });
 
 
-test('native CRLF card edits and bidirectional selections use textarea offsets', async () => {
+test('both modes use textarea offsets for CRLF card edits and bidirectional selections', async () => {
+    for (const native of [false, true]) {
     let source = 'aa\r\n😀bb\r\ncc'; const posts = []; let applied;
     const doc = { uri:{ fsPath:'/crlf.tex' }, eol:2,
         positionAt:n => new NativePosition(0,n), offsetAt:p => p.character,
@@ -1134,7 +1982,7 @@ test('native CRLF card edits and bidirectional selections use textarea offsets',
     stub.workspace.openTextDocument = async () => doc;
     stub.window.visibleTextEditors = [];
     stub.WorkspaceEdit = class { replace(uri, range, value) { this.range=range; this.value=value; } };
-    const card = { id:1, native:true, file:doc.uri.fsPath, startOffset:0, endOffset:source.length, lastText:source };
+    const card = { id:1, native, file:doc.uri.fsPath, startOffset:0, endOffset:source.length, lastText:source };
     let selection;
     const viewer = { panel:{}, _edit:card, _rememberEditState() {}, _post:m => posts.push(m),
         syncFromEditor:async e => { selection=e.selection; },
@@ -1170,6 +2018,7 @@ test('native CRLF card edits and bidirectional selections use textarea offsets',
     assert.equal(card.lastText,source);
     assert.equal(await TexViewer.prototype._applyEditChangeNow.call(viewer,card,text+'!',null,text),true);
     assert.equal(source,'aa\r\n😀X\r\nYbb\r\ncc!','full-block fallback preserves EOL');
+    }
 });
 
 function textSweepFixture() {
@@ -1349,36 +2198,22 @@ test('exported SyncTeX names project inputs by absolute path and is gzipped', ()
 });
 
 
-test('live TeX errors are marked on the page they were typeset on', () => {
+test('legacy live error messages cannot overwrite annotations covering failed and conventional builds', () => {
     const vm = require('node:vm');
     const js = fs.readFileSync(path.resolve(__dirname, '../../../client/tex-viewer.js'), 'utf8');
     const start = js.indexOf('function paintLiveErrors(');
-    const made = [], posted = [];
-    const node = () => { const el = { listeners: {}, removed: false, className: '',
-        addEventListener(type, fn) { el.listeners[type] = fn; }, remove() { el.removed = true; } }; return el; };
-    const wraps = new Map([[2, { appendChild(el) { made.push(el); } }]]);
-    const context = vm.createContext({
-        state: {}, vscode: { postMessage: m => posted.push(m) },
-        document: { createElement: () => node(), querySelectorAll: () => made.filter(el => !el.removed) },
-        pagesEl: () => ({ querySelector: sel => wraps.get(Number(/data-page="(\d+)"/.exec(sel)[1])) || null }),
-    });
+    const updates = [];
+    const context = vm.createContext({ state:{ errorAnnotationsOwned:true },
+        setErrorAnnotations:(items, owned) => updates.push({ items, owned }) });
     vm.runInContext(js.slice(start, js.indexOf('\n}\n', start) + 2), context);
-    context.paintLiveErrors([
-        { page: 2, file: '/p/paper.tex', name: 'paper.tex', line: 5, message: 'Undefined control sequence.' },
-        { page: 2, file: '/p/paper.tex', name: 'paper.tex', line: 6, message: 'Missing $ inserted.' },
-        { page: 5, file: '/p/paper.tex', name: 'paper.tex', line: 40, message: 'not on screen' },
-        { page: null, file: null, line: null, message: 'Emergency stop.' },
-    ]);
-    assert.equal(made.length, 1, 'one mark per page that is on screen');
-    assert.equal(made[0].className, 'live-error');
-    assert.equal(made[0].textContent, 'Undefined control sequence. — paper.tex:5 (+1 more on this page)');
-    made[0].listeners.click({ preventDefault() {}, stopPropagation() {} });
-    assert.deepEqual(JSON.parse(JSON.stringify(posted)), [{ type: 'openSourceLine', file: '/p/paper.tex', line: 5 }]);
-    assert.equal(context.state.liveErrors.length, 4, 'kept for a zoom to repaint');
-    // A build without errors clears the marks.
     context.paintLiveErrors([]);
-    assert.equal(made[0].removed, true);
-    assert.equal(context.state.liveErrors, null);
+    assert.equal(updates.length, 0, 'a later txdlBuilt does not clear mapped compiler errors');
+    context.state.errorAnnotationsOwned = false;
+    context.paintLiveErrors([{ page:2, file:'/p/paper.tex', line:5, message:'Undefined control sequence.' }]);
+    assert.equal(updates.length, 1);
+    assert.equal(updates[0].items[0].page, 2);
+    assert.equal(updates[0].items[0].messages[0], 'Undefined control sequence.');
+    assert.equal(updates[0].items[0].exact, false);
 });
 
 
@@ -1597,7 +2432,7 @@ test('the webview paints a fragment over the page shown: old paragraph cleared, 
         txdlPageBox: () => ({ width: 600, height: 800, widthBp: 300 * 72 / 72.27, heightBp: 400 * 72 / 72.27 }),
         visiblePages: () => [4], txdlShouldDefer: () => false, txdlRendererInstance: () => renderer,
     });
-    vm.runInContext(['fragmentGeometry', 'removeTxdlFragment', 'clearTxdlFragments', 'drawTxdlFragment'].map(fn).join('\n'), context);
+    vm.runInContext(['fragmentGeometry', 'removeTxdlFragment', 'clearTxdlFragments', 'selectionGeometryCurrent', 'invalidateSelectionGeometry', 'drawTxdlFragment'].map(fn).join('\n'), context);
     // 2 CSS px per pt at dpr 2: 4 device px per pt; the page origin one inch in.
     const placement = { page: 4, identity: null, dx: 10 * SP, dy: 100 * SP, clip: [0, 0, 200 * SP, 300 * SP],
         clear: [0, 80 * SP, 200 * SP, 120 * SP], below: [0, 120 * SP, 200 * SP, 300 * SP], shift: 12 * SP, lines: 4, old_lines: 3 };
@@ -1629,4 +2464,210 @@ test('the webview paints a fragment over the page shown: old paragraph cleared, 
     // The page itself replaces it.
     context.removeTxdlFragment(4);
     assert.equal(overlay.removed, true);
+});
+
+test('preview timeout preserves source diagnostics and retries only twice without another edit', async t => {
+    t.mock.timers.enable({ apis:['Date', 'setTimeout'], now:100000 });
+    const f = fixture();
+    let retries = 0;
+    const lane = { interactive:true, close:async () => {}, interactiveBuild:async () => ({ ok:false,
+        diagnostics:[{ severity:'error', producer:true, message:'the live preview made no progress for 20 s' }] }) };
+    try {
+        Object.assign(f.state, { nativeLane:lane, sourceRevision:1,
+            liveDiagnostics:{ revision:1, sequence:1, list:[{severity:'error', line:42, message:'real TeX error'}] } });
+        const prior = f.state.liveDiagnostics;
+        f.coordinator._schedulePreview = () => { retries++; };
+        for (let i = 0; i < 4; i++) {
+            await f.coordinator._runInteractive(f.state, lane, f.state.root, {});
+            t.mock.timers.tick(3000);
+        }
+        assert.equal(retries, 2, 'bounded retries cannot create a compilation loop');
+        assert.equal(f.state.liveDiagnostics, prior, 'a watchdog cannot replace a real TeX diagnostic');
+        assert.equal(f.state.livePreviewError.producer, true);
+        const posts = [];
+        TexViewer.prototype._postEngine.call({ coord:f.coordinator, context:{ globalState:{ get:() => true } },
+            _post:m => posts.push(m) }, f.state);
+        assert.equal(posts.at(-1).previewErrorKind, 'producer');
+        f.state.sourceRevision++;
+        await f.coordinator._runInteractive(f.state, lane, f.state.root, {});
+        t.mock.timers.tick(1000);
+        assert.equal(retries, 3, 'a fresh edit has its own recovery budget');
+        await f.coordinator._runInteractive(f.state, lane, f.state.root, {});
+        f.coordinator._clearNativeWork(f.state);
+        t.mock.timers.tick(3000);
+        assert.equal(retries, 3, 'closing or retiring a lane cancels recovery');
+    } finally { f.close(); }
+});
+
+test('late live failures and successes cannot replace a newer full compile for the same source', async () => {
+    for (const result of [
+        {ok:false, diagnostics:[{severity:'error', producer:true, message:'preview timed out'}]},
+        {ok:false, diagnostics:[{severity:'error', line:42, message:'older source error'}]},
+        {ok:true, diagnostics:[], report:{}}
+    ]) {
+        const f = fixture(); let release;
+        const lane = {close:async () => {}, interactiveBuild:() => new Promise(r => { release = r; })};
+        try {
+            Object.assign(f.state, { nativeLane:lane, sourceRevision:1, diagnosticsSequence:1 });
+            const run = f.coordinator._runInteractive(f.state, lane, f.state.root, {});
+            const full = { revision:1, sequence:2, list:[{severity:'error', line:99, message:'latest full compile'}] };
+            f.state.compileDiagnostics = full; f.state.diagnosticsSequence = 2;
+            f.state.livePreviewError = {revision:1, reason:'latest full compile'};
+            release(result); await run;
+            assert.equal(f.state.livePreviewError.reason, 'latest full compile');
+            assert.equal(f.state.compileDiagnostics, full);
+            assert.equal(f.state.liveDiagnostics, undefined);
+            assert.equal(f.coordinator._previewRecovery.size, 0);
+        } finally { f.close(); }
+    }
+});
+
+test('successful conventional compilation clears a stale native preview error', async () => {
+    const oldEngine = configuredMapEngine;
+    const f = fixture();
+    configuredMapEngine = 'off';
+    try {
+        f.state.livePreviewError = {revision:0, reason:'old preview timeout', producer:true};
+        await f.coordinator.build(f.doc, { quiet:true });
+        assert.equal(f.state.livePreviewError, null);
+    } finally { configuredMapEngine = oldEngine; f.close(); }
+});
+
+test('the preview badge distinguishes worker recovery from a source error', () => {
+    const vm = require('node:vm');
+    const source = fs.readFileSync(path.join(__dirname, '../../../client/tex-viewer.js'), 'utf8');
+    const paint = source.slice(source.indexOf('function paintPreviewFallbackBadge()'), source.indexOf('function closeProPanel()'));
+    for (const producer of [true, false]) {
+        const label = {}, head = {replaceChildren() {}}, reason = {};
+        const badge = {dataset:{}, setAttribute() {}, querySelector:() => label};
+        const state = {engine:{previewError:'no progress', previewErrorKind:producer ? 'producer' : 'source'}, txdlFallbacks:new Map()};
+        vm.runInNewContext(paint + '\npaintPreviewFallbackBadge();', {state, proActive:() => true,
+            visiblePages:() => [], el:id => id === 'probadge' ? badge : {querySelector:q => q === '.pro-headstate' ? head : reason}});
+        assert.match(badge.title, producer ? /Live preview: no progress/ : /Current source: no progress/);
+        assert.equal(badge.title.includes('earlier revision'), !producer,
+            'a producer timeout does not claim that the current PDF is obsolete');
+        assert.equal(reason.textContent, badge.title);
+    }
+});
+
+test('a whole-paper text sweep cannot grow the native mapping window', () => {
+    const f = fixture();
+    try {
+        f.state.generation = { pageCount:200 };
+        f.state.nativeLane = {close:async()=>{}};
+        f.state.map = { native:true, hasPage:() => false, materializedPages:Array.from({length:200},(_,i)=>i+1) };
+        const requested = [];
+        f.coordinator._scheduleNativeRefresh = () => requested.push(f.coordinator._nativeWindow(f.state));
+        for (let page=1;page<=200;page++) f.coordinator.noteRenderedPage(f.state.root,1,page);
+        assert.deepEqual(f.coordinator._nativeWindow(f.state),[1,2]);
+        assert.equal(requested.length,2);
+        f.coordinator.noteNativeViewport(f.state.root,90);
+        assert.deepEqual(f.coordinator._nativeWindow(f.state),[89,90,91]);
+        f.coordinator.noteNativeViewport(f.state.root,200);
+        assert.deepEqual(f.coordinator._nativeWindow(f.state),[199,200]);
+    } finally { f.close(); }
+});
+
+test('a live map with no saved viewport reads only the first reading window',async()=>{
+    const identities = new Map(Array.from({length:104},(_,i)=>[i+1,'page-'+(i+1)]));
+    let requested;
+    const lane = { liveView:async pages => {requested=pages;return null;} };
+    const viewer = {panel:{},root:'/paper/main.tex',coord:{roots:new Map()},
+        _liveMapReady:identities,_liveOverlays:identities,_postErrorAnnotations(){},_log(){}};
+    await TexViewer.prototype._buildLiveMap.call(viewer,lane);
+    assert.deepEqual(requested,[1,2,3,4]);
+    await TexViewer.prototype._buildLiveMap.call(viewer,lane,80);
+    assert.deepEqual(requested,[80], 'an explicit click reads its page ahead of neighbouring background maps');
+});
+
+test('opening and reopening a viewer returns while its first compile is pending',async()=>{
+    const root='/paper/main.tex',doc={uri:{fsPath:root}},state={generation:null,compiling:false};
+    let builds=0,finish;
+    const pending=new Promise(resolve=>{finish=resolve;});
+    const viewer={root,panel:{viewColumn:2,reveal(){}},_webviewReady:false,
+        coord:{roots:new Map([[root,state]]),rootFor:()=>root,build:()=>{builds++;state.compiling=true;return pending;}},
+        _rememberRoot(){},_restoreCursor(){},_postTheme(){},_postSourceDirty(){},_scheduleSourceSave(){},
+        refresh:async()=>{},_post(){}};
+    let timedOut=false;
+    const timer=setTimeout(()=>{timedOut=true;finish();},100);
+    try {
+        await TexViewer.prototype.open.call(viewer,doc);
+        await TexViewer.prototype.open.call(viewer,doc);
+        assert.equal(timedOut,false,'opening does not await the producer');
+        assert.equal(builds,1,'reopening does not launch a duplicate compile');
+    } finally {clearTimeout(timer);finish();}
+});
+
+test('coalesced viewer refreshes yield to input and compiler callbacks',async()=>{
+    const viewer={_refreshNow:async()=>{viewer.passes++;if(viewer.passes<10)viewer.refresh();},passes:0};
+    viewer.refresh=o=>TexViewer.prototype.refresh.call(viewer,o);
+    let passesAtCallback;
+    const callback=new Promise(resolve=>setImmediate(()=>{passesAtCallback=viewer.passes;resolve();}));
+    await viewer.refresh();await callback;
+    assert.equal(viewer.passes,10);
+    assert.equal(passesAtCallback,1,'reentrant notifications cannot starve the event loop');
+});
+
+test('a click on a distant PDF page materializes that window even with an available old map',async()=>{
+    const f=fixture();
+    try {
+        f.state.generation={pageCount:104};
+        f.state.nativeLane={close:async()=>{}};
+        f.state.map={native:true,available:true,hasPage:p=>p===1};
+        let requested;
+        f.coordinator._runNativeRefresh=async st=>{
+            requested=f.coordinator._nativeWindow(st);
+            st.map={native:true,available:true,hasPage:p=>requested.includes(p)};
+        };
+        assert.equal(await f.coordinator.ensureNativeMap(f.state,100,90),true);
+        assert.deepEqual(requested,[89,90,91]);
+    } finally {f.close();}
+});
+
+test('a distant review change locates one native window without compiling the paper',async()=>{
+    const root='/paper/main.tex',h={id:'change',startLine:2,endLine:3},source={
+        files:new Map([['main.tex',{text:'header\nchanged paragraph\n'}]]),
+        forward:async(file,line,column)=>{assert.deepEqual([file,line,column],['main.tex',2,0]);return {hits:[{item:{page:90}}]};}};
+    const lane={source,relative:()=> 'main.tex'},state={nativeLane:lane,map:{native:true,available:true},generation:{pdfHash:'pdf'}};
+    let refreshed=0;
+    const viewer=Object.assign(Object.create(TexViewer.prototype),{root,_openedPdfHash:'pdf',_review:{focused:new Map([[root,h.id]]),refresh:async()=>{refreshed++;}},
+        coord:{roots:new Map([[root,state]]),noteNativeViewport:(r,p)=>{assert.deepEqual([r,p],[root,90]);},
+            ensureNativeMap:async(st,timeout,page)=>{assert.equal(st,state);assert.equal(page,90);return true;},
+            build:()=>{throw Error('a mapping request cannot compile');}}});
+    assert.equal(await TexViewer.prototype.ensureReviewPlacement.call(viewer,root,h),true);
+    assert.equal(refreshed,1);
+    source.forward=async()=>{state.sourceAhead=true;return {hits:[{item:{page:91}}]};};
+    assert.equal(await TexViewer.prototype.ensureReviewPlacement.call(viewer,root,h),false);
+    assert.equal(refreshed,1,'a changed source cannot publish an old placement');
+});
+
+
+test('missing runtime stays silent before a paper-engine compatibility warning can run', async () => {
+    const f = fixture(), warningCount = warnings.length, noticeCount = notices.length, starts = constructorCalls;
+    installed = false;
+    fs.writeFileSync(f.state.root, '% !TEX program = pdflatex\n\\documentclass{article}');
+    try {
+        await f.coordinator.build(f.doc, { quiet:true });
+        assert.equal(constructorCalls, starts);
+        assert.equal(warnings.length, warningCount);assert.equal(notices.length, noticeCount);
+        assert.ok(f.state.generation.ok);assert.ok(!f.state.lastError);
+        const posts = [];
+        TexViewer.prototype._postEngine.call({coord:f.coordinator,_post:m=>posts.push(m)},
+            {...f.state,generation:{runner:'wlatex'},nativeOff:'old compatibility warning'});
+        assert.equal(posts.at(-1).state,null,'old native output cannot advertise absent Pro');
+    } finally { installed = true; f.close(); }
+});
+
+
+test('hiding unavailable Pro also dismisses an already open introduction', () => {
+    const vm=require('node:vm');
+    const source=fs.readFileSync(path.join(__dirname,'../../../client/tex-viewer.js'),'utf8');
+    const code=source.slice(source.indexOf('function setEngineBadge('),source.indexOf('function paintPreviewFallbackBadge('));
+    const badge={hidden:false},panel={hidden:false},intro={hidden:false};
+    const state={engine:{state:'disabled'}};
+    vm.runInNewContext(code+'\nsetEngineBadge({state:null});', {state,
+        el:id=>({probadge:badge,propanel:panel,prointro:intro})[id],
+        proActive:()=>false,closeProPanel:()=>{panel.hidden=true;}});
+    assert.equal(badge.hidden,true);assert.equal(panel.hidden,true);assert.equal(intro.hidden,true);
+    assert.equal(state.engine,null);
 });

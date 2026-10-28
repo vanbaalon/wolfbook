@@ -308,10 +308,12 @@ function renderedGlyphs(items, bandBp = 4, symbolFonts = null) {
         if (!marks.length) continue;
         const per = (it.w || 0) / Math.max(1, chars.length);
         for (const idx of marks) {
+            const measured = it.charBoxes?.[idx];
             glyphs.push({
                 key: keyOf(chars[idx], symbolic), ch: chars[idx],
-                page: it.page, x: (it.x || 0) + idx * per, y: it.y,
-                w: Math.max(per, 0.5), h: it.h, font: it.font,
+                page: it.page, x: measured?.x ?? ((it.x || 0) + idx * per), y: it.y,
+                w: Math.max(measured?.w ?? per, 0.5), h: it.h, font: it.font,
+                ...(it.inkY != null ? { inkY:it.inkY, inkH:it.inkH } : {}),
                 baseline: it.baseline != null ? it.baseline : (it.y + it.h),
             });
         }
@@ -651,14 +653,122 @@ function orderLine(items) {
  * @param {string[]} srcKeys
  * @param {string[]} renKeys
  * @param {{score?:(a:string,b:string)=>number, gap?:number,
- *          pair?:(a:string,b:string)=>boolean}} [opts]
+ *          pair?:(a:string,b:string)=>boolean, freeRenderedEnds?:boolean}} [opts]
  *   `score` ranks a pairing, `gap` is the cost of skipping one side, and `pair`
  *   decides whether a diagonal step counts as a correspondence at all.
  * @returns {{srcToRen:Int32Array, renToSrc:Int32Array, matched:number}}
  *   index arrays, -1 where nothing corresponds.
  */
+// A full-paper diff must never allocate a paper-sized Cartesian product in
+// the extension host. Keep the weighted glyph aligner for small objects; large
+// inputs use exact snakes, then unique anchors and bounded local alignments.
+const MAX_ALIGN_CELLS = 1000000;
+
+function alignLarge(A, B, opts, budget) {
+    const srcToRen = new Int32Array(A.length).fill(-1);
+    const renToSrc = new Int32Array(B.length).fill(-1);
+    let matched = 0, work = 0;
+    const put = (i, j) => { srcToRen[i] = j; renToSrc[j] = i; matched++; };
+    const equal = (i, j) => A[i] === B[j] &&
+        (!opts.pair || opts.pair(A[i], B[j])) &&
+        (!opts.srcLevels || !opts.renLevels || opts.srcLevels[i] === opts.renLevels[j]);
+    // Large preview searches need semi-global scoring. Decline rather than
+    // invent a precise match from a global approximation of a broad PDF region.
+    if (opts.freeRenderedEnds) return { srcToRen, renToSrc, matched, limited: true, work };
+    let a0 = 0, b0 = 0, a1 = A.length, b1 = B.length;
+    while (a0 < a1 && b0 < b1 && equal(a0, b0)) { put(a0++, b0++); }
+    while (a1 > a0 && b1 > b0 && equal(a1 - 1, b1 - 1)) { put(--a1, --b1); }
+    const n = a1 - a0, m = b1 - b0;
+    if (!n || !m) return { srcToRen, renToSrc, matched, limited: true, work };
+
+    // Myers keeps widely separated small edits linear in document length.
+    // Bound both snakes and frontier steps; an unrelated rewrite cannot turn
+    // this fallback into another quadratic loop. Trace memory is bounded too.
+    let v = new Map([[1, 0]]);
+    const trace = [];
+    let done = -1;
+    search: for (let d = 0; d <= Math.min(n + m, 512); d++) {
+        trace.push(v);
+        const next = new Map();
+        for (let k = -d; k <= d; k += 2) {
+            if (++work > budget) break search;
+            const down = v.get(k + 1) ?? -Infinity;
+            const across = v.get(k - 1) ?? -Infinity;
+            let x = (k === -d || (k !== d && across < down)) ? down : across + 1;
+            let y = x - k;
+            while (x < n && y < m && equal(a0 + x, b0 + y)) {
+                if (++work > budget) break search;
+                x++; y++;
+            }
+            next.set(k, x);
+            if (x >= n && y >= m) { done = d; break search; }
+        }
+        v = next;
+    }
+    if (done >= 0) {
+        let x = n, y = m;
+        for (let d = done; d >= 0; d--) {
+            const before = trace[d], k = x - y;
+            const prevK = (k === -d || (k !== d &&
+                (before.get(k - 1) ?? -Infinity) < (before.get(k + 1) ?? -Infinity))) ? k + 1 : k - 1;
+            const prevX = before.get(prevK) ?? 0, prevY = prevX - prevK;
+            while (x > prevX && y > prevY) { put(a0 + --x, b0 + --y); }
+            x = prevX; y = prevY;
+        }
+        return { srcToRen, renToSrc, matched, limited: true, work };
+    }
+
+    // A large rewrite: pair only ordered unique keys, with the existing
+    // weighted scorer in gaps that fit the remaining total work budget.
+    const unique = (keys, lo, hi) => {
+        const out = new Map();
+        for (let i = lo; i < hi; i++) out.set(keys[i], out.has(keys[i]) ? -1 : i);
+        return out;
+    };
+    const au = unique(A, a0, a1), bu = unique(B, b0, b1), candidates = [];
+    for (const [key, i] of au) {
+        const j = bu.get(key);
+        if (i >= 0 && j >= 0 && key !== WILD && equal(i, j)) candidates.push([i, j]);
+    }
+    const tails = [], links = new Int32Array(candidates.length).fill(-1);
+    for (let c = 0; c < candidates.length; c++) {
+        let lo = 0, hi = tails.length;
+        while (lo < hi) { const mid = (lo + hi) >>> 1; if (candidates[tails[mid]][1] < candidates[c][1]) lo = mid + 1; else hi = mid; }
+        if (lo) links[c] = tails[lo - 1];
+        tails[lo] = c;
+    }
+    const anchors = [];
+    for (let c = tails.length ? tails[tails.length - 1] : -1; c >= 0; c = links[c]) anchors.push(candidates[c]);
+    anchors.reverse();
+    let ai = a0, bi = b0;
+    for (const [endA, endB] of [...anchors, [a1, b1]]) {
+        while (ai < endA && bi < endB && equal(ai, bi)) { put(ai++, bi++); }
+        let ea = endA, eb = endB;
+        while (ea > ai && eb > bi && equal(ea - 1, eb - 1)) { put(--ea, --eb); }
+        const cells = (ea - ai + 1) * (eb - bi + 1);
+        if (ea > ai && eb > bi && cells <= budget - work) {
+            const local = align(A.slice(ai, ea), B.slice(bi, eb), {
+                ...opts, maxCells: budget - work,
+                srcLevels: opts.srcLevels?.slice(ai, ea), renLevels: opts.renLevels?.slice(bi, eb),
+                score: opts.score ? (a, b, i, j) => opts.score(a, b, ai + i, bi + j) : undefined,
+            });
+            work += cells;
+            for (let i = 0; i < local.srcToRen.length; i++) if (local.srcToRen[i] >= 0) {
+                const j = bi + local.srcToRen[i];
+                srcToRen[ai + i] = j; renToSrc[j] = ai + i;
+                if (A[ai + i] === B[j]) matched++;
+            }
+        }
+        if (endA < a1) put(endA, endB);
+        ai = endA + 1; bi = endB + 1;
+    }
+    return { srcToRen, renToSrc, matched, limited: true, work };
+}
+
 function align(srcKeys, renKeys, opts = {}) {
     const n = srcKeys.length; const m = renKeys.length;
+    const budget = Math.min(MAX_ALIGN_CELLS, Math.max(1, Number(opts.maxCells) || MAX_ALIGN_CELLS));
+    if ((n + 1) * (m + 1) > budget) return alignLarge(srcKeys, renKeys, opts, budget);
     const srcToRen = new Int32Array(n).fill(-1);
     const renToSrc = new Int32Array(m).fill(-1);
     if (!n || !m) return { srcToRen, renToSrc, matched: 0 };
@@ -700,7 +810,10 @@ function align(srcKeys, renKeys, opts = {}) {
     const back = new Uint8Array((n + 1) * W);
     let prev = new Int32Array(W);
     let cur = new Int32Array(W);
-    for (let j = 1; j <= m; j++) { prev[j] = j * GAP; back[j] = 2; }
+    // A preview is one fragment inside a broader SyncTeX region. Free outer
+    // PDF gaps favour one contiguous occurrence over matching its prefix in
+    // an earlier paragraph and its suffix in the equation below it.
+    for (let j = 1; j <= m; j++) { prev[j] = opts.freeRenderedEnds ? 0 : j * GAP; back[j] = 2; }
     for (let i = 1; i <= n; i++) {
         cur[0] = i * GAP;
         back[i * W] = 1;
@@ -719,6 +832,9 @@ function align(srcKeys, renKeys, opts = {}) {
     }
 
     let i = n; let j = m; let matched = 0;
+    if (opts.freeRenderedEnds) {
+        for (let k = m - 1; k >= 0; k--) if (prev[k] > prev[j]) j = k;
+    }
     while (i > 0 && j > 0) {
         const move = back[i * W + j];
         if (move === 0) {
@@ -743,12 +859,13 @@ function align(srcKeys, renKeys, opts = {}) {
  */
 function buildObjectMap(o = {}) {
     const tokens = sourceTokens(o);
-    const glyphs = renderedGlyphs(o.items, o.bandBp,
+    const glyphs = o.glyphs || renderedGlyphs(o.items, o.bandBp,
         o.symbolFonts || symbolicFonts(o.items));
     const { srcToRen, renToSrc, matched } = align(
         tokens.map(t => t.key), glyphs.map(g => g.key), {
             srcLevels: tokens.map(t => t.level || 'base'),
             renLevels: glyphs.map(g => g.level || 'base'),
+            ...o.alignOptions,
         });
     return {
         tokens,
@@ -948,8 +1065,61 @@ function caretInRange(amap, line, column, range) {
     return { ...edge(last, 1), at: 'after', offset: column - first.startCol };
 }
 
+// Ignore generated equation tags when aligning printed ink with source.
+const TAG_TEXT = /^[([]?[0-9]+[A-Za-z.]*[)\]]?$/;
+function dropEquationTags(items) {
+    const rows = new Map();
+    for (const it of items) {
+        const k = `${it.page}|${Math.round((it.baseline ?? it.y) * 2) / 2}`;
+        if (!rows.has(k)) rows.set(k, []);
+        rows.get(k).push(it);
+    }
+    for (const row of rows.values()) row.sort((a, b) => a.x - b.x);
+    // The object's own ink, so a row that is NOTHING BUT a tag can be told from
+    // a row that happens to start with a number. A display whose whole body is
+    // a fraction puts its number on the axis, alone on a baseline of its own —
+    // there is no gap to measure there, only the fact that it sits to the right
+    // of everything else the object printed.
+    //
+    // Measured per ROW, not per item: pdf.js may report `(18)` as three items,
+    // and `(` on its own is not tag-shaped, so an item-wise test counts the
+    // tag's own parenthesis as body and the tag then looks flush with it.
+    let bodyRight = -Infinity;
+    for (const row of rows.values()) {
+        const whole = row.map(r => r.str).join('').trim();
+        if (!whole || TAG_TEXT.test(whole)) continue;
+        for (const it of row) bodyRight = Math.max(bodyRight, it.x + (it.w || 0));
+    }
+
+    const drop = new Set();
+    for (const row of rows.values()) {
+        if (row.length < 2) {
+            const t = String(row[0] && row[0].str || '').trim();
+            if (t && TAG_TEXT.test(t) && row[0].x > bodyRight + (row[0].h || 10)) drop.add(row[0]);
+            continue;
+        }
+        const whole = row.map(r => r.str).join('').trim();
+        if (TAG_TEXT.test(whole) && row[0].x > bodyRight + (row[0].h || 10)) {
+            for (const r of row) drop.add(r);
+            continue;
+        }
+        const h = Math.max(...row.map(r => r.h || 0)) || 10;
+        // Walk in from the right while the ink still reads as a tag.
+        let cut = row.length;
+        for (let i = row.length - 1; i > 0; i--) {
+            const gap = row[i].x - (row[i - 1].x + (row[i - 1].w || 0));
+            const text = row.slice(i, cut).map(r => r.str).join('').trim();
+            if (gap > h * 3 && TAG_TEXT.test(text)) { for (let k = i; k < cut; k++) drop.add(row[k]); break; }
+            if (gap > h * 3) break;                 // a wide gap that is not a tag
+        }
+    }
+    if (!drop.size) return items;
+    for (let i = items.length - 1; i >= 0; i--) if (drop.has(items[i])) items.splice(i, 1);
+    return items;
+}
+
 module.exports = {
-    PRECISION, sourceTokens, renderedGlyphs, align, buildObjectMap,
+    dropEquationTags, PRECISION, sourceTokens, renderedGlyphs, align, buildObjectMap,
     glyphAtPoint, tokenAt, groupAround, keyOf, symbolicFonts, WILD,
     caretInRange,
 };

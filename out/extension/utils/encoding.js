@@ -85,8 +85,9 @@ function setBoxToLatexProvider(fn) { _boxToLatexProvider = fn; }
  * Handles:
  *  - *STR* prefix: kernel-tagged string value — strip prefix, decode WSTP escaping
  *  - BoxData[InterpretationBox["display", expr, ...]]: extract second arg (the expr text)
- *  - BoxData[...]: opaque typeset formula — return '[formula]' placeholder
- *  - *SVG* / *HTML* / *WBP*: binary/rich content — return descriptive placeholder
+ *  - BoxData[...]: convert to LaTeX, retaining readable boxes if conversion is unavailable
+ *  - *SVG* / *HTML*: binary/rich content — return descriptive placeholder
+ *  - *WBP*: clean WBPrint content using the same rules
  *  - Multi-arg Print: args separated by ASCII File Separator (\x1c) — process each part
  *  - Plain text: decode WSTP octal byte sequences and backslash doubling
  *  - \\012: newline escape from WSTP TextPacket
@@ -94,7 +95,7 @@ function setBoxToLatexProvider(fn) { _boxToLatexProvider = fn; }
  * @returns {string}
  */
 function cleanPrintLine(rawLine) {
-    const s = rawLine.replace(/\\012/g, '\n');
+    const s = rawLine.replace(/^\*WBP\*/, '').replace(/\\012/g, '\n').replace(/\\034/g, '\x1c');
     // Multi-arg Print separates args with ASCII File Separator (\x1c)
     const parts = s.split('\x1c');
     const cleaned = parts.map(t => {
@@ -104,6 +105,7 @@ function cleanPrintLine(rawLine) {
         }
         // BoxData[...]: try the injected BTL provider first (converts boxes → LaTeX via C++ addon)
         if (t.startsWith('BoxData[')) {
+            t = t.trimEnd(); // TextPackets can carry a final newline after the box.
             if (_boxToLatexProvider) {
                 try {
                     const latex = _boxToLatexProvider(t);
@@ -124,16 +126,24 @@ function cleanPrintLine(rawLine) {
                     if (m) return decodeWstpText(m[1].trim());
                 }
             }
-            return '[formula]';
+            return decodeWstpText(t);
         }
         // Binary/rich content — not useful as plain text
         if (t.startsWith('*SVG*')) return '[graphics]';
         if (t.startsWith('*HTML*')) return '[info]';
-        if (t.startsWith('*WBP*')) return t.slice(5);
         // Plain text: decode WSTP octal byte sequences (\316\223 → Γ) and backslash doubling
         return decodeWstpText(t);
     });
     return cleaned.join('');
 }
 
-module.exports = { escapeHtml, decodeWolframOctal, decodeWstpText, escapeWL, cleanPrintLine, setBoxToLatexProvider };
+// Each TextPacket is a separate Print call. Preserve argument whitespace and
+// ensure calls stay separated even when the kernel omitted its final newline.
+function cleanPrintPackets(packets) {
+    return packets.map(packet => {
+        const text = cleanPrintLine(packet);
+        return text.endsWith('\n') ? text : text + '\n';
+    }).join('');
+}
+
+module.exports = { escapeHtml, decodeWolframOctal, decodeWstpText, escapeWL, cleanPrintLine, cleanPrintPackets, setBoxToLatexProvider };

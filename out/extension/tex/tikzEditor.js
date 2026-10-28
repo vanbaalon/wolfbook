@@ -103,6 +103,32 @@ function plan(op, texts) {
     };
 
     switch (op.op) {
+    case 'locate': {
+        if(stmts.length!==1)return fail('select one element');
+        return {edits:{},select:null,reveal:{file,start:stmts[0].start,end:stmts[0].start},error:null};
+    }
+    case 'source': {
+        if(stmts.length!==1 || typeof op.text!=='string')return fail('select one element to edit its source');
+        const replacement=op.text.trim().replace(/\r?\n/g,text.includes('\r\n') ? '\r\n' : '\n');
+        if(!replacement)return fail('source is empty; use Delete to remove an element');
+        const mask=require('./texBalance').commentMask(replacement);let depth=0;
+        for(let i=0;i<replacement.length;i++) {
+            if(mask[i])continue;
+            if(replacement[i]==='\\'){i++;continue;}
+            if(replacement[i]==='{')depth++;
+            if(replacement[i]==='}' && --depth<0)return fail('source has an unmatched closing brace');
+        }
+        if(depth)return fail('source has an unclosed brace');
+        const prefix='\\begin{tikzpicture}\n';
+        const parsed=model.parsePicture(prefix+replacement+'\n\\end{tikzpicture}',0);
+        const changed=parsed?.statements;
+        if(changed?.length!==1 || changed[0].start!==prefix.length || changed[0].end!==prefix.length+replacement.length ||
+            parsed.bodyEnd!==prefix.length+replacement.length+1)
+            return fail('enter one complete TikZ statement (including its ending semicolon)');
+        const s=stmts[0];
+        if(replacement!==s.text)add(file,[{start:s.start,end:s.end,text:replacement}]);
+        return {edits,select:{file,start:s.start},source:{file,start:s.start,text:replacement},noChange:replacement===s.text,error:null};
+    }
     case 'add': {
         const item = palette.byId.get(op.item);
         if (!item || item.kind === 'edge') return fail('unknown tool');

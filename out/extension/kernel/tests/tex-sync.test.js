@@ -439,7 +439,11 @@ test('UNSAVED PAPER AUTO-SAVES THREE SECONDS AFTER THE LAST CHANGE', async () =>
     const oldDocs = stub.workspace.textDocuments;
     let saves = 0;
     const dirty = { ...makeDoc(), isDirty: true };
-    dirty.save = async () => { saves++; dirty.isDirty = false; return true; };
+    dirty.save = async () => {
+        assert.strictEqual(v.isAutomaticSourceSave(dirty), true,
+            'the save listener can distinguish idle persistence from an explicit save');
+        saves++; dirty.isDirty = false; return true;
+    };
     stub.workspace.textDocuments = [dirty];
 
     const timers = [];
@@ -461,6 +465,7 @@ test('UNSAVED PAPER AUTO-SAVES THREE SECONDS AFTER THE LAST CHANGE', async () =>
         assert.strictEqual(saves, 0, 'a superseded timer cannot save early');
         await timers[1].fn();
         assert.strictEqual(saves, 1, 'the latest idle timer saves the dirty paper');
+        assert.strictEqual(v.isAutomaticSourceSave(dirty), false, 'the automatic-save marker is cleared afterwards');
         assert.ok(v.posted.some(p => p.type === 'sourceDirty' && !p.dirty),
             'the red unsaved badge is cleared');
         assert.ok(!v.posted.some(p => p.type === 'status' && /^saved /.test(p.text)),
@@ -1667,6 +1672,130 @@ test('with the card open, an inverse click puts the caret INSIDE it', async () =
     }
 });
 
+test('right-click opens the selected fragment instead of resolving the pointer', async () => {
+    const oldOpen = stub.workspace.openTextDocument;
+    stub.workspace.onDidChangeTextDocument = () => ({ dispose() {} });
+    try {
+        for (const [from, to, direction] of [
+            [SRC.indexOf('wavefunction'), SRC.indexOf('worth') + 5, 'backward'],
+            [SRC.indexOf('\\bx', SRC.indexOf('\\[')), SRC.indexOf('\\bx', SRC.indexOf('\\[')) + 3, 'forward'],
+            [SRC.indexOf('wavefunction'), SRC.indexOf('argument.') + 9, 'forward'],
+            [SRC.indexOf('wavefunction'), SRC.indexOf('Then '), 'forward'],
+        ]) {
+            const mdoc = new MutableDoc(SRC, FILE);
+            stub.workspace.openTextDocument = async () => mdoc;
+            const v = makeViewer(null, null);
+            const start = mdoc.positionAt(from), end = mdoc.positionAt(to);
+            v._postSelection(v.coord.roots.get(FILE), mdoc,
+                direction === 'backward' ? new Selection(end, start) : new Selection(start, end), { keepRange:true });
+            const sourceSelection = v._lastSelection;
+            assert.ok(sourceSelection, 'the viewer has painted the picked fragment');
+            assert.strictEqual(sourceSelection.direction, direction, 'the picked fragment remembers its active end');
+            v.posted.length = 0;
+            v._resolvePoint = () => { throw new Error('selection must not resolve the right-click point'); };
+            v._jumpToSource = () => { throw new Error('selection must not jump the source caret'); };
+            await v._onMessage({ type:'editHere', preserveSelection:true, page:1, xBp:550, yTopBp:100 });
+            const open = v.posted.find(p => p.type === 'editOpen');
+            assert.ok(open, 'a source selection opens even in a margin');
+            assert.strictEqual(open.text.slice(open.caretStart, open.caretEnd), SRC.slice(from, to));
+            assert.strictEqual(open.caretDirection, direction);
+            assert.strictEqual(v._lastSelection, sourceSelection, 'the viewer selection survives');
+            assert.ok(!v.posted.some(p => p.type === 'editSelect'), 'no later click collapses the range');
+            if (to === SRC.indexOf('Then ')) assert.strictEqual(open.endLine, 8, 'column zero excludes the next block');
+        }
+    } finally { stub.workspace.openTextDocument = oldOpen; }
+});
+
+test('selection opened in the mini-editor uses LF offsets for CRLF source and UTF-16 characters', async () => {
+    const text = 'Before 😀 here.\r\n\r\nThen \\alpha after.';
+    const mdoc = new MutableDoc(text, FILE);
+    const oldOpen = stub.workspace.openTextDocument;
+    stub.workspace.openTextDocument = async () => mdoc;
+    try {
+        const v = makeViewer(null, null);
+        const from = text.indexOf('😀'), to = text.indexOf(' after.');
+        v._lastSelection = { file:FILE, documentVersion:mdoc.version,
+            start:mdoc.positionAt(from), end:mdoc.positionAt(to) };
+        await v._onMessage({ type:'editHere', preserveSelection:true, page:1, xBp:20, yTopBp:20 });
+        const open = v.posted.find(p => p.type === 'editOpen');
+        assert.ok(open);
+        assert.strictEqual(open.text.slice(open.caretStart, open.caretEnd), text.slice(from, to).replace(/\r\n/g, '\n'));
+    } finally { stub.workspace.openTextDocument = oldOpen; }
+});
+
+test('right-click retains an unchanged selected fragment through map replacement and metadata-only document versions', async () => {
+    const oldOpen=stub.workspace.openTextDocument;
+    try {
+        for (const mode of ['new-native-map','new-version','same-range-refresh']) {
+            const mdoc=new MutableDoc(SRC,FILE), v=makeViewer(null,null), st=v.coord.roots.get(FILE);
+            const from=SRC.indexOf('wavefunction'),to=SRC.indexOf('worth')+5;
+            v._postSelection(st,mdoc,new Selection(mdoc.positionAt(to),mdoc.positionAt(from)),{keepRange:true});
+            const selected=v._lastSelection;
+            if (mode === 'new-native-map') {
+                const map=Object.assign(st.map,{native:true,projectDir:require('path').dirname(FILE),
+                    view:{artifact:{pdf_hash:'same-pdf'}},source:{files:new Map([[require('path').basename(FILE),{text:SRC}]])}});
+                selected.nativeMap={...map,available:false};
+                st.map={...map}; v._openedGeneration=1;v._openedPdfHash='same-pdf';
+            }
+            if (mode === 'new-version') mdoc.version++;
+            stub.workspace.openTextDocument=async()=>{
+                if (mode === 'same-range-refresh') v._lastSelection={...selected};
+                return mdoc;
+            };
+            v.posted.length=0;
+            await v._onMessage({type:'editHere',preserveSelection:true,generation:1,page:1,xBp:550,yTopBp:100});
+            const opened=v.posted.find(m=>m.type === 'editOpen');
+            assert.ok(opened,mode+': unchanged source must open');
+            assert.equal(opened.text.slice(opened.caretStart,opened.caretEnd),SRC.slice(from,to));
+            assert.equal(opened.caretDirection,'backward');
+        }
+    } finally {stub.workspace.openTextDocument=oldOpen;}
+});
+
+test('a Pro selection remains available while its equivalent geometry refresh waits for the worker', async () => {
+    const v=makeViewer(null,null),mdoc=new MutableDoc(SRC,FILE),st=v.coord.roots.get(FILE);
+    const start=new Position(4,16),end=new Position(4,28),sourceSelection={file:FILE,sourceText:SRC,
+        documentVersion:mdoc.version,start,end};
+    v._lastSelection=sourceSelection;st.root=FILE;
+    let release,ready;
+    const pending=new Promise(r=>{release=r;});
+    const started=new Promise(r=>{ready=r;});
+    Object.assign(st.map,{native:true,projectDir:require('path').dirname(FILE),view:{artifact:{pdf_hash:'pdf'}},
+        source:{files:new Map([[require('path').basename(FILE),{text:SRC}]])},
+        forwardRange:async()=>{ready();await pending;return [{page:1,x:100,y:100,w:80,h:12}];},forwardAt:async()=>null});
+    v._openedPdfHash='pdf';v._nativeCursorRequest=10;
+    const editor={document:mdoc,selection:new Selection(start,end)};
+    const syncing=v._syncNativeCursor(st,editor,{preserveView:true},10);
+    try {
+        await Promise.race([started,new Promise((_,reject)=>setTimeout(()=>reject(new Error('native refresh never requested geometry')),1000))]);
+        assert.equal(v._lastSelection,sourceSelection,'the painted range remains actionable during refresh');
+    } finally { release();await syncing; }
+    assert.ok(v._lastSelection);
+    assert.equal(v._lastSelection.sourceText,SRC,'the refreshed range has an independent source snapshot');
+});
+
+test('right-click does not substitute a click or a newer selection for a stale selected fragment', async () => {
+    const oldOpen = stub.workspace.openTextDocument;
+    try {
+        for (const mode of ['missing', 'version', 'changed-during-open', 'changed-source']) {
+            const mdoc = new MutableDoc(SRC, FILE);
+            const v = makeViewer(null, null);
+            const span = { file:FILE, documentVersion:mdoc.version, start:new Position(4,3), end:new Position(4,9) };
+            v._lastSelection = mode === 'missing' ? null : span;
+            if (mode === 'version') mdoc.version++;
+            if (mode === 'changed-source') { span.sourceText=SRC;mdoc.applyChange(0,0,'External edit.'); }
+            stub.workspace.openTextDocument = async () => {
+                if (mode === 'changed-during-open') v._lastSelection = { ...span,end:new Position(4,12) };
+                return mdoc;
+            };
+            v._jumpToSource = () => { throw new Error('stale selection must not fall through to cursor jump'); };
+            await v._onMessage({ type:'editHere', preserveSelection:true, page:1, xBp:20, yTopBp:20 });
+            assert.ok(!v.posted.some(p => p.type === 'editOpen'), mode);
+            assert.ok(v.posted.some(p => p.type === 'status' && /selection changed/i.test(p.text)), mode);
+        }
+    } finally { stub.workspace.openTextDocument = oldOpen; }
+});
+
 test('a right-click ALSO puts the caret where it was clicked', async () => {
     // Opening the block is only half of it: a right-click is still a click, so
     // the caret belongs on the symbol under the pointer — in the editor, and in
@@ -1686,13 +1815,162 @@ test('a right-click ALSO puts the caret where it was clicked', async () => {
         const eo = v.posted.find(p => p.type === 'editOpen');
         assert.ok(eo, 'the card opened');
         assert.ok(selected, 'and the caret moved');
-        const got = LINES[6].slice(selected.start.character, selected.end.character);
-        assert.strictEqual(got, '\\bx', `to the clicked symbol, got ${JSON.stringify(got)}`);
+        assert.ok(selected.isEmpty, 'right-click opens with an insertion caret, not a selected command');
+        assert.strictEqual(selected.start.character, revealed.start.character, 'before the clicked occurrence of the symbol');
+        assert.strictEqual(LINES[6].slice(selected.start.character, selected.start.character + 3), '\\bx');
         const sel = v.posted.find(p => p.type === 'editSelect');
         assert.ok(sel, 'and the card was told where, so its caret lands there too');
         assert.strictEqual(eo.text.slice(sel.start, sel.end), '\\bx');
+        assert.strictEqual(sel.caret, sel.start, 'the card receives the collapsed math caret');
     } finally {
         stub.workspace.openTextDocument = oldOpen;
+    }
+});
+
+test('right-click without Pro places a caret inside prose even when ordinary clicks select words', async () => {
+    const mdoc = new MutableDoc(SRC, FILE);
+    const oldOpen = stub.workspace.openTextDocument;
+    stub.workspace.onDidChangeTextDocument = () => ({ dispose() {} });
+    stub.workspace.openTextDocument = async () => mdoc;
+    try {
+        const v = makeViewer({ file:FILE, line:5, flag:FLAG.FRESH }, { file:FILE, line:5, dx:2 });
+        v._inverseClickCaret = () => false;
+        await v._onMessage({ type:'editHere', page:1, xBp:100, yTopBp:500,
+            word:'wavefunction', rowFraction:0.25 });
+        const open = v.posted.find(p => p.type === 'editOpen');
+        const select = v.posted.find(p => p.type === 'editSelect');
+        assert.ok(open && select, 'the opened card receives the click position');
+        const at = LINES[4].indexOf('wavefunction') + 3;
+        assert.ok(selected.isEmpty, 'the source editor has a collapsed caret');
+        assert.strictEqual(selected.start.character, at, 'PDF word fraction supplies the clicked character without a glyph map');
+        assert.strictEqual(select.caret, at, 'the mini-editor receives the same character');
+        assert.strictEqual(select.focus, true, 'typing starts in the mini-editor');
+    } finally { stub.workspace.openTextDocument = oldOpen; }
+});
+
+test('review previews use full agreed and dirty project snapshots without invoking the live viewer build', async () => {
+    const v = makeViewer(null), included = '/paper/body.tex';
+    const st = v.coord.roots.get(FILE);
+    st.files = [FILE, included]; st.sourceRevision = 2;
+    st.generation.engine = 'xelatex';
+    const hunk = { id:'h', ourText:'New body', theirText:'Old body', verb:'change',
+        ourRange:{ startLine:1, endLine:2 }, theirRange:{ startLine:1, endLine:2 } };
+    const session = { file:included, baseText:'Old body', _lastText:'New body', hunks:[hunk] };
+    const rootSession = { file:FILE, baseText:'Old complete preamble and document', _lastText:SRC, hunks:[] };
+    v._review = { sessionFor:file => file === included ? session : file === FILE ? rootSession : null };
+    v._textOf = file => file === FILE ? SRC : 'New body';
+    v.coord.liveOverlay = () => new Map([[FILE, SRC + '\n% dirty header']]);
+    v.coord.build = () => { throw new Error('must not build the live paper'); };
+    let options, cancelled = 0;
+    v._reviewRenderer = { cancel:() => cancelled++, render:async o => {
+        options = o;
+        return { before:{ pdfBase64:'old', crops:[], detail:{ sentinel:'private' } }, after:{ empty:true } };
+    } };
+    const revision = v._reviewRenderRevision(included);
+    await v._onMessage({ type:'reviewRender', requestId:1, id:'h', file:included, revision });
+    assert.strictEqual(options.root, FILE, 'the actual root, not the included file, is compiled');
+    assert.strictEqual(options.file, included);
+    assert.strictEqual(options.engine, 'xelatex', 'the current paper engine is preserved');
+    assert.strictEqual(options.before.get(FILE), rootSession.baseText, 'the baseline headers are preserved');
+    assert.strictEqual(options.before.get(included), 'Old body');
+    assert.strictEqual(options.after.get(FILE), SRC + '\n% dirty header', 'unsaved headers are included');
+    assert.strictEqual(options.after.get(included), 'New body');
+    const reply = v.posted.find(p => p.type === 'reviewRendered');
+    assert.ok(reply && reply.before.pdfBase64 === 'old');
+    assert.strictEqual(reply.before.detail, undefined, 'source maps and snapshots remain in the host');
+    rootSession.baseText += '\n% accepted shared header';
+    assert.notStrictEqual(v._reviewRenderRevision(included), revision,
+        'accepting changes to another file’s header invalidates this included-file preview');
+    v.posted.length = 0;
+    await v._renderReview({ requestId:2, id:'h', file:included, revision:'old-revision' });
+    assert.strictEqual(v.posted.length, 0, 'an obsolete review cannot ask for a preview');
+    assert.equal(cancelled, 0, 'selection and obsolete requests leave shared snapshot work running');
+});
+
+test('review warms only the selected older version, shares focus changes, and yields to typing', async () => {
+    const v = makeViewer(null), st = v.coord.roots.get(FILE);
+    st.files = [FILE]; st.sourceRevision = 1;
+    const hunks = [{ id:'a' }, { id:'b' }, { id:'c' }];
+    const session = { file:FILE, baseText:SRC, _lastText:SRC, hunks };
+    v._review = { sessionFor:() => session }; v._textOf = () => SRC;
+    let calls = 0, cancelled = 0;
+    v._reviewRenderer = { cancel:() => cancelled++, preload:async (options, all) => {
+        calls++;
+        assert.deepStrictEqual(all, [hunks[0]]);
+        assert.equal(options.skipAfter,true,'current ink never requires background recompilation');
+        assert.ok(options.isCurrent());
+        return [{ pdfId:'shared-before', pdfBase64:'PDF', pages:[1,2] }];
+    } };
+    const payload = { file:FILE, pending:3, renderRevision:v._reviewRenderRevision(FILE), focus:'a' };
+    try {
+        v._scheduleReviewPreload(payload);
+        await new Promise(resolve => setTimeout(resolve, 350));
+        assert.equal(calls, 1);
+        assert.ok(v.posted.some(p => p.type === 'reviewPreloaded' && p.pdfs[0].pages.length === 2));
+        v._scheduleReviewPreload({ ...payload, focus:'b' });
+        assert.equal(cancelled, 1, 'focusing another correction does not cancel the build');
+        st.sourceRevision++; st.lastEditAt = Date.now();
+        v._scheduleReviewPreload({ ...payload, renderRevision:v._reviewRenderRevision(FILE) });
+        await new Promise(resolve => setTimeout(resolve, 350));
+        assert.equal(calls, 1, 'background work waits while typing');
+        assert.equal(cancelled, 2, 'source changes cancel the previous revision');
+        v._scheduleReviewPreload(null);
+        assert.equal(v._reviewPreloadKey, null, 'closing review stops scheduled work');
+    } finally { clearTimeout(v._reviewPreloadTimer); }
+});
+
+test('a rendered review response is discarded if source or paper changes during compilation', async () => {
+    for (const change of [v => v.coord.roots.get(FILE).sourceRevision++, v => { v.root = '/paper/other.tex'; }]) {
+        const v = makeViewer(null), st = v.coord.roots.get(FILE);
+        st.files = [FILE]; st.sourceRevision = 1;
+        const hunk = { id:'h', ourRange:{ startLine:5,endLine:6 }, theirRange:{ startLine:5,endLine:6 } };
+        const session = { file:FILE, baseText:SRC, _lastText:SRC, hunks:[hunk] };
+        v._review = { sessionFor:() => session }; v._textOf = () => SRC;
+        let finish;
+        v._reviewRenderer = { cancel() {}, render:() => new Promise(resolve => { finish = resolve; }) };
+        const pending = v._renderReview({ requestId:1, id:'h', file:FILE, revision:v._reviewRenderRevision(FILE) });
+        assert.ok(finish);
+        change(v); finish({ before:{empty:true}, after:{empty:true} }); await pending;
+        assert.ok(!v.posted.some(p => p.type === 'reviewRendered'), 'old PDF cannot replace the current review');
+    }
+});
+
+test('review page underlines use exact Pro origins or measured PDF text and discard stale answers', async () => {
+    for (const native of [false,true]) {
+        const v = makeViewer(null), st = v.coord.roots.get(FILE);
+        v.shownGeneration = v._openedGeneration = 1; st.files = [FILE];
+        const hunk = { id:'ink-hunk', verb:'change', theirText:'The old result.', ourText:'The new result.',
+            ourRange:{ startLine:1,endLine:2 }, theirRange:{ startLine:1,endLine:2 },
+            rects:[{ page:1,x:10,y:10,w:200,h:10 }] };
+        const session = { file:FILE, baseText:hunk.theirText, _lastText:hunk.ourText, hunks:[hunk] };
+        v._review = { sessionFor:() => session }; v._textOf = () => session._lastText;
+        const request = { type:'reviewPageMap', requestId:1, id:hunk.id, file:FILE, generation:1,
+            revision:v._reviewRenderRevision(FILE), items:[{ page:1,str:hunk.ourText,x:10,y:10,baseline:20,w:75,h:10 }] };
+        let calls = 0;
+        if (native) st.map = { native:true, forwardRange:async (file, start, end) => {
+            calls++;
+            assert.deepStrictEqual(start, { line:1,column_utf16:4 });
+            assert.deepStrictEqual(end, { line:1,column_utf16:7 });
+            return [{page:1,x:30,y:10,w:15,h:10}];
+        } };
+        await v._onMessage(request);
+        const response = v.posted.find(p => p.type === 'reviewPageMarks');
+        assert.ok(response?.marks.length, 'the changed word is mapped');
+        assert.ok(response.marks.every(m => m.x >= 30 && m.x + m.w <= 45), 'unchanged text is excluded');
+        if (native) assert.strictEqual(calls, 1, 'the Pro map is used directly');
+        v.posted.length = 0;
+        await v._onMessage({ ...request, generation:0 });
+        await v._onMessage({ ...request, revision:'obsolete' });
+        assert.ok(!v.posted.some(p => p.type === 'reviewPageMarks'), 'stale pages and revisions are rejected');
+        if (native) {
+            let finish;
+            st.map.forwardRange = () => new Promise(resolve => { finish = resolve; });
+            const pending = v._onMessage(request);
+            assert.ok(finish);
+            st.sourceAhead = true;
+            finish([{page:1,x:30,y:10,w:15,h:10}]); await pending;
+            assert.ok(!v.posted.some(p => p.type === 'reviewPageMarks'), 'a source change during mapping discards the answer');
+        }
     }
 });
 
@@ -1935,7 +2213,7 @@ test('a healthy viewer is kept when a review change is opened', async () => {
     assert.strictEqual(v._viewerReloading, false);
 });
 
-test('a dead or stale viewer is recreated before a review change is focused', async () => {
+test('a dead PDF worker restarts in place before a review change is focused', async () => {
     const v = makeViewer(null, { file: FILE, line: 5, dx: 2 });
     v.shownGeneration = 8;
     v._openedGeneration = 8;
@@ -1944,6 +2222,8 @@ test('a dead or stale viewer is recreated before a review change is focused', as
         get: () => html, set: value => { html = value; }, configurable: true,
     });
     v._html = () => '<fresh viewer>';
+    let sends = 0;
+    v.refresh = async options => { assert.equal(options.force, true); sends++; };
     v.panel.webview.postMessage = (m) => {
         v.posted.push(m);
         if (m.type === 'viewerProbe') {
@@ -1955,9 +2235,112 @@ test('a dead or stale viewer is recreated before a review change is focused', as
         return true;
     };
     await v._ensureViewerForReview({ page: 1 });
-    assert.strictEqual(html, '<fresh viewer>', 'the webview document — and therefore its worker — is replaced');
-    assert.strictEqual(v.shownGeneration, null, 'the replacement must receive current PDF bytes');
-    assert.strictEqual(v._viewerReloading, true, 'recovery remains active until the replacement reports opened');
+    assert.strictEqual(html, 'stale viewer', 'the webview and its editors are retained');
+    assert.strictEqual(sends, 1, 'the worker receives current PDF bytes');
+    assert.ok(v.posted.some(m => m.type === 'restartPdfWorker'));
+    assert.strictEqual(v._workerRestarting, true, 'recovery remains active until the replacement reports opened');
+    clearTimeout(v._workerRestartTimer);
+});
+
+test('a failed current PDF worker automatically restarts in place, with bounded retries', async () => {
+    const v = makeViewer(null);
+    v.shownGeneration = 8;
+    v.shownPdfHash = 'pdf-eight';
+    let recoveries = 0;
+    v._restartPdfWorker = () => { recoveries++; };
+    await v._onMessage({ type:'viewerError', generation:7, error:'Worker was destroyed' });
+    assert.equal(recoveries, 0, 'superseded failures cannot destroy a newer viewer');
+    await v._onMessage({ type:'viewerError', generation:8, error:'Invalid PDF structure' });
+    assert.equal(recoveries, 0, 'restarting a worker cannot fix malformed bytes');
+    for (let i = 0; i < 3; i++)
+        await v._onMessage({ type:'viewerError', generation:8, error:'Worker was destroyed' });
+    assert.equal(recoveries, 2, 'recover the failed open without an infinite reload loop');
+    assert.ok(v.posted.some(p => p.kind === 'err' && /reopen/i.test(p.text)));
+});
+
+test('a pending mini-editor click replays only on identical PDF bytes', async () => {
+    for (const hash of ['old-pdf', 'changed-pdf']) {
+        const v = makeViewer(null);
+        v._openedPdfHash = hash;
+        v._openedGeneration = 9;
+        const st = v.coord.roots.get(FILE);
+        st.map.native = true;
+        st.map.view = { artifact:{ pdf_hash:hash } };
+        v._editOpenRequest = 1;
+        v._pendingEditOpen = { request:1, root:FILE, previous:v._edit,
+            navigation:v._nativeInverseRequest, caretRequest:v._miniCaretRequest,
+            pdfHash:'old-pdf', expires:Date.now() + 8000,
+            message:{ type:'editHere', page:1, xBp:20, yTopBp:30, generation:8 } };
+        const clicks = [];
+        v._onMessage = async m => clicks.push(m);
+        await v._replayPendingEditOpen();
+        assert.equal(clicks.length, hash === 'old-pdf' ? 1 : 0);
+        if (clicks.length) assert.equal(clicks[0].generation, 9);
+        assert.equal(v._pendingEditOpen, null, 'a click is consumed at most once');
+        assert.ok(v.posted.some(p => p.type === 'status' && p.kind !== 'warn'),
+            'the stale warning ends when the new page arrives');
+    }
+});
+
+test('navigation cancels a pending mini-editor replay', async () => {
+    const v = makeViewer(null);
+    v._editOpenRequest = 2;
+    v._pendingEditOpen = { request:1, root:FILE, pdfHash:'pdf', expires:Date.now() + 8000 };
+    v._onMessage = async () => { throw Error('stale click replayed'); };
+    await v._replayPendingEditOpen();
+    assert.equal(v._pendingEditOpen, null);
+});
+
+test('an editor request repairs a dead or missed handoff without restarting a loading PDF', async () => {
+    for (const health of [{ ok:false, reason:'PDF worker stopped' },
+        { ok:false, reason:'PDF is still loading' }, { ok:true }]) {
+        const v = makeViewer(null);
+        v._openedGeneration = 1;
+        v._openedPdfHash = 'old-pdf';
+        v.shownGeneration = 2;
+        v._editOpenRequest = 1;
+        v.coord.roots.get(FILE).map.view = { artifact:{ pdf_hash:'new-pdf' } };
+        const frame = { request:1, root:FILE, previous:v._edit,
+            navigation:v._nativeInverseRequest, caretRequest:v._miniCaretRequest,
+            generation:1, pdfHash:'old-pdf' };
+        v._probeViewer = async () => health;
+        let restarts = 0, sends = 0;
+        v._restartPdfWorker = () => { restarts++; };
+        v.refresh = async options => { assert.equal(options.force, true); sends++; };
+        assert.equal(await v._deferEditOpen({ generation:1, page:1 }, frame), true);
+        assert.equal(restarts, health.reason === 'PDF worker stopped' ? 1 : 0);
+        assert.equal(sends, health.ok ? 1 : 0, 're-send a missed PDF without compiling it');
+        clearTimeout(v._pendingEditOpenTimer);
+    }
+});
+
+test('a worker restart timeout falls back to a fresh webview', async () => {
+    const v = makeViewer(null);
+    v.refresh = async () => {};
+    let resets = 0;
+    v._reloadViewer = () => { resets++; };
+    TexViewer.WORKER_RESTART_TIMEOUT_MS = 20;
+    try {
+        v._restartPdfWorker('test worker failure');
+        v._restartPdfWorker('duplicate error');
+        assert.equal(v.posted.filter(m => m.type === 'restartPdfWorker').length, 1);
+        await new Promise(resolve => setTimeout(resolve, 35));
+        assert.equal(resets, 1, 'only a failed in-place restart replaces the webview');
+    } finally {
+        delete TexViewer.WORKER_RESTART_TIMEOUT_MS;
+        clearTimeout(v._workerRestartTimer);
+    }
+});
+
+test('viewer restarts request fresh script URLs even when installed mtimes are unchanged', () => {
+    const v = makeViewer(null);
+    v.context.extensionUri.fsPath = require('path').resolve(__dirname, '../../../..');
+    v.panel.webview.asWebviewUri = uri => `https://assets.test/${uri.fsPath}`;
+    v.panel.webview.cspSource = 'https://assets.test';
+    const urls = () => [...v._html().matchAll(/src="([^"]+\.js\?[^"]+)"/g)].map(m => m[1]);
+    const first = urls(), second = urls();
+    assert.equal(first.length, 2);
+    assert.notDeepEqual(first, second, 'each recovery bypasses stale cached viewer scripts');
 });
 
 test('A REVIEW CLICK WAITS FOR ITS PDF AND REPLAYS WITH FRESH RECTANGLES', () => {
@@ -1979,7 +2362,14 @@ test('A REVIEW CLICK WAITS FOR ITS PDF AND REPLAYS WITH FRESH RECTANGLES', () =>
         'a fresh placement still waits until its matching PDF is open');
 
     v._openedGeneration = 8;
-    assert.strictEqual(v._replayReviewFocus(), true);
+    assert.strictEqual(v._replayReviewFocus(), false,
+        'opening bytes alone does not make an earlier unavailable correction ready');
+    const st=v.coord.roots.get(v.root);
+    st.map={available:true};st.generation={generation:8};st.sourceAhead=false;
+    v.coord.isCurrent=()=>true;
+    v.showReview({pending:1,focus:'h1',generation:8,groups:[{hunks:[{...old,page:4,
+        rects:[{page:4,x:50,y:90,w:100,h:12}]}]}]});
+    assert.strictEqual(v._reviewFocus.pending,false,'fresh current placement replays the waiting click');
     const focus = v.posted.filter(m => m.type === 'reviewFocus').pop();
     assert.strictEqual(focus.generation, 8);
     assert.strictEqual(focus.page, 4);
@@ -2000,7 +2390,13 @@ test('A RESTARTED VIEWER RE-PLACES EVERY REVIEW, EVEN WITHOUT A FOCUSED HUNK', a
     v._postEditAnchor = async () => {};
     v._postSections = async () => {};
     v._pushComments = () => {};
+    v._workerRestarting = true;
+    let fallback = false;
+    v._workerRestartTimer = setTimeout(() => { fallback = true; }, 20);
     await v._onMessage({ type: 'opened', generation: 1, pdfHash: 'same-pdf' });
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.equal(v._workerRestarting, false);
+    assert.equal(fallback, false, 'a successful worker restart cancels the full-viewer fallback');
     assert.strictEqual(placed, 1,
         'new canvases always get freshly measured review rectangles');
 });
@@ -2054,6 +2450,17 @@ test('AN IDENTICAL PDF REUSES THE ACKNOWLEDGED REVIEW GENERATION', () => {
     assert.strictEqual(map.generation, 8,
         'no impossible generation mismatch is invented when no bytes were shipped');
     assert.strictEqual(typeof map.rowsFor, 'function');
+});
+
+test('a review build already displayed cannot leave the compile spinner waiting', async () => {
+    const v = makeViewer(null);
+    const st = v.coord.roots.get(FILE);
+    v._openedGeneration = st.generation.generation;
+    v.coord.build = async () => st;
+    v.refresh = async options => { assert.ok(!options?.force, 'do not reopen a current PDF'); };
+    await v.compileWaited('the agent changed the paper — compiling…');
+    assert.equal(v._busyText, null);
+    assert.ok(v.posted.some(m => m.type === 'status' && m.text === 'paper up to date' && m.kind === 'ok'));
 });
 
 test('closing the comparison clears it on both sides', async () => {
@@ -2292,6 +2699,30 @@ test('THE COMPILE BUTTON compiles the panel\'s OWN paper, with no editor focused
     } finally {
         stub.commands.executeCommand = oldCmd;
     }
+});
+
+test('Cmd+Compile flushes mini-editor text before exporting this panel\'s PDF', async () => {
+    const v = makeViewer(null, null), order = [];
+    const old = stub.commands.executeCommand;
+    const oldOpen = stub.env.openExternal;
+    stub.env.openExternal = async uri => { assert.equal(uri.fsPath,'/paper/main.pdf');order.push('open-system');return true; };
+    v._edit = { id: 8 };
+    v._applyEditChange = async m => { assert.equal(m.text, 'Newest block'); order.push('apply'); return true; };
+    v.refresh = async () => order.push('refresh');
+    stub.commands.executeCommand = async (command, opts) => {
+        assert.equal(command, 'wolfbook.tex.exportPdf');
+        assert.deepStrictEqual(opts, { root: FILE, target: '/paper/main.pdf', force: true });
+        order.push('export'); return { ok: true, target: opts.target };
+    };
+    try {
+        await v._onMessage({ type: 'recompile', exportPdf: true, editId: 8, text: 'Newest block' });
+        assert.deepStrictEqual(order, ['apply', 'export', 'open-system', 'refresh']);
+        assert.ok(v.posted.some(m => m.text === 'PDF written and opened in system viewer: /paper/main.pdf'));
+        v._applyEditChange = async () => false;
+        order.length = 0;
+        await v._onMessage({ type: 'recompile', exportPdf: true, editId: 8, text: 'Conflicting block' });
+        assert.deepStrictEqual(order, [], 'conflicted mini-editor text cannot be silently left out of the export');
+    } finally { stub.commands.executeCommand = old;stub.env.openExternal = oldOpen; }
 });
 
 test('a failed compile is reported in the panel, not swallowed', async () => {
@@ -3398,6 +3829,108 @@ const clipOf = () => {
     return box;
 };
 
+test('field paste reads VS Code clipboard and returns text without touching source or page selection', async () => {
+    const { v, doc } = moveViewer('Unchanged source.');
+    const clip = clipOf(); clip.text = 'Pasted comment\nwith another line';
+    await v._onMessage({ type: 'fieldPaste', requestId: 3 });
+    assert.deepStrictEqual(v.posted.find(m => m.type === 'fieldPasteResult'), {
+        type: 'fieldPasteResult', requestId: 3, text: clip.text,
+    });
+    assert.equal(doc.getText(), 'Unchanged source.');
+    assert.equal(v._lastSelection, undefined);
+    stub.env.clipboard.readText = async () => { throw Error('Clipboard busy'); };
+    await v._onMessage({ type: 'fieldPaste', requestId: 4 });
+    assert.equal(v.posted.find(m => m.requestId === 4).error, 'Clipboard busy');
+    await v._onMessage({ type: 'fieldPaste', requestId: -1 });
+    assert.ok(!v.posted.some(m => m.requestId === -1));
+});
+
+test('double-click focus reaches the existing source editor without waiting for a map', async () => {
+    const { v, doc } = moveViewer('A paragraph.');
+    const old = { show: stub.window.showTextDocument, editors: stub.window.visibleTextEditors };
+    try {
+        v._layoutMode = 'all';
+        v.coord.roots.get(v.root).map = null;
+        stub.window.visibleTextEditors = [{ document: doc, viewColumn: 1 }];
+        let shown = 0;
+        stub.window.showTextDocument = (document, options) => {
+            shown++;
+            assert.equal(document, doc);
+            assert.equal(options.preserveFocus, false);
+            assert.equal(options.viewColumn, 1);
+            return Promise.resolve(stub.window.visibleTextEditors[0]);
+        };
+        await v._onMessage({ type: 'focusSource' });
+        assert.equal(shown, 1, 'focus succeeds even while no inverse map is available');
+        v._layoutMode = 'viewer';
+        await v._onMessage({ type: 'focusSource' });
+        assert.equal(shown, 1, 'the separate early-focus message does not disturb viewer-only mode');
+    } finally {
+        stub.window.showTextDocument = old.show;
+        stub.window.visibleTextEditors = old.editors;
+    }
+});
+
+test('immediate double-click focus cancels a preceding inverse click still opening its source', async () => {
+    const { v, doc } = moveViewer('A paragraph.');
+    const old = { show: stub.window.showTextDocument, editors: stub.window.visibleTextEditors,
+        open: stub.workspace.openTextDocument };
+    try {
+        v._layoutMode = 'all';
+        let finishOpen, focused = 0;
+        stub.workspace.openTextDocument = () => new Promise(resolve => { finishOpen = resolve; });
+        stub.window.visibleTextEditors = [{ document: doc, viewColumn: 1 }];
+        stub.window.showTextDocument = async () => { focused++; return stub.window.visibleTextEditors[0]; };
+        v._postEditSelection = () => { throw Error('the superseded click must never refocus the card'); };
+        const pending = v._jumpToSource({ page: 1, xBp: 100, yTopBp: 20 });
+        assert.ok(finishOpen, 'the first click is waiting for its document');
+        await v._onMessage({ type: 'focusSource' });
+        assert.equal(focused, 1);
+        finishOpen(doc);
+        await pending;
+        assert.equal(focused, 1, 'the old click cannot perform a later showTextDocument');
+    } finally {
+        stub.window.showTextDocument = old.show;
+        stub.window.visibleTextEditors = old.editors;
+        stub.workspace.openTextDocument = old.open;
+    }
+});
+
+test('viewer cut/delete include matching delimiters, environments and phrase punctuation', async () => {
+    for (const action of ['cut', 'delete']) {
+        for (const [src, selected, removed] of [
+            ['Before (a phrase), after.', 'a phrase)', '(a phrase),'],
+            [String.raw`Before \textbf{a phrase}. After.`, 'a phrase', String.raw`\textbf{a phrase}.`],
+            [String.raw`Before \begin{equation}x\end{equation}. After.`, String.raw`x\end{equation}`, String.raw`\begin{equation}x\end{equation}.`],
+        ]) {
+            const { v, doc, file } = moveViewer(src);
+            const clip = clipOf();
+            const from = src.indexOf(selected);
+            v._lastSelection = { file, start: doc.positionAt(from), end: doc.positionAt(from + selected.length) };
+            await v._onMessage({ type: 'selectionAction', action });
+            assert.equal(doc.getText(), src.replace(removed, ''), `${action}: remove the whole fragment`);
+            if (action === 'cut') assert.equal(clip.text, removed, 'the clipboard contains everything that was cut');
+            assert.equal(v._deletionAnchor.column, src.indexOf(removed), 'anchor follows the expanded start');
+        }
+    }
+});
+
+test('drag preview expands the visible selection before choosing the drop point', async () => {
+    const src = 'Opening line.\n\nBefore (a phrase). After.\n\nLast line.';
+    const { v, doc, file } = moveViewer(src);
+    const from = src.indexOf('a phrase)');
+    v._lastSelection = { file, start: doc.positionAt(from), end: doc.positionAt(from + 'a phrase)'.length) };
+    await v._onMessage({ type: 'movePreview', page: 1, xBp: 100, yTopBp: 20 });
+    const range = v._lastSelection;
+    assert.equal(doc.getText(new Range(range.start, range.end)), '(a phrase).');
+    assert.ok(v.posted.some(p => p.type === 'selection' && p.span), 'the widened selection is drawn before the drop');
+    assert.equal(doc.getText(), src, 'preview edits nothing');
+    await v._onMessage({ type: 'moveCommit', page: 1, xBp: 100, yTopBp: 20 });
+    assert.equal((doc.getText().match(/\(a phrase\)\./g) || []).length, 1, 'exactly one balanced fragment moves');
+    assert.ok(doc.getText().indexOf('(a phrase).') < doc.getText().indexOf('Before '));
+    assert.ok(doc.getText().includes('Before  After.'), 'no orphaned punctuation stays behind');
+});
+
 test('mini-editor selection of an xparse revision comment covers all its ink, not the preceding zero', async () => {
     const { collectMacros, visibleProjection } = require('../../tex/texWords');
     const definition = String.raw`\NewDocumentCommand{\cb}{m m}{
@@ -3551,6 +4084,19 @@ test('section delete refuses a range made stale during confirmation', async () =
     } finally { stub.window.showWarningMessage = warn; }
 });
 
+test('the selection toolbar copies the actual source file and first selected line', async () => {
+    const { v, doc, file } = moveViewer('First line.\nSecond line.\nThird line.');
+    const clip = clipOf();
+    const sel = { file, start: new Position(1, 3), end: new Position(2, 5) };
+    v._lastSelection = sel;
+    v.root = '/paper/different-root.tex';
+    await v._onMessage({ type: 'selectionAction', action: 'copyLocation' });
+    assert.equal(clip.text, `${file}:2`, 'absolute source path, one-based first line, including child documents');
+    assert.equal(doc.getText(), 'First line.\nSecond line.\nThird line.');
+    assert.equal(v._lastSelection, sel, 'copying a reference keeps the selection');
+    assert.ok(v.posted.some(m => m.type === 'status' && m.text === `Copied ${file}:2`));
+});
+
 test('copy puts the selected LaTeX on the clipboard and changes nothing', async () => {
     const { v, doc } = moveViewer(MOVE_SRC);
     const clip = clipOf();
@@ -3560,6 +4106,46 @@ test('copy puts the selected LaTeX on the clipboard and changes nothing', async 
     await v._onMessage({ type: 'selectionAction', action: 'copy' });
     assert.ok(clip.text.includes('E = mc^2'), `the equation was copied: ${JSON.stringify(clip.text)}`);
     assert.strictEqual(doc.getText(), before, 'and the document is untouched');
+});
+
+test('selection comments quote the exact source range and save its line location without editing or compiling', async () => {
+    const { v, doc, file } = moveViewer('Unselected lead.\nSelected £14.7m\ncontinues here.\nUnselected tail.');
+    const before = doc.getText();
+    const sel = { file, documentVersion: doc.version,
+        start: new Position(1, 9), end: new Position(3, 0) };
+    v._lastSelection = sel;
+    v._commentSeq = 0;
+    const writes = [];
+    v.comments = { add: (...args) => writes.push(args) };
+    v._readerCommentAuthor = async () => ({ name: 'Reader' });
+    v._pushComments = () => {};
+    v._applyReaderEdit = () => { throw new Error('commenting must not edit source'); };
+    await v._onMessage({ type: 'selectionAction', action: 'comment' });
+    const target = v.posted.find(m => m.type === 'commentTarget').target;
+    assert.equal(target.file, file);
+    assert.equal(target.line, 2);
+    assert.equal(target.endLine, 3, 'an end at column zero excludes the next source line');
+    assert.equal(target.sourcePreview, '£14.7m\ncontinues here.\n');
+    assert.equal(target.excerpt, target.sourcePreview);
+    assert.equal(target.selection.lineOffset, 1);
+    assert.equal(target.selection.endLineOffset, 2);
+    await v._onCommentAction({ action: 'add', targetId: target.id, text: 'Check these figures.' });
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0][0], file);
+    assert.equal(writes[0][2], 'Check these figures.');
+    assert.deepEqual(writes[0][3].selection, target.selection);
+    assert.equal(doc.getText(), before);
+    assert.equal(v._lastSelection, sel);
+    assert.ok(!v.posted.some(m => m.type === 'selectionClear' || m.type === 'compile'));
+});
+
+test('selection comments reject a stale source range', async () => {
+    const { v, doc, file } = moveViewer('Selected text.');
+    v._lastSelection = { file, documentVersion: doc.version - 1,
+        start: new Position(0, 0), end: new Position(0, 8) };
+    v._postCommentTarget = () => { throw new Error('stale range must not become a quote'); };
+    await v._selectionAction({ action: 'comment' });
+    assert.ok(v.posted.some(m => m.type === 'commentTarget' && m.target === null && /source changed/.test(m.reason)));
 });
 
 test('cut copies AND removes, as one undo', async () => {
@@ -4161,6 +4747,27 @@ test('A RECOMPILE RESTORES THE SOURCE CELL, NOT THE OLD PHYSICAL PAGE', async ()
     });
 });
 
+test('a full compile follows the exact row and point of a wrapped source line across page insertion', () => {
+    const v = placeViewer({}), st = v.coord.roots.get(FILE);
+    const object = {objectId:'wrapped-cell',kind:'paragraph',sourceRange:{file:FILE,startLine:20,endLine:20}};
+    const oldRows = [{page:2,x:90,y:600,w:350,h:12},{page:2,x:90,y:616,w:350,h:9},
+        {page:3,x:90,y:90,w:300,h:15}];
+    st.prevMap = {available:true,generation:{generation:8},model:{objects:[object]},
+        lineAtPoint:()=>({file:FILE,line:20}),objectAtLine:()=>({...object,startLine:20}),lineRows:()=>oldRows};
+    st.map.generation = {generation:9};
+    const saved=v._semanticViewCell({generation:8,focusPage:3,focusXBp:240,focusYTopBp:95,focusViewportFrac:0.03});
+    assert.deepStrictEqual(saved.rowAnchor,{index:2,xFrac:0.5,yFrac:1/3});
+    v._commentObjects=()=>[{...object,sourceRange:{file:FILE,startLine:70,endLine:70}}];
+    st.map.lineRows=(_file,line)=>{
+        assert.equal(line,70);
+        return oldRows.map(r=>({...r,page:r.page+1,y:r.y+20}));
+    };
+    const placed=v._viewCellPlacement(saved);
+    assert.equal(placed.page,4,'the point on the later page survives');
+    assert.deepStrictEqual(placed.point,{xBp:240,yTopBp:115});
+    assert.equal(placed.viewportFrac,0.03,'near-edge positions are retained too');
+});
+
 test('REFRESH REQUESTS A LAST-MOMENT VIEW SNAPSHOT', async () => {
     const v = placeViewer({});
     v._webviewReady = true;
@@ -4361,7 +4968,7 @@ function fakeWorkbench(v, calls) {
     return { tabGroups, groups, texTab, dirtyTab, viewerTab };
 }
 
-test('VIEWER-ONLY REPLACES THE .TEX TAB; EDITOR + VIEWER PUTS WPAPER BACK BESIDE IT, LOCKED', async () => {
+test('VIEWER-ONLY KEEPS SOURCE TABS; EDITOR + VIEWER PUTS WPAPER BACK BESIDE IT, LOCKED', async () => {
     const mem = {};
     const v = placeViewer(mem);
     const calls = [];
@@ -4388,13 +4995,15 @@ test('VIEWER-ONLY REPLACES THE .TEX TAB; EDITOR + VIEWER PUTS WPAPER BACK BESIDE
         assert.strictEqual(v._layoutMode, 'viewer');
         assert.deepStrictEqual(calls, [
             'reveal:1:false',
-            `closeTab:${FILE}`,
             'closeGroup:2',
-        ], 'WPaper moves into the source group, the clean .tex tab and the empty group close: ' +
+        ], 'WPaper moves into the source group and only the empty group closes: ' +
             JSON.stringify(calls));
         assert.ok(!calls.includes('workbench.action.toggleMaximizeEditorGroup'), 'nothing is maximized');
         assert.deepStrictEqual(wb.groups.map(g => g.viewColumn), [1]);
         assert.ok(wb.groups[0].tabs.includes(wb.dirtyTab), 'a dirty tab is left behind, never closed');
+        assert.ok(wb.groups[0].tabs.includes(wb.texTab), 'the first paper stays available as a source tab');
+        assert.equal(v.posted.filter(p => p.type === 'fullscreen').at(-1).fit, true,
+            'entering max mode explicitly requests a one-shot Fit');
         assert.strictEqual(v._viewFor(FILE).layoutMode, 'viewer');
 
         calls.length = 0;
@@ -4409,12 +5018,41 @@ test('VIEWER-ONLY REPLACES THE .TEX TAB; EDITOR + VIEWER PUTS WPAPER BACK BESIDE
             JSON.stringify(calls));
         assert.strictEqual(v.panel.viewColumn, 2);
         assert.strictEqual(v._viewFor(FILE).layoutMode, 'all');
+        assert.equal(v.posted.filter(p => p.type === 'fullscreen').at(-1).fit, false);
     } finally {
         stub.commands.executeCommand = old.exec;
         if (old.get) stub.commands.getCommands = old.get; else delete stub.commands.getCommands;
         stub.window.tabGroups = old.tg;
         stub.window.showTextDocument = old.show;
         stub.workspace.openTextDocument = old.open;
+    }
+});
+
+test('VIEWER-ONLY PINS A SOURCE PREVIEW AND KEEPS BOTH PAPER TABS AVAILABLE', async () => {
+    const v = placeViewer({}), calls = [], wb = fakeWorkbench(v, calls);
+    const OTHER = '/papers/other.tex';
+    const otherTab = { input:{ uri:{ fsPath:OTHER } }, isDirty:false };
+    wb.groups[0].tabs.push(otherTab); wb.texTab.isPreview = true;
+    v.coord.rootFor = d => d.uri.fsPath;
+    const old = { tg:stub.window.tabGroups, show:stub.window.showTextDocument, open:stub.workspace.openTextDocument };
+    stub.window.tabGroups = wb.tabGroups;
+    stub.workspace.openTextDocument = async uri => ({ uri });
+    stub.window.showTextDocument = async (doc, options) => {
+        assert.equal(doc.uri.fsPath, FILE);
+        assert.deepStrictEqual(options, { viewColumn:1, preserveFocus:true, preview:false });
+        wb.texTab.isPreview = false;
+        if (!wb.groups[0].tabs.includes(wb.texTab)) wb.groups[0].tabs.push(wb.texTab);
+    };
+    try {
+        await v.setLayoutMode('viewer');
+        assert.equal(wb.texTab.isPreview, false, 'the first paper cannot be replaced as a VS Code preview');
+        assert.ok(wb.groups[0].tabs.includes(wb.texTab) && wb.groups[0].tabs.includes(otherTab));
+        assert.ok(!calls.some(c => c.startsWith('closeTab:')), 'max mode closes no source tabs');
+        wb.groups[0].tabs.splice(wb.groups[0].tabs.indexOf(wb.texTab), 1);
+        await v.setLayoutMode('viewer', { remember:false, reapply:true });
+        assert.ok(wb.groups[0].tabs.includes(wb.texTab), 'restoring an older max session recreates its missing source tab');
+    } finally {
+        stub.window.tabGroups = old.tg; stub.window.showTextDocument = old.show; stub.workspace.openTextDocument = old.open;
     }
 });
 
@@ -4436,7 +5074,8 @@ test('OPENING A .TEX WHILE WPAPER IS ALONE RETURNS TO EDITOR + VIEWER', async ()
 
         // The reader opened the .tex: VS Code put it in front in WPaper's group.
         const g1 = wb.groups[0];
-        g1.tabs.push(wb.texTab); g1.activeTab = wb.texTab; g1.isActive = true;
+        if (!g1.tabs.includes(wb.texTab)) g1.tabs.push(wb.texTab);
+        g1.activeTab = wb.texTab; g1.isActive = true;
         calls.length = 0;
         await v.revealSourceFromViewer({ document: doc, viewColumn: 1 });
         assert.strictEqual(v._layoutMode, 'all');
@@ -4470,12 +5109,13 @@ test('A RELOAD FROM A LEGACY MAXIMIZED LAYOUT RESETS GROUP SIZES, THEN RE-APPLIE
         assert.deepStrictEqual(calls, [
             'workbench.action.evenEditorWidths',
             'reveal:1:false',
-            `closeTab:${FILE}`,
             'closeGroup:2',
         ], JSON.stringify(calls));
         assert.strictEqual(v._layoutMode, 'viewer');
         assert.strictEqual(v._layoutMaximized, false);
         assert.strictEqual(v._restoringPanel, false);
+        assert.equal(v.posted.filter(p => p.type === 'fullscreen').at(-1).fit, false,
+            'layout restoration preserves the saved zoom instead of refitting');
     } finally {
         stub.commands.executeCommand = old.exec;
         if (old.get) stub.commands.getCommands = old.get; else delete stub.commands.getCommands;
@@ -4529,8 +5169,10 @@ test('SWITCHING BETWEEN TWO VIEWER-ONLY PAPERS STAYS VIEWER-ONLY', async () => {
         calls.length = 0;
         await v._restoreSessionChrome();
         assert.strictEqual(v._layoutMode, 'viewer');
-        assert.ok(calls.includes(`closeTab:${OTHER}`),
-            'the .tex that was just opened folds behind WPaper again: ' + JSON.stringify(calls));
+        assert.ok(!calls.some(c => c.startsWith('closeTab:')),
+            'switching viewer-only papers never closes either source tab: ' + JSON.stringify(calls));
+        assert.ok(g1.tabs.includes(wb.texTab) && g1.tabs.includes(otherTab),
+            'both papers remain available in the tab bar for a return trip');
         assert.ok(!calls.some(c => c.startsWith('reveal:-2')), 'and WPaper never moves beside it');
     } finally {
         stub.commands.executeCommand = old.exec;
@@ -4734,6 +5376,7 @@ test('THE FRACTION TRAVELS, NOT JUST THE PAGE', async () => {
         asWebviewUri: (u) => ({ toString: () => 'vscode-resource://' + (u && u.fsPath ? u.fsPath : 'x') }),
     }, title: '' };
     v2.root = FILE;
+    v2._webviewReady = true; // This test drives an already loaded panel.
     v2._viewState = null;
     const st2 = v2.coord.roots.get(FILE);
     st2.generation = { generation: 2, pageCount: 4, pdfPath: pdf, pdfHash: 'h2', pageSize: { widthBp: 595, heightBp: 842 } };

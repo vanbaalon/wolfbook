@@ -10,11 +10,9 @@
 // "not associated", the 3-second recovery in execute() times out, and the cell
 // is silently skipped while the caller reports success.
 //
-// notebook.selectKernel operates on the ACTIVE notebook editor only — there is
-// no per-document form — so association must (transiently) make the target
-// notebook the active tab. Never call notebook.selectKernel with NO argument
-// from agent code: that opens the kernel picker UI, a modal an agent can never
-// dismiss.
+// Kernel selection commands act on a notebook editor. Target an exact visible
+// editor through notebook.selectKernel, even when WPaper has focus. Hidden
+// notebooks stay hidden unless the caller explicitly allows opening one.
 
 /** Is the wolfbook controller selected for this notebook document? */
 function isAssociated(ctrl, nbDoc) {
@@ -27,7 +25,7 @@ function isAssociated(ctrl, nbDoc) {
  *
  * @param {object} ctrl   WolframNotebookKernel (has ._controller, .selectedNotebooks)
  * @param {import('vscode').NotebookDocument} nbDoc
- * @param {{ restoreActive?: boolean, timeoutMs?: number }} opts
+ * @param {{ restoreActive?: boolean, timeoutMs?: number, allowReveal?: boolean, notebookEditor?: import('vscode').NotebookEditor }} opts
  * @returns {Promise<{associated: boolean, method: string, elapsedMs: number}>}
  */
 async function associateNotebook(ctrl, nbDoc, opts = {}) {
@@ -47,54 +45,83 @@ async function associateNotebook(ctrl, nbDoc, opts = {}) {
             nbDoc, vscode.NotebookControllerAffinity.Preferred);
     } catch (_) {}
 
-    // notebook.selectKernel targets the active editor, so the notebook must be
-    // shown first. preserveFocus:true keeps keyboard focus where it is; whether
-    // the revealed editor also becomes activeNotebookEditor is version-dependent,
-    // hence the preserveFocus:false retry below.
+    const activeIsTarget = () =>
+        vscode.window.activeNotebookEditor?.notebook?.uri?.toString() === nbDoc.uri.toString();
+    const sameNotebook = editor => editor?.notebook?.uri?.toString() === nbDoc.uri.toString();
+    let targetEditor = sameNotebook(opts.notebookEditor) ? opts.notebookEditor : null;
+    const visibleTarget = () => targetEditor ||
+        (vscode.window.visibleNotebookEditors || []).find(sameNotebook) ||
+        (activeIsTarget() ? vscode.window.activeNotebookEditor : null);
+
+    // VS Code's API command translates the exact NotebookEditor to its widget
+    // ID. The internal command without that ID targets the active tab instead.
+    let selectCommand = '_notebook.selectKernel';
+    try {
+        const commands = await vscode.commands.getCommands(true);
+        if (commands.includes('notebook.selectKernel')) selectCommand = 'notebook.selectKernel';
+    } catch (_) {}
+    const targeted = selectCommand === 'notebook.selectKernel';
+    if (opts.allowReveal === false && !(targeted ? visibleTarget() : activeIsTarget())) {
+        return done(isAssociated(ctrl, nbDoc), 'background-selection-pending');
+    }
+
     const attempt = async (preserveFocus) => {
-        try {
-            await vscode.window.showNotebookDocument(nbDoc, {
-                viewColumn: vscode.ViewColumn.Active, preserveFocus,
-            });
-        } catch (_) {}
+        if (opts.allowReveal !== false && !(targeted ? visibleTarget() : activeIsTarget())) {
+            try {
+                targetEditor = await vscode.window.showNotebookDocument(nbDoc, {
+                    viewColumn: vscode.ViewColumn.Active, preserveFocus, preview: false,
+                });
+            } catch (_) {}
+        }
         if (isAssociated(ctrl, nbDoc)) return true;
+        // An asynchronous command lookup/reveal may race with a user switching
+        // to WPaper. Never select a kernel against the wrong active tab.
+        const editor = targeted ? visibleTarget() : null;
+        if (targeted ? !editor : !activeIsTarget()) return false;
         const nbUri = nbDoc.uri.toString();
         return await new Promise(resolve => {
             let settled = false;
+            let subscription, poll, deadline;
             const finish = (ok) => {
                 if (settled) return;
                 settled = true;
-                try { d.dispose(); } catch (_) {}
+                clearTimeout(poll);
+                clearTimeout(deadline);
+                try { subscription?.dispose(); } catch (_) {}
                 resolve(ok);
             };
-            const d = ctrl._controller.onDidChangeSelectedNotebooks(ev => {
+            subscription = ctrl._controller.onDidChangeSelectedNotebooks(ev => {
                 if (ev.selected && ev.notebook.uri.toString() === nbUri) finish(true);
             });
-            vscode.commands.executeCommand('notebook.selectKernel', {
-                id:        ctrl._controller.id,
-                extension: 'wolfbook.wolfbook',
-                label:     ctrl._controller.label,
-            }).then(undefined, () => {});
-            // Fallback poll in case the event fired before the listener registered.
             const check = () => {
                 if (settled) return;
                 if (isAssociated(ctrl, nbDoc)) { finish(true); return; }
-                setTimeout(check, 50);
+                poll = setTimeout(check, 50);
             };
-            setTimeout(check, 50);
-            setTimeout(() => finish(isAssociated(ctrl, nbDoc)), timeoutMs);
+            poll = setTimeout(check, 50);
+            deadline = setTimeout(() => finish(isAssociated(ctrl, nbDoc)), timeoutMs);
+            try {
+                // Set up timers first: selection can synchronously fire while
+                // executeCommand is called, and finish must clear every timer.
+                Promise.resolve(vscode.commands.executeCommand(selectCommand, {
+                    id: ctrl._controller.id,
+                    extension: 'wolfbook.wolfbook',
+                    label: ctrl._controller.label,
+                    ...(targeted ? { notebookEditor: editor } : {}),
+                })).catch(() => finish(isAssociated(ctrl, nbDoc)));
+            } catch (_) { finish(isAssociated(ctrl, nbDoc)); }
         });
     };
 
     let ok = await attempt(true);
     let method = 'select-kernel';
-    if (!ok) {
+    if (!ok && opts.allowReveal !== false) {
         ok = await attempt(false);
         method = 'select-kernel-focused';
     }
 
     // Give the user back the notebook they were looking at.
-    if (opts.restoreActive !== false && previousActive && previousActive !== nbDoc) {
+    if (opts.allowReveal !== false && opts.restoreActive !== false && previousActive && previousActive !== nbDoc) {
         try {
             await vscode.window.showNotebookDocument(previousActive, { preserveFocus: true });
         } catch (_) {}

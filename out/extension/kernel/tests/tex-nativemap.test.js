@@ -86,6 +86,23 @@ test('queued worker edits and legacy notifications invalidate every native looku
     assert.equal(other.available, false);
 });
 
+test('error hints can use retained native ink after failure, marked approximate, without enabling stale editing', () => {
+    const { map, invalidate } = fixture();
+    const exact = map.diagnosticLocation(file, 4);
+    assert.equal(exact.exact, true);
+    assert.equal(exact.rects.length, 1);
+    const nearby = map.diagnosticLocation(file, 5);
+    assert.equal(nearby.matchedLine, 4);
+    assert.equal(nearby.exact, false);
+    invalidate();
+    const retained = map.diagnosticLocation(file, 4);
+    assert.equal(retained.exact, false);
+    assert.deepEqual(retained.rects, exact.rects);
+    assert.deepEqual(map.lineRows(file, 4), [], 'editing still rejects the stale map');
+    assert.equal(map.diagnosticLocation(path.join(root, 'other.tex'), 4), null);
+    assert.equal(map.diagnosticLocation(file, 1000), null);
+});
+
 test('a native view cannot be paired with another PDF', () => {
     const { view, source } = fixture();
     assert.throws(() => new NativeMap({ generation: { pdfHash: 'other' }, nativeView: view, nativeSource: source }), /displayed PDF/);
@@ -408,6 +425,112 @@ test('a title typed in the preamble keeps its own line; a multi-line macro body 
         nativeSource: { isCurrentView: () => true, files: new Map([['paper.tex', { text }]]) } });
     assert.equal(map.renderToSource(1, ...centre(map, 0)).line, 2, 'the title line, not \\maketitle');
     assert.equal(map.renderToSource(1, ...centre(map, 1)).line, 7, 'the \\Gr in the text, not the macro body');
+});
+
+test('every macro on a shared definition line inversely maps to its own equation invocation', async () => {
+    const definitions = '\\newcommand{\\iX}{\\mathbbm t}\\newcommand{\\iH}{\\mathbb H}\\newcommand{\\iV}{\\mathbbm v}\\newcommand{\\bbs}{\\mathbbm s}';
+    const equation = '\\iH + \\iV + \\bbs = \\iX';
+    const text = ['\\documentclass{article}',definitions,'\\begin{document}','\\begin{equation}',equation,'\\end{equation}','\\end{document}'].join('\n');
+    const at = (line,column) => ({ file:'paper.tex',location:{ compiled_revision:0,current_revision:1,
+        start:{ line,column_utf16:column },end:{ line,column_utf16:column+1 },accuracy:'Exact' } });
+    const names = ['iX','iH','iV','bbs'];
+    const hits = names.map((name,id) => {
+        const definition = { tag:1,line:2,column:definitions.indexOf('}',definitions.indexOf('\\'+name))+2 };
+        const invocation = { tag:1,line:5,column:equation.indexOf('\\'+name) };
+        const h = glyphAt(id,id*30,{ preferred_source:at(definition.line,definition.column),
+            mapped_origins:[definition,invocation].map(span => ({ span:{ ...span,length:1 },source:at(span.line,span.column) })) });
+        h.item.provenance = { definition,invocation };
+        return h;
+    });
+    for (const live of [false,true]) {
+        const view = { live,generation:1,sequence:1,artifact:{ page_count:1,pdf_hash:'h' },
+            pages:[{ page:1,header:{ magnification:1000 },hits }] };
+        const source = { isCurrentView:() => true,files:new Map([['paper.tex',{ text }]]),
+            inverse:async (_page,x) => ({ hits:[hits[Math.round(x / (30*SP))]] }) };
+        const map = new NativeMap({ generation:{ pdfHash:'h',projectDir:root },nativeView:view,nativeSource:source });
+        for (let id=0;id<hits.length;id++) {
+            const point = centre(map,id), local = map.renderToSource(1,...point);
+            assert.equal(local.line,5, `${names[id]} uses the equation call, including later definitions on the same line`);
+            assert.equal(local.column,equation.indexOf('\\'+names[id]));
+            const worker = await map.renderToSourceViaWorker(1,...point);
+            assert.deepEqual([worker.line,worker.column],[local.line,local.column],'the worker path makes the same navigation choice');
+        }
+    }
+});
+
+test('long macro definitions and definitions after other commands keep call-site navigation', () => {
+    for (const prefix of ['\\title{A title} ', '% do not read this commented \\newcommand{\\fake}{x}\n']) {
+        const lines = ['\\documentclass{article}',prefix + '\\newcommand{\\Long}{%',
+            ...Array.from({ length:12 },() => '  % long definition, with a commented }'),
+            '  \\mathrm{Symbol}}','\\begin{document}','Use $\\Long$.','\\title{Another title}','\\end{document}'];
+        const text = lines.join('\n'), all = text.split('\n');
+        const definitionLine = all.findIndex(l => l.includes('\\mathrm{Symbol}')) + 1;
+        const callLine = all.findIndex(l => l.startsWith('Use ')) + 1;
+        const at = (line,column) => ({ file:'paper.tex',location:{ compiled_revision:0,current_revision:1,
+            start:{ line,column_utf16:column },end:{ line,column_utf16:column+1 },accuracy:'Exact' } });
+        const definition = { tag:1,line:definitionLine,column:all[definitionLine-1].indexOf('Symbol') };
+        const invocation = { tag:1,line:callLine,column:all[callLine-1].indexOf('\\Long') };
+        const h = glyphAt(0,0,{ preferred_source:at(definition.line,definition.column),
+            mapped_origins:[definition,invocation].map(span => ({ span:{ ...span,length:1 },source:at(span.line,span.column) })) });
+        h.item.provenance = { definition,invocation };
+        const map = viewOf([h],root,null);
+        map.source.files = new Map([['paper.tex',{ text }]]);
+        const target = map.renderToSource(1,...centre(map,0));
+        assert.equal(target.line,callLine,'a definition beyond the old eight-line lookback still targets its use');
+        assert.equal(target.column,invocation.column);
+    }
+});
+
+test('definition parsing skips defaults, comments and escaped delimiters while retaining typed arguments', () => {
+    const definitions = [
+        '\\newcommand*{\\Wrap}[1][{default}]{\\mathrm{#1}}',
+        '\\NewDocumentCommand{\\Wrap}{m}{\\mathrm{#1}}',
+        '\\def\\Wrap#1{\\{#1\\}+\\mathrm{X}}',
+        '\\newcommand{\\First}{x} % \\newcommand{\\Fake}{never}\n\\providecommand\\Wrap[1]{\\mathrm{#1}}',
+    ];
+    for (const definitionText of definitions) {
+        const lines = ['\\documentclass{article}',definitionText,'\\title{A typed title}',
+            '\\begin{document}','Equation $\\Wrap{typed}$.','\\maketitle','\\end{document}'].join('\n').split('\n');
+        const text = lines.join('\n');
+        const definitionLine = lines.findIndex(l => l.includes('\\mathrm')) + 1;
+        const invocationLine = lines.findIndex(l => l.startsWith('Equation')) + 1;
+        const titleLine = lines.findIndex(l => l.startsWith('\\title')) + 1;
+        const at = (line,column) => ({ file:'paper.tex',location:{ compiled_revision:0,current_revision:1,
+            start:{ line,column_utf16:column },end:{ line,column_utf16:column+1 },accuracy:'Exact' } });
+        const invocation = { tag:1,line:invocationLine,column:lines[invocationLine-1].indexOf('\\Wrap') };
+        const hit = (id,definition,called=invocation) => {
+            const h = glyphAt(id,id*30,{ preferred_source:at(definition.line,definition.column),
+                mapped_origins:[definition,called].map(span => ({ span:{ ...span,length:1 },source:at(span.line,span.column) })) });
+            h.item.provenance = { definition,invocation:called }; return h;
+        };
+        const hits = [hit(0,{ tag:1,line:definitionLine,column:lines[definitionLine-1].indexOf('\\mathrm')+3 }),
+            hit(1,{ tag:1,line:invocationLine,column:lines[invocationLine-1].indexOf('typed') }),
+            hit(2,{ tag:1,line:titleLine,column:7 },{ tag:1,line:titleLine+3,column:0 })];
+        const map = viewOf(hits,root,null); map.source.files = new Map([['paper.tex',{ text }]]);
+        const target = map.renderToSource(1,...centre(map,0));
+        assert.deepEqual([target.line,target.column],[invocationLine,invocation.column],definitionText);
+        const argument = map.renderToSource(1,...centre(map,1));
+        assert.deepEqual([argument.line,argument.column],[invocationLine,lines[invocationLine-1].indexOf('typed')], 'actual argument text remains directly editable');
+        assert.equal(map.renderToSource(1,...centre(map,2)).line,titleLine,'title text keeps its own position');
+    }
+});
+
+test('the definition index ignores commented and escaped commands, preserves following title text and refreshes for edited buffers', () => {
+    const text = ['% \\newcommand{\\Fake}{comment}', '\\\\newcommand{\\Fake}{literal}',
+        '\\newcommand{\\Real}{x} \\title{A title}'].join('\n');
+    const map = viewOf([],root,null); map.source.files = new Map([['paper.tex',{ text }]]);
+    const at = (line,column) => ({ file:'paper.tex',location:{ start:{ line,column_utf16:column } } });
+    assert.equal(map._inDefinition(at(1,text.split('\n')[0].indexOf('comment'))),false);
+    assert.equal(map._inDefinition(at(2,text.split('\n')[1].indexOf('literal'))),false);
+    const line = text.split('\n')[2];
+    assert.equal(map._inDefinition(at(3,line.indexOf('x}'))),true);
+    assert.equal(map._inDefinition(at(3,line.indexOf('A title'))),false,'a closed definition cannot claim later title text');
+    const first = map._definitionCache.get(file);
+    map._inDefinition(at(3,line.indexOf('x}')));
+    assert.equal(map._definitionCache.get(file),first,'repeated clicks share one definition index');
+    map.source.files.set('paper.tex',{ text:'\n\nPlain text' });
+    assert.equal(map._inDefinition(at(3,line.indexOf('x}'))),false,'current buffer text invalidates the old position classification');
+    assert.notEqual(map._definitionCache.get(file),first);
 });
 
 test('with no .bib record, a bibliography click lands in the .bbl the project ships', () => {

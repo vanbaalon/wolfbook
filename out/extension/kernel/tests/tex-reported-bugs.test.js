@@ -63,13 +63,15 @@ const conventional = { calls: 0, next: null };
 const oldLoad = Module._load;
 Module._load = function (req, ...args) {
     if (req === 'vscode') return stub;
+    if (req === './nativeRuntime') return { hasNativeRuntime: () => true };
     if (req === './nativeCompileService') return { NativeBuildLane: class {
         constructor() { lane.constructed++; if (!lane.installed) throw Error('runtime missing'); this.directory = '/built/wlatex'; }
         async compile(o) {
             lane.compiles++;
+            const next = lane.next; lane.next = null;
             return { ok: true, runner: 'wlatex', generation: 1000 + lane.compiles, pdfPath: 'unused', pdfHash: 'native',
                 sourceSnapshotHash: o.sourceSnapshotHash, nativeCompiledSources: new Map(),
-                pageCount: 1, rerunWanted: !lane.settled, diagnostics: [] };
+                pageCount: 1, rerunWanted: !lane.settled, diagnostics: [], ...(next || {}) };
         }
         invalidate() {}
         async close() { this.closed = true; }
@@ -99,6 +101,42 @@ const { decideFollow } = require('../../tex/viewerFollow');
 const { describeExit, describeCompileFailure } = require('../../tex/compileService');
 
 // ── shared fakes ───────────────────────────────────────────────────────────
+
+test('run-in paragraph titles and their prose open as one mini-editor block', () => {
+    for (const cmd of ['paragraph', 'subparagraph']) for (const gap of ['', '\n% a source comment\n']) {
+        const source = `\\documentclass{article}\n\\begin{document}\n\\section{Intro}\n\\${cmd}{A title with\n two lines.}\n${gap}The paragraph starts here and continues\non the following source line.\n\nNext paragraph.\n\\end{document}`;
+        const file = '/paper.tex', lines = source.split('\n');
+        const model = buildModel(scanTex(source, { file }), { file });
+        const viewer = { _modelFor: () => model };
+        const endLine = lines.indexOf('on the following source line.') + 1;
+        for (const line of [4, 5, endLine - 1, endLine]) {
+            const block = TexViewer.prototype._blockAt.call(viewer, textDoc(file, source), lines, file, line);
+            assert.equal(block.startLine, 4, `${cmd}, click on line ${line}`);
+            assert.equal(block.endLine, endLine);
+        }
+        const next = TexViewer.prototype._blockAt.call(viewer, {}, lines, file, endLine + 2);
+        assert.equal(next.startLine, endLine + 2, 'the next paragraph remains separate');
+        const section = TexViewer.prototype._blockAt.call(viewer, {}, lines, file, 3);
+        assert.equal(section.endLine, 3, 'a section remains its own block');
+    }
+});
+
+test('run-in title blocks stop before a display or heading and include inline prose', () => {
+    const file = '/paper.tex';
+    const block = (body, line) => {
+        const source = `\\documentclass{article}\n\\begin{document}\n${body}\n\\end{document}`;
+        const model = buildModel(scanTex(source, { file }), { file });
+        return TexViewer.prototype._blockAt.call({ _modelFor: () => model },
+            textDoc(file, source), source.split('\n'), file, line);
+    };
+    for (const next of ['\\section{Next}', '\\paragraph{Next}', '\\[\nx=1\n\\]']) {
+        assert.equal(block(`\\paragraph{Title}\n\n${next}`, 3).endLine, 3);
+    }
+    for (const line of [3, 4]) {
+        const b = block('\\paragraph{Title} Prose starts on this line\nand continues here.\n\nNext paragraph.', line);
+        assert.deepEqual([b.startLine, b.endLine], [3, 4]);
+    }
+});
 
 /** A VS Code-shaped document over `text` (mutable with `set`). */
 function textDoc(fsPath, text) {
@@ -472,7 +510,7 @@ function runBug11Child() {
     const tex = require(path.join(EXT, 'out/extension/tex/index.js'));
     Module._load = origLoad;
     const scheduled = [];
-    renderUi.RenderCoordinator.prototype.scheduleLive = function (doc) { scheduled.push(doc.uri.fsPath); };
+    renderUi.RenderCoordinator.prototype.scheduleExternal = function (doc) { scheduled.push(doc.uri.fsPath); };
     TexViewer.prototype.isOpen = () => true;
     TexViewer.prototype.preserveViewerLayoutAfterExternalChange = () => true;
     Object.defineProperty(TexViewer.prototype, 'root', { configurable: true, get: () => ROOT, set: () => {} });
@@ -565,7 +603,7 @@ test('#19 with mapEngine=wlatex and an installed runtime the paper builds on the
     } finally { f.close(); }
 });
 
-test('#19 when WPaper falls back to its own compiler it says why', async () => {
+test('#19 optional engine startup fallback logs its reason without an unreleased-engine popup', async () => {
     const f = coordinatorFixture();
     lane.installed = false;
     const shown = warnings.length;
@@ -573,7 +611,7 @@ test('#19 when WPaper falls back to its own compiler it says why', async () => {
         await f.coordinator.build(f.doc, { quiet: true });
         assert.match(f.state.nativeUnavailable, /WLaTeX unavailable: runtime missing\. Using the normal WPaper compiler/);
         assert.ok(f.log.some(l => /WLaTeX unavailable: runtime missing/.test(l)), 'in the output channel');
-        assert.ok(warnings.slice(shown).some(w => /WLaTeX unavailable: runtime missing/.test(w.message)), 'and in a notification');
+        assert.equal(warnings.length, shown, 'no unreleased-engine notification');
     } finally { lane.installed = true; f.close(); }
 });
 
@@ -660,6 +698,102 @@ test('#26 on the live lane typing never raises the "updating from editor" pause'
     assert.ok(off.posts.some(p => p.type === 'traceState' && p.paused && p.source === 'editor'));
 });
 
+test('#27 a paper WLaTeX cannot build reads off, not settling for ever, and its lane is retired', async () => {
+    const f = coordinatorFixture();
+    const badge = () => {
+        const posts = [];
+        TexViewer.prototype._postEngine.call({ coord: f.coordinator, context: { globalState: { get: () => true } },
+            _post: m => posts.push(m) }, f.state);
+        return posts.at(-1).state;
+    };
+    try {
+        await f.coordinator.build(f.doc, { live: true, quiet: true });
+        const oldLane = f.state.nativeLane;
+        assert.ok(oldLane, 'on the WLaTeX lane first');
+        // WLaTeX hits an error pdflatex does not: the paper needs pdflatex.
+        lane.next = { ok: false, errors: 1, diagnostics: [{ severity: 'error', message: 'Undefined control sequence.' }] };
+        fs.appendFileSync(f.root, '% typed\n');
+        await f.coordinator.build(f.doc, { live: true, quiet: true });
+        assert.match(f.state.nativeOff || '', /cannot build this paper/);
+        assert.notEqual(f.state.generation.runner, 'wlatex', 'the pdflatex build is shown');
+        assert.equal(badge(), 'off', 'the build that found it out: off, though the lane is still attached');
+        const before = lane.compiles;
+        await f.coordinator.build(f.doc, { live: true, quiet: true });
+        assert.equal(lane.compiles, before, 'WLaTeX is not asked again');
+        assert.equal(oldLane.closed, true, 'the WLaTeX worker is closed');
+        assert.equal(f.state.nativeLane, null);
+        assert.equal(badge(), 'off', 'and every later build says off — the badge used to spin "settling" here');
+        fs.appendFileSync(f.root, '% repaired body\n');
+        await f.coordinator.build(f.doc, { live: true, quiet: true });
+        assert.ok(lane.compiles > before, 'new source retries WLaTeX without changing the preamble');
+        assert.equal(f.state.nativeOff, null);
+        assert.notEqual(badge(), 'off');
+    } finally { lane.next = null; f.close(); }
+});
+
+// ── a comment on prose beside a display reads "location changed" at once ────
+
+/**
+ * Comment on `line` the way the mini-editor's comments pane does (addAt), then
+ * list the comments the way the dropdown does. Exported through the env so the
+ * same check can be pointed at a real paper.
+ */
+function commentRoundTrip(source, lines, { memo = false } = {}) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wpaper-comment-'));
+    const file = path.join(dir, 'paper.tex');
+    fs.writeFileSync(file, source);
+    const { CommentStore } = require('../../tex/commentStore');
+    const { scanTex } = require('../../tex/texScanner');
+    const { buildModel } = require('../../tex/texModel');
+    const viewer = Object.create(TexViewer.prototype);
+    viewer.projection = { fromText: (text, f) => buildModel(scanTex(text, { file: f }), { file: f }) };
+    viewer.comments = new CommentStore();
+    if (memo) {     // the text never changes here; a real paper is re-scanned only once
+        const once = TexViewer.prototype._commentObjects.call(viewer, file);
+        viewer._commentObjects = () => once;
+    }
+    const doc = textDoc(file, source);
+    try {
+        const picked = lines.map(line => {
+            const obj = viewer._commentObject(doc, line, null);
+            viewer.comments.add(file, obj, `on line ${line}`, {}, viewer._commentObjects(file));
+            return obj;
+        });
+        return { picked, items: viewer.comments.list([file], f => viewer._commentObjects(f)).items };
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
+test('comments on prose that runs into a display equation stay placed (no "location changed" on save)', () => {
+    const source = [
+        '\\documentclass{article}', '\\begin{document}', '\\section{Model}',
+        'The density is constant, $\\varpi=\\varpi_0$, so the spectral variable',   // 4
+        'stays bounded and the kernel takes the form',                             // 5
+        '\\begin{equation}', ' K(x,y)=\\frac{1}{x-y}\\,,', '\\end{equation}',
+        'where we write $\\varpi$ rather than $\\rho$ because $\\rho$ is used.',     // 9
+        '', 'A short paragraph of plain prose that the scanner does keep as a unit.', // 11
+        '\\end{document}', ''].join('\n');
+    const { picked, items } = commentRoundTrip(source, [4, 9, 7, 11]);
+    assert.deepEqual(picked.map(o => o.kind), ['paragraph', 'paragraph', 'display-equation', 'paragraph'],
+        'the equation line still gets the equation, not a prose run');
+    for (const item of items) assert.equal(item.detached, false, `${item.text}: found again`);
+    const at = Object.fromEntries(items.map(i => [i.text, [i.line, i.endLine]]));
+    assert.deepEqual(at['on line 4'], [4, 5]);
+    assert.deepEqual(at['on line 9'], [9, 9]);
+});
+
+if (process.env.WPAPER_COMMENT_PAPER) {
+    test('real paper: every prose line takes a comment that is found again', () => {
+        const source = fs.readFileSync(process.env.WPAPER_COMMENT_PAPER, 'utf8');
+        const all = source.split('\n');
+        const body = all.findIndex(s => /\\begin\s*\{document\}/.test(s)) + 2;
+        const lines = all.map((s, i) => i + 1).filter(l => l >= body && /[A-Za-z]{4}/.test(all[l - 1]))
+            .filter((_, i) => i % 20 === 0);
+        const { items } = commentRoundTrip(source, lines, { memo: true });
+        const lost = items.filter(i => i.detached);
+        assert.equal(lost.length, 0, `${lost.length}/${items.length} detached: ${lost.slice(0, 5).map(i => i.text).join(', ')}`);
+    });
+}
+
 // ── #27 with Pro off, WPaper equals the pre-Pro release ─────────────────────
 
 test('#27 with Pro switched off the paper builds with the ordinary compiler and the lane is retired', async () => {
@@ -680,6 +814,43 @@ test('#27 with Pro switched off the paper builds with the ordinary compiler and 
         TexViewer.prototype._postEngine.call({ coord: f.coordinator, _post: m => posts.push(m) }, f.state);
         assert.equal(posts.at(-1).state, 'disabled', 'the badge is grey');
     } finally { f.close(); }
+});
+
+test('an idle Pro lane with a completed conventional PDF does not spin settling forever', () => {
+    const posts = [];
+    TexViewer.prototype._postEngine.call({ coord: {}, _post: m => posts.push(m) }, {
+        nativeLane: {}, sourceAhead: false, compiling: false, authoritativeRunning: false,
+        generation: { ok: true, runner: 'latexmk', rerunWanted: false },
+    });
+    assert.equal(posts.at(-1).state, 'settled');
+});
+
+test('selecting standard mode hides a retained Pro generation badge immediately', () => {
+    const posts = [], previous = cfg.mapEngine;
+    try {
+        cfg.mapEngine = 'auto';
+        TexViewer.prototype._postEngine.call({ coord: {}, _post: m => posts.push(m) }, {
+            generation: { ok: true, runner: 'wlatex' }, nativeOff: 'old Pro refusal',
+        });
+        assert.equal(posts.at(-1).state, null);
+    } finally { cfg.mapEngine = previous; }
+});
+
+test('live-mode trace suppression still remembers that the mini-editor owns the caret', async () => {
+    const { viewer, posts } = traceViewer();
+    const doc = textDoc(PAPER, 'abc');
+    viewer._miniApplyingFile = PAPER;
+    viewer._edit = { id: 1 };
+    viewer._lastEditCaret = { editId: 1, start: 2, end: 2 };
+    let card = 0, editor = 0;
+    viewer._onEditCaret = async () => { card++; };
+    viewer.syncFromEditor = () => { editor++; };
+    viewer.noteSourceChanged(doc);
+    assert.equal(viewer._tracePaused, false);
+    await viewer._resumeTracing({ source: viewer._traceSource });
+    assert.equal(card, 1, 'rebuild replays the card caret');
+    assert.equal(editor, 0, 'the old source-editor caret cannot move the page');
+    assert.ok(!posts.some(p => p.type === 'traceState' && p.paused));
 });
 
 test('#27 without Pro the section drag, figure move, image drop and page formats do nothing', async () => {
@@ -832,10 +1003,14 @@ test('#33 when the card cannot open yet, the reason is shown', async () => {
     const f = nativeClickFixture({ text: EQ_DOC, line: EQ_LINE, column: EQ_COL });
     f.map.available = false;
     f.viewer.coord.ensureNativeMap = async () => {};   // still re-reading
-    assert.equal(await f.rightClick(), undefined);
-    const status = f.posts.find(p => p.type === 'status');
-    assert.ok(status, 'not silent');
-    assert.match(status.text, /still updating — right-click again/);
+    f.viewer._probeViewer = async () => ({ok:false,reason:'PDF is still loading'});
+    try {
+        assert.equal(await f.rightClick(), undefined);
+        const status = f.posts.find(p => p.type === 'status');
+        assert.ok(status, 'not silent');
+        assert.match(status.text, /updating the page for the editor/);
+        assert.ok(f.viewer._pendingEditOpen,'the click waits for the PDF handoff instead of being lost');
+    } finally { clearTimeout(f.viewer._pendingEditOpenTimer); }
 });
 
 // ── #34 an unnecessary full recompile freezes the viewer and editor ─────────
@@ -853,6 +1028,7 @@ test('#34 a source-map re-read waits while a build runs, and is skipped when the
     coord._runNativeRefresh = async () => { runs.push(Date.now()); };
     coord._nativeWindow = () => [1, 2];
     const lane = { interactive: true };
+    st.nativeLane = lane;
     const sleep = ms => new Promise(r => setTimeout(r, ms));
     coord._scheduleNativeRefresh(st, lane, 0);
     await sleep(150);
@@ -994,7 +1170,9 @@ test('#43 a live page near the card re-measures its block and moves it (one page
     const lane = { projectDir: path.dirname(file), source: { isCurrentView: v => v === view }, liveView: async pages => { reads.push(pages); return view; } };
     const posts = [];
     const viewer = Object.create(TexViewer.prototype);
-    Object.assign(viewer, { _post: m => posts.push(m), _liveMapReady: new Map([[3, 'h3'], [9, 'h9']]), _liveOverlays: new Map([[3, 'h3'], [9, 'h9']]),
+    Object.assign(viewer, {root:file,panel:{},coord:{roots:new Map([[file,{sourceRevision:0}]])},
+        _postErrorAnnotations(){},_rememberEditPage(){},
+        _post: m => posts.push(m), _liveMapReady: new Map([[3, 'h3'], [9, 'h9']]), _liveOverlays: new Map([[3, 'h3'], [9, 'h9']]),
         _editRectsLast: [{ page: 3, x: 10, y: 20, w: 8, h: 9 }],
         _edit: { id: 7, file, startOffset: 2, endOffset: text.length - 1 } });
     const saved = stub.workspace.openTextDocument;
@@ -1050,6 +1228,7 @@ test('#44 the editor echo of a mini-editor caret move does not answer it a secon
 test('a placed paragraph fragment goes to the webview for the page it was placed on; nothing without a place or a page on screen', () => {
     const posts = [];
     const viewer = Object.create(TexViewer.prototype);
+    viewer.coord = {};
     Object.assign(viewer, { panel: {}, root: '/p/paper.tex', shownAnything: true, _post: m => posts.push(m) });
     const placement = { page: 5, identity: 'h5', dx: 0, dy: 0, clip: [0, 0, 1, 1], clear: [0, 0, 1, 1], below: [0, 1, 1, 1], shift: 0 };
     const event = { kind: 'fragment', root: '/p/paper.tex', generation: 9, page: 4, index: 0, txdl: { ops: [] }, fonts: {}, placement };

@@ -11,6 +11,7 @@ const crypto = require("crypto");
 const { decodeWstpText, cleanPrintLine, setBoxToLatexProvider } = require('../utils/encoding');
 const paperSearch = require('./paperSearch');
 const { readCommittedOutputs, runCellViaPipeline } = require('./cell-pipeline');
+const { ensureKernelReady } = require('../kernel/ensure-ready');
 const { CELL_STATE, stateLabel, stateRemedy, isConfirmed } = require('./cell-state');
 const { SelfTestTool } = require('./self-test');
 const { projectNotebook, ContentAddressedRenderCache } = require('../claude-mcp/output-projection');
@@ -21,7 +22,7 @@ const { changedSince } = require('../monitor/notebook-revisions');
 
 // Wire up the BTL (box-to-LaTeX) C++ addon so cleanPrintLine can convert BoxData → LaTeX.
 // Uses the same platform-aware loading strategy as output/renderer.js.
-// Runs once at module load; failures are silent (cleanPrintLine falls back to [formula]).
+// Runs once at module load; failures are silent (cleanPrintLine retains readable boxes).
 ;(function _setupBtlProvider() {
     const _BTL_DIR = path.join(__dirname, '../../../wllatex-addon');
     let _btlAddon = null;
@@ -61,7 +62,7 @@ const {
     normalizeToolContent,
     normalizeMarkdownMath, prepareCellContent, _canonCellId, splitWLIntoStatements,
     checkMarkdownKaTeX, _katexWarnings, _katexWarningsForCells,
-    _isCollabMode, _ensureCollabEditor, flashCell, notifyAgentNotebookEvent,
+    flashCell, notifyAgentNotebookEvent, notebookToolEditor, setAgentControllerProvider,
     _snapshotViewport, _restoreViewport,
     buildTranscript, getCellToolId, _ensureCellToolId,
     formatCellRef, resolveCellIndex, resolveInsertIndex,
@@ -138,7 +139,7 @@ const {
 const {
     PaperGetOutlineTool, PaperGetObjectTool, PaperGetSectionTool,
     PaperFindReferencesTool, PaperMathematicaBlocksTool,
-    PaperPreviewEditTool, PaperApplyEditTool,
+    PaperPreviewEditTool, PaperApplyEditTool, PaperListenCommentsTool,
     // `PaperSearchTool` is already taken in this file by the LITERATURE search
     // (wolfbook_paperSearch, Semantic Scholar/arXiv). Ours searches the open
     // paper's own objects, so it is aliased rather than renamed upstream.
@@ -298,27 +299,22 @@ class NewNotebookTool {
     }
 
     async _openWithTimeout(uri, ms) {
-        return Promise.race([
-            vscode.workspace.openNotebookDocument(uri),
-            new Promise((_, reject) => setTimeout(() => reject(new Error(`openNotebookDocument timed out after ${ms} ms`)), ms)),
-        ]);
-    }
-
-    async _waitUntilVisible(uri, ms) {
-        const deadline = Date.now() + ms;
-        while (Date.now() < deadline) {
-            const ed = vscode.window.visibleNotebookEditors.find(e => e.notebook.uri.toString() === uri.toString());
-            if (ed && ed.notebook.notebookType === 'extended-wolfram-notebook') return ed;
-            await new Promise(resolve => setTimeout(resolve, 100));
-        }
-        return null;
+        let timer;
+        try {
+            return await Promise.race([
+                vscode.workspace.openNotebookDocument(uri),
+                new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`openNotebookDocument timed out after ${ms} ms`)), ms); }),
+            ]);
+        } finally { clearTimeout(timer); }
     }
 
     async invoke(options, _token) {
         const input = options.input || {};
+        const {scopedPath,assertKernelScope}=require("../kernel/agentScope");
         let nbPath;
         try {
-            nbPath = this._resolveNotebookPath(input);
+            nbPath = this._resolveNotebookPath(input._agentScope ? {...input,directory:input.directory || input._agentScope.directory} : input);
+            if(input._agentScope) nbPath=scopedPath(input._agentScope,nbPath);
         } catch (err) {
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(`Cannot create notebook: ${err.message}`)]);
         }
@@ -329,11 +325,12 @@ class NewNotebookTool {
 
         const overwrite = !!input.overwrite;
         const waitMs = Math.max(1000, Math.min(Number(input.waitMs || 10000), 60000));
-        // isolation: "none" (shared default kernel, Global`), "kernel" (a new
+        // isolation: "none" (workspace/shared default kernel, Global`), "kernel" (a new
         // private kernel process), or "context" (shared kernel, but the notebook
         // evaluates in its own $Context — Mathematica's "Unique to This Notebook").
         const nbContext = require('../kernel/notebook-context');
-        const isolation = String(input.isolation || 'none').toLowerCase();
+        const isolation = String(input.isolation || (input._agentScope && !input.kernel_id &&
+            !this._manager?.newNotebookDefaultSlot ? 'kernel' : 'none')).toLowerCase();
         if (!['none', 'kernel', 'context'].includes(isolation)) {
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
                 `Unknown isolation "${input.isolation}". Use "none", "kernel" or "context".`)]);
@@ -364,6 +361,18 @@ class NewNotebookTool {
         };
 
         const existed = fs.existsSync(nbPath);
+        if (!input.kernel_id && isolation !== 'kernel' && this._manager?.notebookBindingUnavailable?.(nbPath))
+            throw new Error('The assigned or workspace-default kernel is unavailable. Choose an available kernel explicitly; no default was substituted.');
+        if(input._agentScope || input.kernel_id) {
+            const requested=input.kernel_id ? this._manager?.get(input.kernel_id) : this._manager?.explicitBindingFor(nbPath);
+            if(input.kernel_id && !requested) throw new Error(`Unknown kernel_id: ${input.kernel_id}`);
+            if(input._agentScope && requested) assertKernelScope(input._agentScope,requested);
+            if(input._agentScope && !requested && isolation !== 'kernel') assertKernelScope(input._agentScope,
+                this._manager?.newNotebookDefaultEntry || this._manager?.defaultEntry);
+        }
+        if(isolation === 'kernel' && (!this._manager?.explicitBindingFor(nbPath) || this._manager?.explicitBindingFor(nbPath)?.isDefault) && !input.kernel_id && input.acknowledge_resource_cost !== true)
+            throw new Error('Private isolation starts a Wolfram process. Pass acknowledge_resource_cost:true.');
+
         try {
             // Existing files are opened safely by default. overwrite:true keeps
             // the original explicit replacement semantics for callers that
@@ -379,13 +388,9 @@ class NewNotebookTool {
         const uri = vscode.Uri.file(nbPath);
         try {
             const doc = await this._openWithTimeout(uri, waitMs);
-            await vscode.window.showNotebookDocument(doc, { preserveFocus: true, viewColumn: vscode.ViewColumn.Active });
-            const ed = await this._waitUntilVisible(uri, waitMs);
-            if (!ed) {
-                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                    `Created ${path.basename(nbPath)}, but VS Code did not make the notebook editor visible within ${waitMs} ms.`
-                )]);
-            }
+            // Loading the model is enough for tools. Showing it with
+            // preserveFocus:true still replaces WPaper in the active group.
+            const ed = notebookToolEditor(doc);
 
             // An existing notebook asked for its own context gets the setting
             // written into its metadata (and saved, so the file carries it).
@@ -399,58 +404,52 @@ class NewNotebookTool {
                 try { await ed.notebook.save(); } catch (_) {}
             }
 
-            // isolation:"kernel" — start a private kernel and bind this notebook
-            // to it BEFORE the default-slot binding below (which then skips it).
             let isolationLine = '';
-            if (isolation === 'kernel') {
-                if (!this._manager) {
-                    isolationLine = 'Isolation: no kernel manager in this window — the notebook uses the shared kernel.';
-                } else {
-                    try {
-                        const entry = await this._manager.create({ label: input.kernel_label });
-                        await this._manager.bind(nbPath, entry.id);
-                        isolationLine = `Isolation: new private kernel ${entry.label} (${entry.id}) — no definitions are shared with other notebooks.`;
-                    } catch (err) {
-                        isolationLine = `Isolation: could not start a private kernel (${err.message}) — the notebook uses the shared kernel. ` +
-                            'Retry with isolation:"context" to separate definitions on the shared kernel.';
-                    }
-                }
-            } else if (contextSetting) {
-                isolationLine = `Isolation: cells evaluate in ${nbContext.describeContextSetting(contextSetting, nbPath)} on the shared kernel. ` +
-                    'Names that already exist in Global` still resolve there.';
+            let assignedEntry = input.kernel_id ? this._manager?.get(input.kernel_id) : this._manager?.explicitBindingFor(nbPath);
+            if(isolation === "kernel" && assignedEntry?.isDefault && !input.kernel_id) assignedEntry=null;
+            if(isolation === "kernel" && assignedEntry?.isDefault) throw new Error("Kernel isolation requires a dedicated process, not the shared default.");
+            if (assignedEntry && input._agentScope) assertKernelScope(input._agentScope,assignedEntry);
+            if (input.kernel_id && !assignedEntry) throw new Error(`Unknown kernel_id: ${input.kernel_id}`);
+            if (isolation === 'kernel' && !assignedEntry) {
+                if (!this._manager) throw new Error('Private kernel manager unavailable; no shared fallback was used.');
+                if(input.acknowledge_resource_cost !== true) throw new Error('Private isolation starts a Wolfram process. Pass acknowledge_resource_cost:true.');
+                assignedEntry = await this._manager.createAndBind(nbPath, {
+                    label:input.kernel_label,
+                    ...(input._agentScope ? {owner_folder:input._agentScope.directory,
+                        owner_scope_id:input._agentScope.scope_id,sharing:input._agentScope.sharing === 'folder' ? 'folder' : 'private'} : {}),
+                });
             }
+            if (isolation === 'kernel') isolationLine = `Isolation: private kernel ${assignedEntry.label} (${assignedEntry.id}).`;
+            else if(contextSetting) isolationLine = `Isolation: ${nbContext.describeContextSetting(contextSetting,nbPath)}; this separates names, not kernel state.`;
+            const defaultKernel = this._manager?.newNotebookDefaultEntry || this._manager?.defaultEntry;
+            assignedEntry ||= defaultKernel;
+            if(input._agentScope) assertKernelScope(input._agentScope,assignedEntry);
+            if(assignedEntry) await this._manager.bind(nbPath,assignedEntry.id);
 
-            // Agent-created notebooks must be immediately routable. Persist an
-            // explicit default-slot association before exposing the notebook as
-            // the MCP target; this remains VS Code workspace state, never .wb
-            // metadata.
-            const defaultKernel = this._manager?.defaultEntry;
-            if (defaultKernel && !this._manager.explicitBindingFor(nbPath)) {
-                await this._manager.bind(nbPath, defaultKernel.id);
-            }
-
-            // Select the VS Code controller for this notebook NOW.  manager.bind()
-            // only records workspace state; without a real controller selection
-            // createNotebookCellExecution throws "not associated" and the first
-            // runs are silently dropped (the phantom-run bug).
-            const boundEntry = this._manager?.bindingFor?.(nbPath) || defaultKernel;
+            // Explicit reveal restores open + bind + controller selection in
+            // one tool call. Background loading remains navigation-neutral.
+            const boundEntry = this._manager?.bindingFor?.(nbPath) || assignedEntry;
+            const shownEditor = input.reveal === true
+                ? await vscode.window.showNotebookDocument(ed.notebook, { preserveFocus: true, preview: false }) : null;
+            let association = {associated:false,method:"unavailable"};
             let assocLine = 'Kernel: no kernel available to associate.';
             if (boundEntry?.controller) {
                 const { associateNotebook } = require('../kernel/association');
-                const assoc = await associateNotebook(boundEntry.controller, ed.notebook, { restoreActive: false });
+                const assoc = association = await associateNotebook(boundEntry.controller, ed.notebook, {
+                    allowReveal: input.reveal === true, restoreActive: false, notebookEditor: shownEditor,
+                });
                 const label = boundEntry.label || boundEntry.id || 'kernel';
                 assocLine = assoc.associated
                     ? `Kernel: ${label} — controller selected for this notebook ✓`
-                    : `Kernel: ${label} — binding recorded, but VS Code did not confirm controller selection (${assoc.method}); the first run will retry the association.`;
+                    : `Kernel: ${label} — binding recorded, but VS Code did not confirm controller selection (${assoc.method}); retry wolfbook_newNotebook with this path, reveal:true and kernel_id:${boundEntry.id}. This opens and selects it automatically; do not ask the user to click.`;
             }
 
-            // Reuse the shared resolver so Copilot/in-editor targeting hooks see
-            // the new active notebook too.
-            try { await resolveNotebookEditor(nbPath, { skipConfirm: true }); } catch (_) {}
+            // Update the agent target without activating the user's editor.
+            if(input.target !== false) try { await resolveNotebookEditor(nbPath, { notify: false }); } catch (_) {}
 
             // Creating/selecting a notebook changes the agent target, not the
-            // user's editor focus. Offer an explicit way to open or follow it.
-            void notifyAgentNotebookEvent({
+            // user's editor focus. Offer an explicit action to open it.
+            if (!shownEditor) void notifyAgentNotebookEvent({
                 notebook: ed.notebook,
                 kind: existed ? 'switched' : 'created',
             });
@@ -461,6 +460,7 @@ class NewNotebookTool {
             let evalLines = '';
             if (input.evaluate === true && boundEntry?.controller) {
                 const _ctrl = boundEntry.controller;
+                if (Array.from({ length: ed.notebook.cellCount }, (_, i) => ed.notebook.cellAt(i)).some(cell => cell.kind === vscode.NotebookCellKind.Code)) await ensureKernelReady(_ctrl);
                 if (_ctrl.kernelStatusString !== 'resolved') {
                     evalLines = '\nEvaluate: kernel is not running — initial cells were NOT evaluated.';
                 } else {
@@ -476,7 +476,7 @@ class NewNotebookTool {
                         });
                         const ok = isConfirmed(pipeline.state);
                         parts.push(`Cell ${idx + 1}: ${ok ? '✓' : `⚠ ${stateLabel(pipeline.state)}`} — ${
-                            ok ? (pipeline.plain?.slice(0, 200) || stateLabel(CELL_STATE.EVALUATED_NO_OUTPUT)) : stateRemedy(pipeline.state)}`);
+                            ok ? (pipeline.plain?.slice(0, 200) || stateLabel(CELL_STATE.EVALUATED_NO_OUTPUT)) : stateRemedy(pipeline.state, { reason: pipeline.evidence?.reason })}`);
                         if (!ok) break;
                     }
                     evalLines = parts.length ? '\nEvaluate:\n' + parts.map(p => '  ' + p).join('\n') : '';
@@ -486,17 +486,22 @@ class NewNotebookTool {
             }
 
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                `${existed && !overwrite ? 'Opened existing' : 'Created and opened'} **${path.basename(nbPath)}**.\n` +
+                `${existed && !overwrite ? 'Loaded existing' : 'Created'} **${path.basename(nbPath)}**.\n` +
                 `Path: ${nbPath}\n` +
-                `Ready: notebook editor is visible (${ed.notebook.cellCount} cells).\n` +
+                `Ready: notebook ${shownEditor ? 'opened in an editor' : 'loaded in the background'} (${ed.notebook.cellCount} cells).\n` +
                 assocLine + '\n' +
                 (isolationLine ? isolationLine + '\n' : '') +
-                `Target: this notebook is ready for subsequent Wolfbook MCP editing and evaluation tools.` +
+                `Target: subsequent Wolfbook MCP tools target this notebook; evaluation requires its controller to be selected.` +
                 evalLines
-            )]);
+            ), new vscode.LanguageModelTextPart(JSON.stringify({ok:true,receipt:"notebook-binding",
+                ...this._manager?.annotateNotebook?.(nbPath),notebook:nbPath,
+                controller_selected:association.associated,association:association.method,revealed:!!shownEditor,
+                ...(!association.associated ? {next_action:{tool:'wolfbook_newNotebook',
+                    arguments:{path:nbPath,reveal:true,...(boundEntry?.id ? {kernel_id:boundEntry.id} : {})}}} : {}),
+                evaluation_ready:association.associated && boundEntry?.controller?.kernelStatusString === 'resolved'}))]);
         } catch (err) {
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                `Created ${path.basename(nbPath)}, but failed to open it as a Wolfbook notebook: ${err.message}`
+                JSON.stringify({ok:false,code:err.code || "NOTEBOOK_SETUP_FAILED",notebook:nbPath,message:err.message})
             )]);
         }
     }
@@ -584,8 +589,8 @@ class GetNotebookContextTool {
                     new vscode.LanguageModelTextPart('notebook parameter is required for action="switch". Use action="list" to see open notebooks.')
                 ]);
             }
-            // Explicit switch action — user already expressed intent, skip confirmation
-            const editor = await resolveNotebookEditor(notebook, { skipConfirm: true, preserveFocus: true });
+            // Switching the agent target does not switch the user's editor.
+            const editor = await resolveNotebookEditor(notebook, { notify: false });
             if (!editor) {
                 const available = [..._allNotebookUris().keys()].map(p => p.split('/').pop()).join(', ');
                 return new vscode.LanguageModelToolResult([
@@ -904,6 +909,7 @@ class EvaluateExpressionTool {
         const timeoutSec = Number(options.input?.timeoutSeconds) || 30;
 
         const controller = this._getController(options?.input || {});
+        await ensureKernelReady(controller);
         if (!controller || !controller.session || controller.kernelStatusString !== 'resolved') {
             return new vscode.LanguageModelToolResult([
                 new vscode.LanguageModelTextPart('Error: kernel is not running. Launch the kernel first.')
@@ -1307,7 +1313,7 @@ class LookupSymbolTool {
         try {
             controller = this._getController(kernelScopedInput(options));
         } catch (_) {
-            controller = this._getController?.manager?.defaultEntry?.controller || null;
+            if(!options.input?._agentScope) controller = this._getController?.manager?.defaultEntry?.controller || null;
         }
 
         let localResult = null;
@@ -1453,7 +1459,7 @@ class InsertCellsTool {
         await vscode.workspace.applyEdit(edit);
 
         // Follow mode reveals it; otherwise an off-screen notebook gets one
-        // non-blocking invitation to follow the agent.
+        // non-blocking invitation to open the notebook.
         await flashCell(editor, insertIdx);
 
         // Restore left editor scroll position — the insert scrolled it to the new cell.
@@ -1504,6 +1510,7 @@ class InsertCellsTool {
                 const evalResults = [];
 
                 const _ctrl = this._getController?.({ ...(options?.input || {}), notebook: notebook.uri.fsPath });
+                await ensureKernelReady(_ctrl);
                 if (!_ctrl || typeof _ctrl.execute !== 'function') {
                     lines.push('\n[evaluate] No controller available — cells inserted but not evaluated.');
                     evaluationOutcome = { state: 'not-started', code: 'controller-unavailable' };
@@ -1559,7 +1566,7 @@ class InsertCellsTool {
                                 : '✓';
                             const outStr   = (confirmed || timedOut)
                                 ? summariseEvalOutputs(outs, hasError)
-                                : stateRemedy(state);
+                                : stateRemedy(state, { reason: pipeline?.evidence?.reason });
                             const cellRef  = formatCellRef(idx, updatedCell);
                             // Detect Syntax:: messages — surface prominently so the agent knows
                             // definitions may be stale (e.g. Get[file] with a bad string escape).
@@ -1900,6 +1907,11 @@ class EditCellTool {
 
             // Prepare controller once before the loop
             const _ctrl = doEval ? this._getController?.({ ...(options?.input || {}), notebook: notebook.uri.fsPath }) : null;
+            if (doEval && items.some(item => {
+                if (!item || item.evaluate === false || !String(item.content ?? '').trim()) return false;
+                const target = resolveCellIndex(notebook, item.cellId ?? item.cellNumber, item.cellId != null ? 'cellId' : 'cellNumber');
+                return !target.error && notebook.cellAt(target.idx).kind === vscode.NotebookCellKind.Code;
+            })) await ensureKernelReady(_ctrl);
             const useCtrl = doEval && _ctrl && typeof _ctrl.execute === 'function' && _ctrl.kernelStatusString === 'resolved';
             let _toolLease = null;
             if (useCtrl) {
@@ -2017,7 +2029,7 @@ class EditCellTool {
                     evalStatus = `  ⏱ timed out after ${timeoutSec}s`;
                     evalErrorCount++;
                 } else if (!isConfirmed(pipeline.state)) {
-                    evalStatus = `  ⚠ ${stateLabel(pipeline.state)} — ${stateRemedy(pipeline.state)}`;
+                    evalStatus = `  ⚠ ${stateLabel(pipeline.state)} — ${stateRemedy(pipeline.state, { reason: pipeline.evidence?.reason })}`;
                     evalErrorCount++;
                 } else if (['failed', 'aborted', 'stale'].includes(pipeline.provenance?.status)) {
                     evalStatus = `  ⛔ ${pipeline.provenance.status}`;
@@ -2153,6 +2165,7 @@ class EditCellTool {
         const evaluate = options.input?.evaluate === true || options.input?.evaluate === 'true';
         if (evaluate && cell.kind !== vscode.NotebookCellKind.Markup && newContent.trim()) {
             const controller = this._getController?.({ ...(options?.input || {}), notebook: notebook.uri.fsPath });
+            await ensureKernelReady(controller);
             if (!controller || !controller.session || controller.kernelStatusString !== 'resolved') {
                 return jsonToolResult({ ok: true, state: 'completed-with-warning',
                     message: `Edited Cell ${cellNumber}; evaluation was not started because the kernel is offline.`,
@@ -2181,7 +2194,7 @@ class EditCellTool {
                 const evalOut = pipeline.state === CELL_STATE.TIMEOUT
                     ? `Timed out after ${timeoutSec}s; operation ${claim.lease.operationId} is still running.`
                     : !isConfirmed(pipeline.state)
-                    ? `⚠ ${stateLabel(pipeline.state)}. ${stateRemedy(pipeline.state)}`
+                    ? `⚠ ${stateLabel(pipeline.state)}. ${stateRemedy(pipeline.state, { reason: pipeline.evidence?.reason })}`
                     : (pipeline.provenance?.status === 'stale'
                         ? `Stale-result conflict: Cell ${cellNumber} changed during evaluation. Output was retained only in operation ${claim.lease.operationId}.`
                         : (pipeline.plain || `(${stateLabel(CELL_STATE.EVALUATED_NO_OUTPUT)})`));
@@ -2306,7 +2319,6 @@ class RunCellTool {
             let   stopped   = null;
 
             const _ctrl = this._getController?.({ ...(options?.input || {}), notebook: notebook.uri.fsPath });
-            const useSilent = _ctrl && typeof _ctrl.execute === 'function' && _ctrl.kernelStatusString === 'resolved';
 
             // An async range outlives its MCP request, so its token is never
             // cancelled: kernelControl abort only marks the OPERATION aborted.
@@ -2328,6 +2340,8 @@ class RunCellTool {
                 const remaining = deadline - Date.now();
                 if (remaining <= 0) { stopped = `global timeout (${timeoutSec}s) reached before Cell ${n}`; break; }
 
+                await ensureKernelReady(_ctrl);
+                const useSilent = _ctrl && typeof _ctrl.execute === 'function' && _ctrl.kernelStatusString === 'resolved';
                 let pipeline = null;
                 let fbUnconfirmed = null;   // fallback path: unconfirmed/timeout state
                 if (useSilent) {
@@ -2338,7 +2352,9 @@ class RunCellTool {
                 } else {
                     const prevEndTime = cell.executionSummary?.timing?.endTime ?? 0;
                     editor.selection = new vscode.NotebookRange(idx, idx + 1);
-                    await vscode.commands.executeCommand('notebook.cell.execute');
+                    await vscode.commands.executeCommand('notebook.cell.execute', {
+                        document: notebook.uri, ranges: [{ start: idx, end: idx + 1 }], autoReveal: false,
+                    });
                     const cellDeadline = Math.min(deadline, Date.now() + 300000);
                     await new Promise(resolve => {
                         const poll = () => {
@@ -2383,7 +2399,7 @@ class RunCellTool {
                     : '\u2713';
                 const outStr = (confirmed || timedOut)
                     ? summariseEvalOutputs(outs, hasError)
-                    : stateRemedy(state);
+                    : stateRemedy(state, { reason: pipeline?.evidence?.reason });
                 // Detect Syntax:: messages — surface prominently so the agent knows
                 // definitions may be stale (e.g. Get[file] with a bad string escape).
                 const hasSyntaxMsg = outs.some(t => /Syntax::\w+:/.test(t));
@@ -2440,6 +2456,7 @@ class RunCellTool {
         const timeoutSec = Number(options.input?.timeoutSeconds) || 30;
 
         const _ctrl = this._getController?.({ ...(options?.input || {}), notebook: notebook.uri.fsPath });
+        await ensureKernelReady(_ctrl);
         let pipeline = null;
         let fbUnconfirmed = null;   // fallback path: unconfirmed/timeout state
         if (_ctrl && typeof _ctrl.execute === 'function' && _ctrl.kernelStatusString === 'resolved') {
@@ -2450,7 +2467,9 @@ class RunCellTool {
         } else {
             // Fallback: no controller available
             editor.selection = new vscode.NotebookRange(idx, idx + 1);
-            await vscode.commands.executeCommand('notebook.cell.execute');
+            await vscode.commands.executeCommand('notebook.cell.execute', {
+                document: notebook.uri, ranges: [{ start: idx, end: idx + 1 }], autoReveal: false,
+            });
             const deadline = Date.now() + timeoutSec * 1000;
             const prevEndTime = cell.executionSummary?.timing?.endTime ?? 0;
             await new Promise(resolve => {
@@ -2507,7 +2526,7 @@ class RunCellTool {
             resultParts.push(`Cell ${cellNumber} (CellId: ${cellId}) of ${total} timed out after ${timeoutSec}s (execution may still be running).`);
         } else if (!confirmed) {
             resultParts.push(`Cell ${cellNumber} (CellId: ${cellId}) of ${total}: ${stateLabel(state)}.`);
-            resultParts.push(stateRemedy(state, { kernelLabel: _ctrl?.kernelIdentity?.label }));
+            resultParts.push(stateRemedy(state, { kernelLabel: _ctrl?.kernelIdentity?.label, reason: pipeline?.evidence?.reason }));
         } else {
             resultParts.push(`Cell ${cellNumber} (CellId: ${cellId}) of ${total} executed${timingStr}.`);
         }
@@ -2719,7 +2738,7 @@ class StatusTool {
         this._manager = getController?.manager;
     }
 
-    _kernelLines() {
+    _kernelLines(agentScope=null) {
         const manager = this._manager;
         if (!manager) return ['(no kernel manager)'];
         const notebooks = _allNotebookUris ? [..._allNotebookUris().keys()] : [];
@@ -2727,7 +2746,7 @@ class StatusTool {
         if (!rows.length) return ['(no kernels)'];
         return rows.map(k => {
             const nb = (k.notebooks || []).map(p => String(p).split('/').pop()).join(', ');
-            return `${k.kernel_label || '?'} ${k.kernel_id} · ${k.lifecycle || '?'}${k.remote ? ' · remote' : ''}${nb ? ` · ${nb}` : ''}`;
+            return `${k.kernel_label || '?'} ${k.kernel_id} · ${k.lifecycle || '?'}${k.remote ? ' · remote' : ''}${nb ? ` · ${nb}` : ''} · ${k.sharing || "shared"}${agentScope && require("../kernel/agentScope").kernelRecommended(agentScope,k) ? " · recommended for repository" : ""}${k.owner_folder ? ` · folder: ${k.owner_folder}` : ""}`;
         });
     }
 
@@ -2742,6 +2761,7 @@ class StatusTool {
     }
 
     async _notebookLines(input) {
+        if(input?._agentScope && !input.notebook)return ["(no scoped notebook selected)"];
         const doc = await resolveNotebookDocument(input?.notebook);
         if (!doc) return ['(no notebook resolved)'];
         const binding = this._manager?.bindingFor?.(doc.uri.fsPath);
@@ -2770,10 +2790,10 @@ class StatusTool {
         }
         const scope = input.scope || 'all';
         let controller = null;
-        try { controller = this._getController?.({ notebook: input.notebook, kernel_id: input.kernel_id }); } catch (_) {}
-        if (!controller) controller = this._manager?.defaultEntry?.controller || null;
+        try { controller = this._getController?.({ notebook: input.notebook, kernel_id: input.kernel_id,_agentScope:input._agentScope }); } catch (_) {}
+        if (!controller && !input._agentScope) controller = this._manager?.defaultEntry?.controller || null;
         const sections = [];
-        if (scope === 'kernels' || scope === 'all') sections.push('Kernels:', ...this._kernelLines().map(l => '  ' + l));
+        if (scope === 'kernels' || scope === 'all') sections.push('Kernels:', ...this._kernelLines(input._agentScope).map(l => '  ' + l));
         if (scope === 'operations' || scope === 'all') sections.push('Recent operations:', ...this._operationLines(controller).map(l => '  ' + l));
         if (scope === 'notebook' || scope === 'all') sections.push('Notebook:', ...(await this._notebookLines(input)).map(l => '  ' + l));
         if (!sections.length) sections.push(`Unknown scope "${scope}". Use clients | kernels | operations | notebook | all.`);
@@ -3405,13 +3425,17 @@ class KernelManagerTool {
         const action = input.action || 'list';
         const notebooks = _allNotebookUris ? [..._allNotebookUris().keys()] : [];
         let result;
-        if (action === 'list') result = { kernels: manager.list(notebooks) };
+        if (input._agentScope && input.notebook) input.notebook=require('../kernel/agentScope').scopedPath(input._agentScope,input.notebook);
+        manager.assertToolScope('wolfbook_kernelManager',input);
+        if (action === 'list') result = { kernels: manager.list(notebooks).map(k=>({...k,
+            ...require('../kernel/agentScope').kernelPreference(input._agentScope,k)})).sort((a,b)=>Number(b.recommended)-Number(a.recommended)),
+            capacity:manager.capacity(),bindings:notebooks.map(nb=>manager.annotateNotebook(nb)) };
         else if (action === 'create') {
             if (input.acknowledge_resource_cost !== true) throw new Error('Creating another Wolfram process may consume memory and a license seat; retry with acknowledge_resource_cost=true.');
-            const entry = await manager.create({ label: input.label });
-            result = input.notebook
-                ? await manager.bind(input.notebook, entry.id)
-                : manager.describe(entry, null);
+            const allocation={label:input.label,...(input._agentScope ? {owner_folder:input._agentScope.directory,
+                owner_scope_id:input._agentScope.scope_id,sharing:input._agentScope.sharing === 'folder' ? 'folder' : 'private'} : {})};
+            const entry=input.notebook ? await manager.createAndBind(input.notebook,allocation) : await manager.create(allocation);
+            result=manager.describe(entry,input.notebook);
         }
         else if (action === 'bind' || action === 'select') result = await manager.bind(input.notebook, input.kernel_id);
         else if (action === 'default') result = await manager.bind(input.notebook, manager.defaultEntry.id);
@@ -3419,6 +3443,17 @@ class KernelManagerTool {
         else if (action === 'rename') result = manager.rename(input.kernel_id, input.label);
         else if (action === 'stop') { await manager.stop(input.kernel_id); result = { stopped: input.kernel_id }; }
         else throw new Error(`Unknown kernel manager action: ${action}`);
+        if(input.notebook && ['create','bind','select','default','unbind'].includes(action)) {
+            const doc=vscode.workspace.notebookDocuments?.find(nb=>nb.uri.fsPath===input.notebook);
+            const entry=manager.bindingFor(input.notebook);
+            const assoc=doc && entry ? await require('../kernel/association').associateNotebook(entry.controller,doc,{allowReveal:false}) : {associated:false,method:'not-loaded'};
+            result={ok:true,receipt:'notebook-binding',...manager.annotateNotebook(input.notebook),
+                controller_selected:assoc.associated,association:assoc.method,
+                ...(!assoc.associated && entry ? {next_action:{tool:'wolfbook_newNotebook',
+                    arguments:{path:input.notebook,reveal:true,kernel_id:entry.id}}} : {}),
+                evaluation_ready:assoc.associated && entry?.controller?.kernelStatusString === 'resolved'};
+        }
+        result={...result,capacity:manager.capacity()};
         return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify(result, null, 2))]);
     }
 }
@@ -4059,7 +4094,11 @@ class KernelCrashLogTool {
         const homeDir = process.env.HOME || '/tmp';
 
         const parts = [];
-        if (source === 'debug' || source === 'all') parts.push(this._readDebugLog(homeDir, lines, filter));
+        if (source === 'debug' || source === 'all') {
+            const evidence = require('../utils/kernel-lifecycle-log').readTail(lines, filter);
+            parts.push('## Kernel Lifecycle Log\n' + (evidence ? '```jsonl\n' + evidence + '\n```' : 'No lifecycle events recorded yet in this host installation.'));
+            parts.push(this._readDebugLog(homeDir, lines, filter));
+        }
         if (source === 'crash' || source === 'all') parts.push(this._readCrashReports(homeDir, filter));
 
         const result = parts.join('\n\n');
@@ -4151,7 +4190,7 @@ class KernelCrashLogTool {
                 .slice(0, 5);
 
             if (wolfFiles.length === 0) {
-                return `## macOS Crash Reports\nNo Wolfram crash reports found in ${crashDir}.\n(Good \u2014 no kernel crashes detected.)`;
+                return `## macOS Crash Reports\nNo Wolfram crash reports found in ${crashDir}.\n(Absence of a report does not establish that the kernel or extension host stayed alive.)`;
             }
 
             const lines = [`## macOS Crash Reports (${wolfFiles.length} most recent)`, 'Recent crash files:'];
@@ -5090,6 +5129,7 @@ class ToolsTool {
 }
 
 function registerTools(context, getController, debugCtrl, getAskPanel) {
+    setAgentControllerProvider(getController);
     // alias(impl, defaults): register one implementation under a second name.
     // Returns a fresh delegate object so the invoke-wrap loop below installs a
     // per-name wrapper (journal/toolUsage report the name the agent actually
@@ -5123,10 +5163,12 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
         { name: 'paper_mathematicaBlocks', impl: new PaperMathematicaBlocksTool() },
         { name: 'paper_previewEdit',       impl: new PaperPreviewEditTool() },
         { name: 'paper_applyEdit',         impl: new PaperApplyEditTool() },
+        { name: 'paper_listenComments',    impl: new PaperListenCommentsTool() },
 
         // Core notebook tools (visible in chat panel)
         { name: 'wolfbook_newNotebook',        impl: new NewNotebookTool(getController) },
         { name: 'wolfbook_getNotebookContext', impl: new GetNotebookContextTool(getController, context) },
+        { name: 'wolfbook_readNotebookFile',   impl: new (require('./read-notebook-file').ReadNotebookFileTool)(vscode) },
         { name: 'wolfbook_evaluateExpression', impl: new EvaluateExpressionTool(getController) },
         { name: 'wolfbook_lookupSymbol',       impl: new LookupSymbolTool(getController) },
         { name: 'wolfbook_insertCells',        impl: new InsertCellsTool(getController) },
@@ -5229,6 +5271,7 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
                     'wolfbook_runCell', 'wolfbook_runCells'
                 ]);
                 const input = options?.input || {};
+                getController?.manager?.assertToolScope(name,input);
                 const mcpFileTarget = captureMcpFileTarget(name, input);
                 const editEvaluates = name !== 'wolfbook_editCell' || (Array.isArray(input.cells)
                     ? input.cells.some(cell => cell?.evaluate === true || (cell?.evaluate == null && input.evaluate !== false))
@@ -5324,7 +5367,10 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
                         traceId: ac.traceId, agentSessionId: ac.agentSessionId,
                         agentName: ac.agentName, source: ac.source || 'mcp',
                     }) : null;
-                    try { return await _origInvoke(options, token); }
+                    try {
+                        const manager=getController?.manager;
+                        return await (manager?.withToolInput ? manager.withToolInput(input,()=>_origInvoke(options,token)) : _origInvoke(options,token));
+                    }
                     finally { endMutationIntent(intent); }
                 };
 
@@ -5454,7 +5500,7 @@ let WOLFBOOK_SYSTEM_PROMPT = _getWolfbookSystemPrompt();
 // wolfbook_fileOps / wolfbook_runTerminal and keep VS Code's confirmation prompts.
 let _participantToolMap = null;   // set by registerTools
 const PARTICIPANT_WOLFBOOK_TOOLS = [
-    'wolfbook_getNotebookContext', 'wolfbook_evaluateExpression', 'wolfbook_lookupSymbol',
+    'wolfbook_getNotebookContext', 'wolfbook_readNotebookFile', 'wolfbook_evaluateExpression', 'wolfbook_lookupSymbol',
     'wolfbook_insertCells', 'wolfbook_editCell', 'wolfbook_runCell', 'wolfbook_getCellOutput',
     'wolfbook_validateSyntax', 'wolfbook_deleteCell', 'wolfbook_restoreDeletedCells', 'wolfbook_moveCell',
     'wolfbook_searchCells', 'wolfbook_inspectSymbols', 'wolfbook_status', 'wolfbook_saveNotebook',
@@ -5927,6 +5973,8 @@ function registerWolfteamParticipant(context, getController) {
 }
 
 module.exports = { registerTools, registerChatParticipant, registerWolfteamParticipant, buildTranscript, clearEvalLog, AskSpecialistTool, setNotebookResolvedCallback,
+    // tool implementations exported for headless regression tests
+    NewNotebookTool, KernelManagerTool,
     // pure helpers exported for headless tests
     _buildExpectCheck, _buildOutputFormWrapper, _parseAssertPrefix, _stripJsonFallback, _describeExpect, _deTexUsage,
     renderJournalDigest, filterJournal, _journalFilters, renderSessionReport, classifyCellOutputs, CancelOperationTool };

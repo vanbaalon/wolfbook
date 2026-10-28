@@ -45,10 +45,10 @@ function paper(marker) {
     for (let page = 2; page <= PAGES; page++) {
         body += `\\section{Section ${page}}\n` +
             (page === 2 ? `${marker}\n` : 'Ordinary body text for this section.\n') +
-            (page === PAGES ? '\\label{sec:last}\n' : '') +
+            (page === PAGES ? '\\label{sec:last}\nIdentity $\\mathbbm{1}$.\n' : '') +
             (page === PAGES ? '' : '\\newpage\n');
     }
-    return `\\documentclass{article}\n\\begin{document}\n${body}\\end{document}\n`;
+    return `\\documentclass{article}\\usepackage{bbm}\n\\begin{document}\n${body}\\end{document}\n`;
 }
 
 const digest = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -162,7 +162,14 @@ async function main() {
 
         // THE LIVE PAGE HAS ITS OWN MAP. Every recomputed page published one;
         // page 2's glyphs map to the edited line (line 7) of the current text.
-        const mapped = secondEdit.maps.filter(m => m.ready).map(m => m.page).sort((a, b) => a - b);
+        // A placed paragraph fragment publishes its map before the completed
+        // page publishes another. Require each changed page's own identity,
+        // rather than counting both maps as two changed pages.
+        for (const page of secondEdit.delivered.filter(p => p.changed)) {
+            assert.ok(secondEdit.maps.some(m => m.ready && m.page === page.page && m.identity === page.identity),
+                `changed page ${page.page} has no map bound to its identity`);
+        }
+        const mapped = [...new Set(secondEdit.maps.filter(m => m.ready).map(m => m.page))].sort((a, b) => a - b);
         assert.deepEqual(mapped, secondPages.filter(p => secondEdit.delivered.find(d => d.page === p).changed).sort((a, b) => a - b),
             `live page maps: ${JSON.stringify(secondEdit.maps)}`);
         const { NativeMap } = require('./nativeMap');
@@ -216,6 +223,33 @@ async function main() {
         evidence.rendered_page = { page: drawn.page, glyphs: result.glyphs, rules: result.rules,
             outline_requests: asked.length, client_renderer_matches_sdk: sameAsSdk };
 
+        // A BITMAP FONT MUST NOT DISABLE THE WHOLE LAST PAGE'S LIVE PREVIEW.
+        // bbm has no vector outline; the lane supplies the same PK glyphs the
+        // full PDF uses. Both a new final paragraph and its next key paint.
+        let tailBefore = paper('A second edit of that section, longer still.');
+        let tailIdentity = cold0.delivered.find(p => p.page === PAGES).identity;
+        const tailEvidence = [];
+        for (const suffix of ['LiveTailAlpha', 'LiveTailAlphaBeta']) {
+            const text = paper('A second edit of that section, longer still.').replace('\\end{document}', `${suffix}\n\\end{document}`);
+            await typeInto(lane, tailBefore, text);
+            const tail = await run(lane, { text, pages: [PAGES] });
+            assert.equal(tail.ok, true);
+            const page = tail.delivered.find(p => p.page === PAGES && p.changed);
+            assert.ok(page, 'the last source line did not deliver a changed page');
+            assert.notEqual(page.identity, tailIdentity);
+            const bbm = page.txdl.fonts.find(f => f.name === 'bbm10');
+            assert.ok(bbm && !page.fonts[bbm.definition_digest].file, 'the fixture must use the unresolved bitmap font');
+            const fetched = await renderer.prefetch(page.txdl);
+            assert.deepEqual(fetched.errors, [], 'every font, including bbm, must load');
+            const painted = renderer.render(page.txdl, fakeContext(), { scale, dpr: 1 });
+            assert.equal(painted.pending + painted.skipped, 0, 'no missing bitmap glyphs');
+            assert.equal(painted.fallback, false, 'last-line edits must remain live');
+            tailEvidence.push({ suffix, page: page.page, total_ms: Math.round(tail.report.total_ms), glyphs: painted.glyphs });
+            tailBefore = text; tailIdentity = page.identity;
+        }
+        evidence.bitmap_font_last_line = tailEvidence;
+        await typeInto(lane, tailBefore, paper('A second edit of that section, longer still.'));
+
         // THE TWO HALVES STILL AGREE. Everything above runs in Node; the
         // overlay itself is DOM, and only the VS Code acceptance harness can
         // drive that. What is checked here is that the webview still loads
@@ -228,13 +262,21 @@ async function main() {
         }
         evidence.webview_wiring_present = true;
 
-        // AN INTERACTIVE FAILURE IS NOT THE LANE'S FAILURE. An overlay for a
-        // file outside the project cannot be compiled; the preview says so and
-        // the lane goes on building.
+        // Unrelated dirty files do not belong to this paper's overlay. They
+        // are ignored, rather than failing an otherwise valid preview.
         const foreign = await lane.interactiveBuild({ sourceFiles: [root],
             overlay: new Map([[path.join(os.tmpdir(), 'not-in-this-project.tex'), 'x']]) });
-        assert.equal(foreign?.ok, false, 'a foreign overlay did not fail the preview');
-        assert.ok(foreign.diagnostics[0].message, 'a failed preview carried no reason');
+        assert.equal(foreign?.ok, true, 'an unrelated dirty file broke the preview');
+        evidence.unrelated_overlay_ignored = true;
+
+        // AN INTERACTIVE FAILURE IS NOT THE LANE'S FAILURE. A missing main
+        // file must return a diagnostic without closing the cold lane.
+        await fs.rename(root, `${root}.saved`);
+        let missing;
+        try { missing = await lane.interactiveBuild({ sourceFiles: [root] }); }
+        finally { await fs.rename(`${root}.saved`, root); }
+        assert.equal(missing?.ok, false, 'a missing main file did not fail the preview');
+        assert.ok(missing.diagnostics[0].message, 'a failed preview carried no reason');
         assert.equal(lane.closed, undefined, 'a failed preview closed the lane');
         const afterFailure = await run(lane, { text: paper('After the failed preview.'), pages: [1, 2] });
         assert.equal(afterFailure.ok, true, 'the lane did not survive a failed preview');

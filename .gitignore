@@ -26,3 +26,14 @@ AGENTS.md
 # Guard against a stray copy ever being committed to the public repo.
 CLAUDE.md
 AGENTS.md
+
+# Unreleased standalone WLaTeX runtime and generated project caches.
+**/.wlatex/**
+**/runtime/wlatex/**
+**/wlatex-sdk/**
+**/wlatex-engine
+**/wlatex-engine.exe
+**/wlatex-lab
+**/wlatex-lab.exe
+**/wlatex-native-lab
+**/wlatex-native-lab.exe

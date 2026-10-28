@@ -101,7 +101,7 @@ const known = new Set(pkg.contributes.languageModelTools.flatMap(t => Object.key
     assert.strictEqual(tgt._adoptLastTarget('live-2'), null, 'a concurrent live session does not inherit the target');
     tgt._sessionConnectedAt.delete('live-1');          // the owner disconnected …
     tgt._sessionConnectedAt.set('recon', Date.now());
-    assert.strictEqual(tgt._adoptLastTarget('recon')?.notebook, 'a.wb', '… so its reconnect adopts it');
+    assert.strictEqual(tgt._adoptLastTarget('recon'), null, 'product names never recover a disconnected agent target; use a resume token');
     assert.strictEqual(tgt._adoptLastTarget('live-2'), null, 'and only that one reconnect');
 
     // ── 2/3: inline wait honours the request, capped per client ───────────

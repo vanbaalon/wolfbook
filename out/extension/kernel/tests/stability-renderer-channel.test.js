@@ -88,7 +88,7 @@ const h = require('./_stub-controller').makeControllerHarness();
     }
     K3.dispose();
 
-    // --- 5. In-memory notebook → first tab: only its owner may launch. -------
+    // --- 5. In-memory notebook → first tab: revealing tabs never launches a kernel. -------
     h.stub.window.visibleNotebookEditors.length = 0;
     const C = h.notebook('/tmp/stab/in-memory.wb');   // opened by an agent, no editor
     const K4 = h.kernel({ owns: nb => nb === C });      // bound, never started
@@ -98,8 +98,8 @@ const h = require('./_stub-controller').makeControllerHarness();
     h.reset();
     h.stub.window.visibleNotebookEditors.push(h.editor(C));
     h.fire('window.onDidChangeVisibleNotebookEditors');
-    await h.tick(900);   // auto-launch is debounced 800 ms
-    assert.strictEqual(K4.launches, 1, 'the notebook\'s own kernel launches');
+    await h.tick(900);   // allow any old auto-launch debounce to fire
+    assert.strictEqual(K4.launches, 0, 'revealing the notebook leaves its kernel dormant');
     assert.strictEqual(K5.launches, 0, 'an unrelated never-started kernel must not launch');
     assert.strictEqual(P.launches, 0, 'a remote proxy must never auto-launch');
     assert.strictEqual(h.calls.error.length, 0, `no error toasts, got ${JSON.stringify(h.calls.error)}`);
@@ -107,7 +107,7 @@ const h = require('./_stub-controller').makeControllerHarness();
     // Switching tabs repeatedly must not re-launch or toast.
     for (let i = 0; i < 5; i++) h.fire('window.onDidChangeVisibleNotebookEditors');
     await h.tick(900);
-    assert.strictEqual(K4.launches, 1, 'tab switching must not re-launch'); assert.strictEqual(K5.launches + P.launches, 0, 'tab switching stays quiet');
+    assert.strictEqual(K4.launches, 0, 'tab switching must not launch'); assert.strictEqual(K5.launches + P.launches, 0, 'tab switching stays quiet');
     assert.strictEqual(h.calls.error.length, 0, 'still no error toasts after tab switching');
 
     // --- 6. Everything goes away with the kernels. ---------------------------

@@ -296,6 +296,16 @@ class GitWorkflow {
         return null;
     }
 
+    async _overleafBranch(repo, remote, { refresh = false } = {}) {
+        if (!refresh) {
+            const saved = await this._run(repo, ['config', '--get', 'wolfbook.overleafBranch']);
+            if (saved.code === 0 && /^(main|master)$/.test(saved.stdout.trim())) return saved.stdout.trim();
+        }
+        const advertised = await this._runRemote(repo, remote, ['ls-remote', '--symref', remote, 'HEAD']);
+        const match = /^ref: refs\/heads\/(main|master)\s+HEAD$/m.exec(advertised.stdout);
+        return match ? match[1] : 'master'; // legacy repositories and older Git bridges
+    }
+
     async _overleafEnv(repo, remote) {
         const secrets = this.context.secrets;
         const token = secrets && await secrets.get(this._secretKey(repo, remote));
@@ -442,7 +452,7 @@ class GitWorkflow {
                 'WPaper fetches and merges Overleaf changes before pushing. Your local Git history remains the source of truth.',
             ].join('\n') }, sync, remove);
         if (picked === sync) {
-            return this.push(file, { repo, remote: remote.name, remoteBranch: 'master' });
+            return this.push(file, { repo, remote: remote.name, remoteBranch: await this._overleafBranch(repo, remote.name) });
         }
         if (picked !== remove) return true;
 
@@ -513,7 +523,7 @@ class GitWorkflow {
             this._terminal(repo, `git remote ${verb} overleaf ${connection.url}`);
             const open = 'Open Git instructions';
             const action = await this.vscode.window.showInformationMessage(
-                'Run the prepared remote command, then pull with “git pull overleaf master --allow-unrelated-histories --no-rebase”. Push with “git push overleaf HEAD:master”. Use username “git” and your Overleaf token as the password.',
+                'Run the prepared remote command. Use the branch shown in Overleaf’s Git integration (main or master) when pulling and pushing. Use username “git” and your Overleaf token as the password.',
                 open);
             if (action === open) await this._openUrl(OVERLEAF_GIT_DOCS);
             return true;
@@ -534,9 +544,11 @@ class GitWorkflow {
             : await this._run(repo, ['remote', 'add', 'overleaf', connection.url]);
         if (configured.code !== 0) { this._failure('Could not configure the Overleaf remote', configured); return false; }
         await this._run(repo, ['config', '--local', 'wolfbook.overleafRemote', 'overleaf']);
-        await this._run(repo, ['config', '--local', 'wolfbook.overleafBranch', 'master']);
+        // Discover after authentication has been saved below.
         if (this.context.secrets) await this.context.secrets.store(
             this._secretKey(repo, 'overleaf'), String(token).trim());
+        const overleafBranch = await this._overleafBranch(repo, 'overleaf', { refresh: true });
+        await this._run(repo, ['config', '--local', 'wolfbook.overleafBranch', overleafBranch]);
 
         const sync = 'Merge and push now';
         const commands = 'Show terminal command';
@@ -544,9 +556,9 @@ class GitWorkflow {
         const next = await this.vscode.window.showInformationMessage(
             'Overleaf is connected as remote “overleaf”. WPaper will fetch and merge collaborators’ changes before every push.',
             sync, commands, docs);
-        if (next === sync) return this.push(file, { repo, remote: 'overleaf', remoteBranch: 'master' });
+        if (next === sync) return this.push(file, { repo, remote: 'overleaf', remoteBranch: overleafBranch });
         if (next === commands) this._terminal(repo,
-            'git pull overleaf master --allow-unrelated-histories --no-rebase');
+            `git pull overleaf ${overleafBranch} --allow-unrelated-histories --no-rebase`);
         if (next === docs) await this._openUrl(OVERLEAF_GIT_DOCS);
         return true;
     }
@@ -754,8 +766,8 @@ class GitWorkflow {
             }
         }
 
-        // 2. Bring in collaborators' changes (Overleaf's branch is master).
-        const target = 'master';
+        // 2. Follow the cloned/configured branch (main or legacy master).
+        const target = await this._overleafBranch(repo, remote);
         const advertised = await remoteRun(['ls-remote', '--heads', remote, `refs/heads/${target}`]);
         if (advertised.code !== 0) return fail(`reach ${remote}`, advertised);
         let pulled = false;
@@ -814,7 +826,7 @@ class GitWorkflow {
         if (!remote) return false;
         const remoteUrl = await this._remoteUrl(repo, remote);
         const overleaf = isOverleafUrl(remoteUrl);
-        if (!remoteBranch) remoteBranch = overleaf ? 'master' : localBranch;
+        if (!remoteBranch) remoteBranch = overleaf ? await this._overleafBranch(repo, remote) : localBranch;
 
         // Fetch first and make a real three-way merge. This is both safer and
         // more useful than waiting for push to say "non-fast-forward": edits

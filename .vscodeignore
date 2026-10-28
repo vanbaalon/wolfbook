@@ -98,3 +98,14 @@ windows-test-report.txt
 
 # WLaTeX is an optional separate installation, never a bundled VSIX runtime.
 runtime/wlatex/**
+
+# Unreleased standalone WLaTeX runtime and generated project caches.
+**/.wlatex/**
+**/runtime/wlatex/**
+**/wlatex-sdk/**
+**/wlatex-engine
+**/wlatex-engine.exe
+**/wlatex-lab
+**/wlatex-lab.exe
+**/wlatex-native-lab
+**/wlatex-native-lab.exe

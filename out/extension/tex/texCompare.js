@@ -18,6 +18,7 @@
 // ones that cannot be drawn are still counted and listed.
 
 const { diffLines, refineHunk, splitLines } = require('./texDiff');
+const { contentTokens, contentKey, tokensInLines } = require('./reviewContent');
 const { sha256 } = require('./texModel');
 
 /** How confidently a hunk was placed on the page. Ordered, best first. */
@@ -65,13 +66,25 @@ function placeHunk(map, hunk) {
     // AN INSERTION HAS NO POSITION OF ITS OWN. It is not that we failed to find
     // one — there is nothing on the page yet. Point at the seam instead: below
     // the line before it, or above the line after.
-    if (aEnd === aStart) {
+    if (aEnd === aStart || hunk.contentKind==='add') {
         const before = safeRows(map, aStart - 1);
         const after = safeRows(map, aStart);
         const b = before.length ? before[before.length - 1] : null;
         const a = after.length ? after[0] : null;
-        if (!b && !a) return nowhere('nothing rendered around the insertion point');
-        const anchor = (b && a && b.page === a.page) ? { ...b, y: b.y + b.h } : (b || a);
+        if (!b && !a) {
+            const hit=safeCall(map,'locate',aStart,aStart);
+            if (hit?.page!=null && Number.isInteger(hit.matchedLine)) {
+                const rows=safeRows(map,hit.matchedLine).filter(row=>row.page===hit.page);
+                const before=hit.matchedLine<aStart,row=before ? rows[rows.length-1] : rows[0];
+                if (row) return {where:WHERE.GAP,page:row.page,confidence:'near',
+                    rects:[{page:row.page,x:row.x,y:row.y+(before ? row.h : 0),w:row.w,h:0,caret:true}],
+                    why:'deleted text is marked beside its nearest surviving source neighbour'};
+            }
+            return hit?.page!=null ? { where:WHERE.PAGE,rects:[],page:hit.page,
+                confidence:'page',why:'the deletion seam is on this page; its map has not been loaded' }
+                : nowhere('nothing rendered around the insertion point');
+        }
+        const anchor = b && (!a || b.page === a.page) ? { ...b, y: b.y + b.h } : a;
         return {
             where: WHERE.GAP,
             rects: [{ page: anchor.page, x: anchor.x, y: anchor.y, w: anchor.w, h: 0, caret: true }],
@@ -100,6 +113,18 @@ function placeHunk(map, hunk) {
         };
     }
 
+    // Nonprinting source has no ink to wash. Its explicitly discovered
+    // neighbour gives it a navigation marker, just like a deletion seam.
+    const hit = safeCall(map, 'locate', aStart, aEnd - 1);
+    if (hit?.contextual && hit.page!=null) {
+        const preceding=hit.matchedLine<aStart;
+        const rows=safeRows(map,hit.matchedLine).filter(row=>row.page===hit.page);
+        const row=preceding ? rows[rows.length-1] : rows[0];
+        return {where:row ? WHERE.GAP : WHERE.PAGE,page:hit.page,contextual:true,
+            confidence:'near',rects:row ? [{page:row.page,x:row.x,y:row.y+(preceding ? row.h : 0),w:row.w,h:0,caret:true}] : [],
+            why:'source change marked beside the nearest printed content; the changed source has no ink here'};
+    }
+
     // NO ROWS AT ALL — the 71% case. Fall back to the enclosing OBJECT, which is
     // the honest answer: the right thing, not the right lines.
     const obj = safeCall(map, 'objectAtLine', aStart);
@@ -116,7 +141,6 @@ function placeHunk(map, hunk) {
     // A PAGE, AND NOTHING FINER. `locate` searches outward, so check it did not
     // land in someone ELSE's object — a borrowed box painted confidently over
     // the paragraph above an equation is worse than drawing nothing at all.
-    const hit = safeCall(map, 'locate', aStart, aEnd - 1);
     if (hit && hit.page != null) {
         if (hit.exact === false && Number.isFinite(hit.matchedLine)) {
             const there = safeCall(map, 'objectAtLine', hit.matchedLine);
@@ -223,21 +247,37 @@ function buildComparison(o = {}) {
 
     const A = splitLines(ourText);
     const B = splitLines(theirText);
+    const aTokens = contentTokens(ourText), bTokens = contentTokens(theirText);
+    const sameContent = contentKey(aTokens) === contentKey(bTokens);
     // One item per THING CHANGED, not one per run of changed lines.
+    const raw = sameContent ? [] : diffLines(A,B,{lineKey:s=>s});
+    const formatting = [], substantive = [];
+    for (const h of raw) {
+        (contentKey(tokensInLines(aTokens,h.aStart,h.aEnd)) ===
+            contentKey(tokensInLines(bTokens,h.bStart,h.bEnd)) ? formatting : substantive).push(h);
+    }
     const all = coalesceHunks(
-        diffLines(A, B),
+        substantive,
         (line) => safeCall(map, 'objectAtLine', line),
         Number.isFinite(o.coalesceGap) ? o.coalesceGap : 0);
     const starts = lineStarts(ourText);
 
     const hunks = [];
     const idSeen = new Map();
+    const priorSeen = new Map();
     for (const h of all.slice(0, limit)) {
         const ours = A.slice(h.aStart - 1, h.aEnd - 1).join('\n');
         const theirs = B.slice(h.bStart - 1, h.bEnd - 1).join('\n');
         const obj = safeCall(map, 'objectAtLine', h.aStart);
-        const placement = placeHunk(map, h);
-        const words = (h.kind === 'change') ? refineHunk(ours, theirs) : null;
+        const aFirst=tokensInLines(aTokens,h.aStart,h.aEnd)[0], bFirst=tokensInLines(bTokens,h.bStart,h.bEnd)[0];
+        const ourContent=contentKey(tokensInLines(aTokens,h.aStart,h.aEnd)),
+            theirContent=contentKey(tokensInLines(bTokens,h.bStart,h.bEnd));
+        const contentKind=ourContent==='[]' ? 'add' : theirContent==='[]' ? 'del' : 'change';
+        const placement = placeHunk(map, {...h,contentKind});
+        const wordContext = { aMath:!!aFirst?.math, bMath:!!bFirst?.math,
+            aLiteral:!!aFirst?.literal, bLiteral:!!bFirst?.literal,
+            aLiteralSpaces:!!aFirst?.literalSpaces, bLiteralSpaces:!!bFirst?.literalSpaces };
+        const words = (h.kind === 'change') ? refineHunk(ours, theirs, wordContext) : null;
         const startOffset = offsetOfLine(starts, h.aStart, ourText);
         const endOffset = h.aEnd > h.aStart
             ? Math.max(startOffset, offsetOfLine(starts, h.aEnd, ourText) - 1)
@@ -252,16 +292,21 @@ function buildComparison(o = {}) {
         // id changed and the reader's place in the list was lost. Two identical
         // changes in different places are told apart by an occurrence suffix
         // instead, which depends on their ORDER rather than their surroundings.
-        const base = sha256(`${h.kind} ${ours} ${theirs}`).slice(0, 12);
+        const base = sha256(`${contentKind} ${ourContent} ${theirContent}`).slice(0, 12);
         const nth = (idSeen.get(base) || 0) + 1;
         idSeen.set(base, nth);
+        const priorBase=sha256(`${h.kind} ${ourContent} ${theirContent}`).slice(0,12);
+        const priorNth=(priorSeen.get(priorBase)||0)+1;priorSeen.set(priorBase,priorNth);
         hunks.push({
             id: nth === 1 ? base : `${base}~${nth}`,
+            previousId:priorNth===1 ? priorBase : `${priorBase}~${priorNth}`,
             kind: h.kind,
+            contentKind,
             ourRange: { startLine: h.aStart, endLine: h.aEnd },
             theirRange: { startLine: h.bStart, endLine: h.bEnd },
             ourText: ours,
             theirText: theirs,
+            wordContext,
             object: obj
                 ? { stableKey: obj.stableKey, kind: obj.kind, label: obj.label, name: label(obj) }
                 : null,
@@ -274,6 +319,7 @@ function buildComparison(o = {}) {
     const seen = (w) => hunks.filter(h => h.where === w).length;
     return {
         hunks,
+        sameContent, formatting,
         summary: {
             total: all.length,
             shown: hunks.length,

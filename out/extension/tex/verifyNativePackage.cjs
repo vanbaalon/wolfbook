@@ -3,6 +3,8 @@ const fs = require('node:fs');
 const assert = require('node:assert/strict');
 const required = [
     'out/extension/tex/nativeRuntime.js', 'out/extension/tex/nativeCompileService.js',
+    'out/extension/tex/bitmapFont.js',
+    'out/extension/tex/errorAnnotations.js',
     'out/extension/tex/nativeArtifactCache.js', 'out/extension/tex/nativeMap.js', 'out/extension/tex/pdfRanges.js',
     'out/extension/tex/texViewer.js', 'out/client/tex-viewer.js', 'out/client/pdf-ranges.js',
 ];
@@ -12,6 +14,7 @@ function verifyNativePackage(list) {
     for (const file of required) assert.ok(names.has(file), `Missing WPaper integration asset: ${file}`);
     const bundled = files.filter(file => /(?:^|\/)runtime\/wlatex(?:\/|$)/i.test(file) ||
         /(?:^|\/)\.wlatex(?:\/|$)/i.test(file) ||
+        /(?:^|\/)wlatex-sdk(?:\/|$)/i.test(file) ||
         /(?:^|\/)wlatex-(?:engine|lab|native-lab)(?:\.exe)?$/i.test(file));
     assert.deepEqual(bundled, [], 'WLaTeX engines and generated caches must not ship in WPaper');
     return { result:'PASS', files:files.length, required_integration_assets:required.length,

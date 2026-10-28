@@ -13,6 +13,13 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { normalizeSource, similarity, sha256 } = require('./texModel');
+const { announceCommentChange } = require('./commentEvents');
+
+function commentHash(c) {
+    return crypto.createHash('sha256').update(JSON.stringify({ id:c.id, cellId:c.cellId,
+        text:c.text, updatedAt:c.updatedAt, author:c.author, source:c.source,
+        revision:c.revision, selection:c.selection })).digest('hex');
+}
 
 const VERSION = 1;
 const SIDECAR_SUFFIX = '.timeline.comments';
@@ -40,6 +47,25 @@ function validAuthor(value) {
     if (!value || typeof value !== 'object') return undefined;
     const name = typeof value.name === 'string' ? value.name.trim() : '';
     return name ? { name } : undefined;
+}
+
+function validSelection(value) {
+    if (!value || typeof value.quote !== 'string' || !value.quote.trim() ||
+        !Number.isInteger(value.lineOffset) || value.lineOffset < 0 ||
+        !Number.isInteger(value.endLineOffset) || value.endLineOffset < value.lineOffset) return undefined;
+    return { quote: clean(value.quote), lineOffset: value.lineOffset, endLineOffset: value.endLineOffset };
+}
+
+// Keep the original quote while following its paragraph through source edits.
+// An exact, unique match also follows new lines inserted inside that paragraph.
+function selectionLocation(selection, source, line) {
+    let offset = selection.lineOffset;
+    const text = clean(source);
+    const at = text.indexOf(selection.quote);
+    if (at >= 0 && text.indexOf(selection.quote, at + 1) < 0) {
+        offset = text.slice(0, at).split('\n').length - 1;
+    }
+    return { line: line + offset, endLine: line + offset + selection.endLineOffset - selection.lineOffset };
 }
 
 function validRecord(value, file) {
@@ -77,6 +103,7 @@ function validRecord(value, file) {
             author: validAuthor(c.author),
             source: c.source === 'revision' ? 'revision' : 'reader',
             revision: c.revision && typeof c.revision === 'object' ? c.revision : undefined,
+            selection: validSelection(c.selection),
         }];
     });
     return {
@@ -186,11 +213,22 @@ function sourcePreview(text, max = 2400) {
 function markdownFor(items, root) {
     const title = root ? path.basename(root) : 'WPaper';
     const out = [`# Comments on ${title}`];
+    if (items && items.length) {
+        if (root) out.push('', `Paper: ${JSON.stringify(root)}`);
+        out.push('',
+            'Please address these WPaper comments using Wolfbook paper tools. Read the current source; '
+            + 'apply guarded edits with paper_applyEdit(verify:true). My mini-editor takes priority. '
+            + 'Start paper_listenComments with include_existing:true, follow its native wake-up plan, '
+            + 'and keep listening until I say stop. Use current deliveries when available and acknowledge '
+            + 'only successfully verified, unchanged comments. If comments were deleted after copying, '
+            + 'work from this report without recreating them.');
+    }
     for (const item of items || []) {
         const place = item.detached
             ? `${path.basename(item.file)} \u2014 detached`
             : `${path.basename(item.file)}:${item.line}${item.endLine > item.line ? '-' + item.endLine : ''}`;
         out.push('', `## ${place} \u00b7 ${item.kind || 'paragraph'}`);
+        out.push(`File: ${JSON.stringify(item.file)}`);
         if (Array.isArray(item.sectionPath) && item.sectionPath.length) {
             out.push(`Section: ${item.sectionPath.join(' › ')}`);
         }
@@ -198,8 +236,9 @@ function markdownFor(items, root) {
             const author = item.revision && item.revision.author && item.revision.author.name;
             out.push(`From revision${author ? ` by ${author}` : ''}${item.revision && item.revision.changeId ? ` \u00b7 ${item.revision.changeId}` : ''}`);
         }
-        if (item.excerpt) {
-            out.push('', '### Quoted passage', '', `> ${item.excerpt.replace(/\n/g, '\n> ')}`);
+        const quote = item.selection ? item.selection.quote : item.excerpt;
+        if (quote) {
+            out.push('', '### Quoted passage', '', `> ${quote.replace(/\n/g, '\n> ')}`);
         }
         out.push('', '### Comment', '', String(item.text || '').trim());
     }
@@ -229,6 +268,7 @@ class CommentStore {
         this.fs.mkdirSync(path.dirname(sidecar), { recursive: true });
         this.fs.writeFileSync(tmp, body, { encoding: 'utf8', mode: 0o664 });
         this.fs.renameSync(tmp, sidecar);
+        announceCommentChange(file);
         return value;
     }
 
@@ -266,6 +306,8 @@ class CommentStore {
             source: meta.source === 'revision' ? 'revision' : 'reader',
         };
         if (comment.source === 'revision' && meta.revision) comment.revision = meta.revision;
+        const selection = validSelection(meta.selection);
+        if (selection) comment.selection = selection;
         record.comments.push(comment);
         this.write(file, record);
         return { ...comment, cell };
@@ -292,8 +334,39 @@ class CommentStore {
         else {
             const sidecar = sidecarFor(file);
             if (this.fs.existsSync(sidecar)) this.fs.unlinkSync(sidecar);
+            announceCommentChange(file);
         }
         return true;
+    }
+
+    // Compare the delivered instruction, not its moving source anchor. A user
+    // editing a comment during model work keeps the new version and receives
+    // it on the next wait. New comments and unrelated conversations survive.
+    consume(file, delivered) {
+        const record = this.read(file);
+        const current = new Map(record.comments.map(c => [c.id,c]));
+        for (const claim of delivered) {
+            const c = current.get(claim.id);
+            if (c && commentHash(c) !== claim.comment_hash) return {
+                ok:false, state:'comment-changed', comment_id:claim.id, comments_deleted:0,
+                reason:'The reader edited a delivered comment; the updated instruction was preserved.',
+            };
+        }
+        const ids=new Set(delivered.map(c => c.id));
+        const before=record.comments.length;
+        record.comments=record.comments.filter(c => !ids.has(c.id));
+        const deleted=before-record.comments.length;
+        if (deleted) {
+            const used=new Set(record.comments.map(c => c.cellId));
+            record.cells=record.cells.filter(c => used.has(c.id));
+            if (record.comments.length) this.write(file,record);
+            else {
+                const sidecar=sidecarFor(file);
+                if (this.fs.existsSync(sidecar)) this.fs.unlinkSync(sidecar);
+                announceCommentChange(file);
+            }
+        }
+        return {ok:true,state:'consumed',comments_deleted:deleted};
     }
 
     clear(files) {
@@ -307,7 +380,11 @@ class CommentStore {
             const sidecar = sidecarFor(file);
             if (this.fs.existsSync(sidecar)) ready.push(sidecar);
         }
-        for (const sidecar of ready) this.fs.unlinkSync(sidecar);
+        for (const sidecar of ready) {
+            this.fs.unlinkSync(sidecar);
+            const file = [...new Set(files || [])].find(f => sidecarFor(f) === sidecar);
+            if (file) announceCommentChange(file);
+        }
         return count;
     }
 
@@ -331,6 +408,12 @@ class CommentStore {
                     if (!cell) continue;
                     const obj = bindings.get(cell.id);
                     const r = obj && obj.sourceRange || {};
+                    const source = obj ? obj.text : cell.source;
+                    const location = comment.selection ? selectionLocation(comment.selection, source,
+                        obj ? r.startLine : cell.line) : {
+                        line: obj ? r.startLine : cell.line,
+                        endLine: obj ? r.endLine : cell.endLine,
+                    };
                     items.push({
                         ...comment,
                         file,
@@ -338,10 +421,9 @@ class CommentStore {
                         cellId: cell.id,
                         kind: obj && obj.kind || cell.kind,
                         label: obj && (obj.label || obj.title || obj.name) || cell.label,
-                        line: obj ? r.startLine : cell.line,
-                        endLine: obj ? r.endLine : cell.endLine,
-                        excerpt: excerpt(obj ? obj.text : cell.source),
-                        sourcePreview: sourcePreview(obj ? obj.text : cell.source),
+                        ...location,
+                        excerpt: comment.selection ? comment.selection.quote : excerpt(source),
+                        sourcePreview: comment.selection ? comment.selection.quote : sourcePreview(source),
                         sectionPath: Array.isArray(obj && obj.sectionPath) && obj.sectionPath.length
                             ? obj.sectionPath.map(String)
                             : (sectionAt(obj ? r.startLine : cell.line).length
@@ -370,4 +452,6 @@ module.exports = {
     objectSnapshot,
     reconcileRecord,
     markdownFor,
+    commentHash,
+    selectionLocation,
 };

@@ -209,6 +209,21 @@ async function main() {
         fs.rmSync(dir, { recursive: true, force: true });
     });
 
+    await test('equal-size external writes cannot hide behind a preserved mtime', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wbsnap-preserved-'));
+        try {
+            const file = path.join(dir, 'paper.tex');
+            const stamp = new Date(1700000000000);
+            fs.writeFileSync(file, 'old title');
+            fs.utimesSync(file, stamp, stamp);
+            const before = snapshotSources([file]);
+            await new Promise(resolve => setTimeout(resolve, 10));
+            fs.writeFileSync(file, 'new title');
+            fs.utimesSync(file, stamp, stamp);
+            assert.notStrictEqual(snapshotSources([file]), before);
+        } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    });
+
     await test('a capped generation is never persisted as a baseline', () => {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wbsavegen-'));
         const base = { outDir: dir, ok: true, pdfPath: path.join(dir, 'x.pdf') };

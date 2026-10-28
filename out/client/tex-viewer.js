@@ -57,6 +57,9 @@ const state = {
     tracePaused: false,       // source is newer than the PDF currently painted
     sourceDirty: false,       // source exists only in editor memory, independently of PDF freshness
     labels: null,             // {generation, items} — the label overlay, cached
+    cellBoundaries: null,     // {generation, items} mapped paper cell edges
+    cellBoundariesAsked: null,
+    cellBoundariesOn: false,  // momentary Shift reveal, including inside the mini-editor
     labelsOn: false,          // Shift is down
     sections: null,           // {generation, items, pageWidth} — the fold controls
     zoomBase: null,           // page size when the current zoom gesture began
@@ -213,13 +216,21 @@ function proActive() {
 function setEngineBadge(msg) {
     const badge = el('probadge'), panel = el('propanel');
     if (!badge || !panel) return;
+    const wasPro = proActive();
     state.engine = msg && msg.state ? msg : null;
     const engine = state.engine;
+    if (wasPro !== proActive()) {
+        const card = document.querySelector('.editcard');
+        if (card && state.edit) refreshCardProControls(card, state.edit);
+        paintSelectionActions();
+        paintSections();
+        if (!proActive()) { setInkCaret({ clear: true }); clearTxdlOverlays(); }
+    }
     const tikzButton = el('tikztool');
     if (tikzButton) tikzButton.hidden = !proActive();
     try { if (!proActive() && tikz.on) tikzToggle(false); } catch (_) { /* before the TikZ tool is set up */ }
     badge.hidden = !engine;
-    if (!engine) { closeProPanel(); return; }
+    if (!engine) { closeProPanel(); const intro = el('prointro'); if (intro) intro.hidden = true; return; }
     badge.dataset.state = engine.state;
     const ms = v => (Number.isFinite(v) ? `${Math.round(v)} ms` : null);
     const key = ms(engine.keyMs);
@@ -232,7 +243,10 @@ function setEngineBadge(msg) {
         live: `WLaTeX Pro: the page shows the text you are typing${key ? `, ${key} after the key` : ''}${detail ? ` (${detail})` : ''}. ` +
             'The final PDF settles when you pause.',
         settling: 'WLaTeX Pro: the final PDF is being built.',
-        settled: 'WLaTeX Pro: this PDF is WLaTeX\'s settled build; click any word to reach its source.',
+        settled: (engine.runner === 'wlatex'
+            ? 'WLaTeX Pro: this PDF is WLaTeX\'s settled build; click any word to reach its source.'
+            : 'WLaTeX Pro: the PDF is ready; Pro editing remains enabled.') +
+            (engine.rerunWanted ? ' The paper still reports unresolved references.' : ''),
         off: `WLaTeX Pro is off for this paper: ${engine.reason || 'it needs another engine'}.`,
         disabled: 'WLaTeX Pro is switched off: WPaper uses its ordinary compiler.',
     }[engine.state] + (engine.state === 'disabled' ? ' Click to switch it on.' : ' Click to switch it off · right-click for details.');
@@ -254,6 +268,44 @@ function setEngineBadge(msg) {
     if (last) last.textContent = key ? `last: ${key}` : '';
     const track = el('protrack');
     if (track) track.checked = !!engine.trackMine;
+    state.engineBadgeTitle = badge.title;
+    state.engineBadgeLabel = badge.getAttribute('aria-label');
+    state.engineBadgeState = badge.querySelector('.pro-state').textContent;
+    state.engineBadgeReason = { hidden: reason.hidden, text: reason.textContent };
+    paintPreviewFallbackBadge();
+}
+
+function paintPreviewFallbackBadge() {
+    const badge = el('probadge');
+    if (!badge || !state.engine) return;
+    const visible = state.txdlFallbacks?.size && proActive() ? visiblePages() : [];
+    const issues = [...(state.txdlFallbacks || [])].filter(([page]) => visible.includes(page));
+    const sourceError = proActive() ? state.engine.previewError : null;
+    badge.dataset.fallback = String(issues.length > 0 || !!sourceError);
+    const reason = el('propanel')?.querySelector('.pro-reason');
+    if (issues.length || sourceError) {
+        const producer = state.engine.previewErrorKind === 'producer';
+        badge.querySelector('.pro-state').textContent = sourceError
+            ? producer ? 'preview paused' : 'source error' : 'PDF preview';
+        const detail = [sourceError && `${producer ? 'Live preview' : 'Current source'}: ${sourceError}`,
+            ...issues.map(([page, why]) => `Page ${page}: ${why}`)].filter(Boolean).join('\n');
+        badge.title = `Pro remains on; its live preview is unavailable here.\n${detail}\n` + (sourceError && producer
+            ? 'Showing the PDF while the live preview recovers.' : sourceError
+            ? 'The displayed page is from an earlier revision. Live preview retries as you edit.'
+            : 'Showing the PDF; it updates when you pause typing.');
+        badge.setAttribute('aria-label', badge.title);
+        el('propanel')?.querySelector('.pro-headstate')?.replaceChildren(badge.querySelector('.pro-state').textContent);
+        if (reason) { reason.hidden = false; reason.textContent = badge.title; }
+    } else {
+        badge.querySelector('.pro-state').textContent = state.engineBadgeState || '';
+        el('propanel')?.querySelector('.pro-headstate')?.replaceChildren(state.engineBadgeState || '');
+        badge.title = state.engineBadgeTitle || '';
+        badge.setAttribute('aria-label', state.engineBadgeLabel || 'WLaTeX Pro');
+        if (reason && state.engineBadgeReason) {
+            reason.hidden = state.engineBadgeReason.hidden;
+            reason.textContent = state.engineBadgeReason.text;
+        }
+    }
 }
 
 function closeProPanel() {
@@ -286,6 +338,7 @@ el('protrack')?.addEventListener('change', (e) => vscode.postMessage({ type: 'tr
 /** Pause correspondence while the source and painted PDF are different. */
 function setTraceState(msg) {
     state.tracePaused = !!(msg && msg.paused);
+    paintPaperCellBoundaries();
     if (state.tracePaused) clearPaperTypingTarget(true, 'trace paused');
     const lag = el('tracelag');
     if (lag) {
@@ -385,9 +438,30 @@ async function makeWorkerPort(base) {
 }
 
 async function loadPdfjs(base) {
-    if (state.pdfjs) return state.pdfjs;
+    if (state.pdfjsLoading) return state.pdfjsLoading;
+    if (state.pdfjs && !state.workerDead && !state.pdfWorker?.destroyed) return state.pdfjs;
+    // Ready replay and a compile can arrive together on a fresh panel. They
+    // must share initialization: competing workers mutate PDF.js's global
+    // worker port while an earlier request is already parsing a document.
+    state.pdfjsLoading = initializePdfjs(base).catch(error => {
+        state.workerDead = true;
+        throw error;
+    }).finally(() => { state.pdfjsLoading = null; });
+    return state.pdfjsLoading;
+}
+
+async function initializePdfjs(base) {
     const mod = await import(`${base}/pdf.min.mjs`);
     mark('pdfjs imported');
+    // A failed worker invalidates the review documents too. Retire them so
+    // the next correction opens against the replacement worker.
+    for (const entry of reviewPdfCache.values()) {
+        entry.retired = true;
+        if (!entry.users) entry.task.destroy().catch(() => {});
+    }
+    reviewPdfCache.clear();
+    state.pdfWorker?.destroy();
+    state.workerPort?.terminate();
     const w = await makeWorkerPort(base);
     state.workerHow = w.how;
     state.workerPort = w.port || null;
@@ -401,15 +475,23 @@ async function loadPdfjs(base) {
             if (state.workerPort !== w.port) return;
             state.workerDead = true;
             state.workerError = (ev && ev.message) || (ev && ev.type) || 'PDF worker stopped';
+            vscode.postMessage({ type:'viewerError', generation:state.openInFlight ? state.openGeneration : state.generation,
+                error:state.workerError, workerDead:true });
         };
         w.port.addEventListener('error', died);
         w.port.addEventListener('messageerror', died);
     }
     mark('worker ' + (w.port ? 'ready' : 'unavailable'));
     try {
-        if (w.port) mod.GlobalWorkerOptions.workerPort = w.port;
-        else mod.GlobalWorkerOptions.workerSrc = `${base}/pdf.worker.min.mjs`;
+        mod.GlobalWorkerOptions.workerPort = w.port || null;
+        if (!w.port) mod.GlobalWorkerOptions.workerSrc = `${base}/pdf.worker.min.mjs`;
     } catch (_) { /* pdf.js will arm its own fallback */ }
+    // The webview owns this worker. Supplying it explicitly keeps a loading
+    // task's destroy() from destroying the shared worker while its successor
+    // is still parsing. GlobalWorkerOptions.workerPort alone gives each task
+    // ownership of the same PDFWorker wrapper.
+    state.pdfWorker = new mod.PDFWorker(w.port ? { port: w.port } : {});
+    await state.pdfWorker.promise;
     state.pdfjs = mod;
     return mod;
 }
@@ -436,16 +518,21 @@ async function openDocument(msg) {
     clearPaperTypingTarget(true, 'document opened');
     const openSeq = ++state.openSeq;
     state.openInFlight = openSeq;
+    renderReview();
+    renderEditNav();
+    state.openGeneration = msg.generation;
     state.openError = '';
     status('loading…');
     let pdfjs;
-    try { pdfjs = await loadPdfjs(msg.base); }
+    try { state.pdfBase = msg.base; pdfjs = await loadPdfjs(msg.base); }
     catch (error) {
         if (msg.pdfRange) vscode.postMessage({ type:'pdfRangeRelease',token:msg.pdfRange.token });
         if (openSeq === state.openSeq) {
             state.openInFlight=false;
             state.openError=error.message || String(error);
             status(`could not load the PDF viewer: ${state.openError}`, 'err');
+            vscode.postMessage({ type:'viewerError', generation:msg.generation,
+                error:error.stack || state.openError, workerDead:!!state.workerDead });
         }
         return;
     }
@@ -482,6 +569,7 @@ async function openDocument(msg) {
         }
         const task = pdfjs.getDocument({
             ...input,
+            worker: state.pdfWorker,
             // Required for this corpus: 164 non-embedded base-14 references
             // across 69 real papers. Without it every glyph box moves.
             standardFontDataUrl: `${msg.base}/standard_fonts/`,
@@ -490,11 +578,16 @@ async function openDocument(msg) {
             isEvalSupported: false,
         });
         if (rangeTransport) rangeTransport.failure.catch(error => {
-            if (openSeq === state.openSeq) status(`could not read the PDF: ${error.message}`, 'err');
+            if (openSeq === state.openSeq) {
+                status('reopening the PDF…');
+                vscode.postMessage({type:'pdfRangeFailed',generation:msg.generation,
+                    pdfHash:msg.pdfHash || null,token:msg.pdfRange.token,error:error.message});
+            }
             task.destroy().catch(() => {});
         });
         const prev = state.doc;
         const restoreSession = !prev || state.restoreViewNext;
+        if (restoreSession) state.txdlFallbacks = null;
         mark('bytes decoded');
         omark('decode');
         let anchor = scrollAnchor();
@@ -523,7 +616,8 @@ async function openDocument(msg) {
                 if (openSeq === state.openSeq) {
                     state.openInFlight = false;
                     status('reopening the PDF…');
-                    vscode.postMessage({ type: 'openStalled', generation: msg.generation });
+                    vscode.postMessage({ type: 'openStalled', generation: msg.generation,
+                        pdfHash:msg.pdfHash || null,token:msg.pdfRange.token });
                 }
                 return;
             }
@@ -538,7 +632,9 @@ async function openDocument(msg) {
             try { await nextDoc.destroy(); } catch (_) { /* superseded */ }
             return;
         }
-        if (state.navigationOwner === 'viewer') anchor = scrollAnchor();
+        // Parsing is asynchronous. Capture the place again at the handoff so
+        // an arriving PDF cannot restore a position from before it loaded.
+        anchor = scrollAnchor();
         const editingInPlace = !!(prev && !restoreSession && state.edit);
         if (editingInPlace) {
             // Freeze the existing DOM card before any new geometry arrives.
@@ -546,6 +642,8 @@ async function openDocument(msg) {
             pinEditCard();
         }
         state.doc = nextDoc;
+        const previousRangeTransport = state.pdfRangeTransport;
+        state.pdfRangeTransport = rangeTransport || null;
         if ((state.navigationEpoch || 0) === navigationEpoch) state.navigationOwner = msg.navigationOwner || 'editor';
         state.bookmarks = Array.isArray(msg.bookmarks) ? msg.bookmarks : [];
         mark('document parsed');
@@ -597,16 +695,13 @@ async function openDocument(msg) {
         const recount = samePaper && !editingInPlace && pagesEl().children.length !== state.doc.numPages;
         state.pageCount = state.doc.numPages;
         state.generation = msg.generation;
+        invalidateSelectionGeometry();
         state.nativeMapAvailable = false;
         // Review rectangles belong to the page geometry that was visible
         // before this open. Even when a restarted extension reuses the same
         // numeric generation, do not paint those rectangles onto the new
         // canvases. The extension re-places the review after `opened`.
         if (state.review) state.review = { ...state.review, generation: null };
-        // Which pages were on screen BEFORE the swap: those are the ones worth
-        // repainting immediately. The rest keep their old canvas until the
-        // reader scrolls to them, which is both smooth and cheap.
-        const wasRendered = samePagination ? [...state.rendered.keys()] : [];
         const retainedPages = samePagination ? reusableNativePages(state.nativePageHashes,
             msg.nativePageHashes, state.rendered, state.scale, window.devicePixelRatio || 1) : new Map();
         state.nativePageHashes = Array.isArray(msg.nativePageHashes) && msg.nativePageHashes.length === state.pageCount
@@ -657,9 +752,11 @@ async function openDocument(msg) {
         paintLiveErrors(null);
         // Same argument for the label chips: every anchor was measured against
         // the render that has just been replaced.
+        state.cellBoundaries = null;
+        state.cellBoundariesAsked = null;
         state.labels = null;
         state.labelsAsked = null;
-        for (const c of document.querySelectorAll('.lbc, .lbcink')) c.remove();
+        for (const c of document.querySelectorAll('.lbc, .lbcink, .paper-cell-boundary')) c.remove();
         el('where').textContent = '';
 
         if (samePagination) {
@@ -673,10 +770,9 @@ async function openDocument(msg) {
             if (openSeq === state.openSeq) { clearTxdlOverlaysBefore(openSeq); flushTxdlDeferred(); }
             if (!editingInPlace && state.navigationOwner !== 'viewer' && !(await restoreSemanticReveal(msg.semanticReveal, anchor))) restoreAnchor(anchor);
             omark('visible');
-            // Awaited so the rest of the repaint can be timed too. These pages
-            // are off screen, so waiting for them costs the reader nothing.
-            await Promise.all(wasRendered.filter(n => !vis.includes(n)).map(renderPage));
-            omark('offscreen');
+            // Offscreen pages redraw when they approach the viewport. Waiting
+            // for every previously visited page delayed `opened` and review
+            // navigation even though the page under the reader was ready.
             if (state.highlight) paintHighlight();
             if (state.selection) paintSelection(state.selection);
         else if (state.selShape) paintSelectionActions();
@@ -729,7 +825,22 @@ async function openDocument(msg) {
                 renderAround(1);
             }
         }
-        if (prev) { try { await prev.destroy(); } catch (_) { /* already gone */ } }
+        // A hidden/restoring pane may have no intersecting page, and an
+        // observer cannot paint it yet. Never acknowledge a PDF whose pages
+        // have not been drawn: tracing and a later handoff depend on that.
+        if (!state.rendered.size) await renderPage(Math.max(1, Math.min(state.pageCount,
+            Number(msg.revealPage || anchor?.page) || 1)));
+        if (openSeq !== state.openSeq) return;
+        if (prev) {
+            try {
+                const cleanup = prev.destroy();
+                // The new pages already exist. Teardown of the old document
+                // can stall even on a shared, healthy worker; it must never
+                // hold `opened` or keep right-click and review rows disabled.
+                cleanup.catch(() => {});
+            } catch (_) { /* already gone */ }
+            previousRangeTransport?.abort();
+        }
         omark('total');
         // What this ONE open cost — the number that says whether a live
         // rebuild is quick, and which phase to blame when it is not.
@@ -744,6 +855,7 @@ async function openDocument(msg) {
         if (openSeq !== state.openSeq) return;
         vscode.postMessage({
             type: 'opened', generation: msg.generation, pdfHash: msg.pdfHash || null,
+            livePages: livePreviewIdentities(),
         });
         // …and hand over the glyphs, so the extension can align them against
         // the source. Deliberately not awaited: it is not on any critical path.
@@ -767,8 +879,12 @@ async function openDocument(msg) {
         if (openSeq !== state.openSeq) return;
         state.openError = e && e.message ? e.message : String(e);
         status(`could not open the PDF: ${state.openError}`, 'err');
+        vscode.postMessage({ type: 'viewerError', generation: msg.generation, error: e?.stack || state.openError });
     } finally {
-        if (openSeq === state.openSeq) { state.openInFlight = false; flushTxdlDeferred(); }
+        if (openSeq === state.openSeq) {
+            state.openInFlight = false; flushTxdlDeferred();
+            renderReview(); renderEditNav();
+        }
     }
 }
 
@@ -817,6 +933,11 @@ async function probeViewer(msg) {
         if (drawn && wrap.querySelector('canvas:not(.txdl-overlay)') !== drawn.canvas) {
             throw new Error(`page ${n} has a detached render`);
         }
+        // Selection needs only known document/DOM health. A fresh worker
+        // round-trip behind a large preview is a queue, not a dead worker.
+        if(msg.passive) {
+            reply.ok=true;vscode.postMessage(reply);return;
+        }
         const page = await before(1200, state.doc.getPage(n));
         // PDFPageProxy may be cached locally. Resolving its reference back to
         // an index is deliberately a fresh, tiny message to the worker.
@@ -830,6 +951,7 @@ async function probeViewer(msg) {
     } catch (e) {
         reply.reason = e && e.message ? e.message : String(e);
         reply.workerDead = !!state.workerDead;
+        if(msg.passive)reply.definitive=!/still loading|stale PDF generation/.test(reply.reason);
     }
     vscode.postMessage(reply);
 }
@@ -859,6 +981,7 @@ function paintPageNow() {
     if (!cur) return;
     const n = currentPage();
     cur.textContent = n > 0 ? String(n) : '–';
+    paintPreviewFallbackBadge();
 }
 
 function visiblePages() {
@@ -932,12 +1055,15 @@ async function restoreSemanticReveal(reveal, fallback) {
     if (!rect) return false;
     await renderPage(page);
     if (state.navigationOwner === 'viewer') return false;
-    const v = rectToViewport(page, rect);
+    const point = reveal.point;
+    const precise = Number.isFinite(point?.xBp) && Number.isFinite(point?.yTopBp);
+    const v = rectToViewport(page, precise
+        ? { x:point.xBp, y:point.yTopBp, w:0, h:0 } : rect);
     const main = document.querySelector('main');
     const wrap = pagesEl().querySelector(`.page[data-page="${page}"]`);
     if (!v || !main || !wrap) return false;
     const fraction = Number.isFinite(reveal.viewportFrac)
-        ? Math.max(0.08, Math.min(0.92, Number(reveal.viewportFrac))) : 0.35;
+        ? Math.max(0, Math.min(1, Number(reveal.viewportFrac))) : 0.35;
     main.scrollTop = Math.max(0,
         wrap.offsetTop + v.y + Math.max(0, v.h || 0) / 2 - main.clientHeight * fraction);
     if (fallback && Number.isFinite(fallback.xFrac)) {
@@ -1029,6 +1155,14 @@ window.addEventListener('pagehide', saveViewNow);
  * One placeholder per page, sized correctly up front so the scrollbar is
  * honest and lazy rendering does not make the document jump under the reader.
  */
+function insertPagePlaceholder(wrap) {
+    const page = Number(wrap.dataset.page);
+    const container = pagesEl(), last = container.lastElementChild;
+    if (!last || Number(last.dataset.page) < page) { container.appendChild(wrap); return; }
+    const next = [...container.children].find(w => Number(w.dataset.page) > page);
+    container.insertBefore(wrap, next || null);
+}
+
 function buildPagePlaceholders(preserve = false) {
     if (preserve) {
         // Keep the scroll extent while editing even if the PDF loses pages,
@@ -1039,7 +1173,6 @@ function buildPagePlaceholders(preserve = false) {
             w.dataset.retired = 'true';
         }
     }
-    const frag = document.createDocumentFragment();
     for (let n = 1; n <= state.pageCount; n++) {
         if (preserve && pagesEl().querySelector(`.page[data-page="${n}"]`)) continue;
         const wrap = document.createElement('div');
@@ -1049,9 +1182,8 @@ function buildPagePlaceholders(preserve = false) {
         num.className = 'pagenum';
         num.textContent = String(n);
         wrap.appendChild(num);
-        frag.appendChild(wrap);
+        insertPagePlaceholder(wrap);
     }
-    pagesEl().appendChild(frag);
     // Size them from page 1's aspect; TeX papers are uniform. RETURNED, because
     // restoring the reading position needs real heights — against unsized
     // placeholders every page is 0 tall and the restore lands at the top.
@@ -1088,7 +1220,6 @@ function fitPagePlaceholders() {
         }
     }
     const have = new Set([...pagesEl().children].map(w => Number(w.dataset.page)));
-    const frag = document.createDocumentFragment();
     for (let n = 1; n <= count; n++) {
         if (have.has(n)) continue;
         const wrap = document.createElement('div');
@@ -1099,9 +1230,8 @@ function fitPagePlaceholders() {
         num.className = 'pagenum';
         num.textContent = String(n);
         wrap.appendChild(num);
-        frag.appendChild(wrap);
+        insertPagePlaceholder(wrap);
     }
-    if (last) last.after(frag); else pagesEl().appendChild(frag);
 }
 
 let observer = null;
@@ -1195,14 +1325,13 @@ async function renderPage(n) {
         if (state.comments) paintCommentMarkers();
         if (state.labels && labelsVisible()) paintLabels().catch(() => {});
         if (state.sections) paintSections();
+        paintPaperCellBoundaries();
         findPageRendered(n);
         if (state.moveCaret) paintMoveCaret(state.moveCaret);
         if (state.edit) paintEditCard();
         if (state.mma) paintMmaCard();
         paintLinks(n).catch(() => { /* a paper without links is the common case */ });
-        // A zoom empties the wrappers: the live error marks go back on.
-        if (state.liveErrors && !document.querySelector(`.page[data-page="${n}"] .live-error`)
-            && state.liveErrors.some(e => e.page === n)) paintLiveErrors(state.liveErrors);
+        if (state.errorAnnotations?.length) paintErrorAnnotations();
         paintBookmarks();
         // A zoom empties every wrapper, so an interactive preview drawn before
         // it has to be placed again against the new geometry. A paragraph
@@ -1707,7 +1836,7 @@ function renderNav() {
         title.textContent = it.title || '(untitled)';
         const page = document.createElement('span');
         page.className = 'np-page';
-        page.textContent = it.page ? `p.${it.page}` : '';
+        page.textContent = it.page ? `p.${it.startPage || it.page}${it.pageApproximate ? ' ≈' : ''}` : '';
 
         // THE SAME CONTROLS THE PAGE OFFERS, on the same units.
         //
@@ -1783,6 +1912,13 @@ function navVisible() {
 
 el('outline').addEventListener('click', () => setNav(!navVisible()));
 el('navclose').addEventListener('click', () => setNav(false));
+document.addEventListener('pointerdown', event => {
+    if (!navVisible() || event.target.closest?.('#navpanel, #outline')) return;
+    // Dismiss before page/toolbar handlers run, while leaving the outside
+    // press available for its ordinary action. The toggle is excluded so its
+    // click cannot close and then immediately reopen the panel.
+    setNav(false);
+}, true);
 
 // DRAG A SECTION IN THE OUTLINE: dropped on a row it goes
 // before that section; dropped below the last, to the end. One edit of the
@@ -1997,7 +2133,12 @@ async function decodeTxdlImage(reply, page) {
     if (reply.kind === 'pdf') {
         const pdfjs = state.pdfjs;
         if (!pdfjs) return null;
-        const doc = await pdfjs.getDocument({ data: bytes }).promise;
+        // Figures borrow the viewer's worker, just like the main PDF and
+        // review previews. An implicit worker would be destroyed with this
+        // short-lived document and strand every later page update.
+        const doc = await pdfjs.getDocument({ data: bytes, worker:state.pdfWorker,
+            standardFontDataUrl:state.pdfBase ? `${state.pdfBase}/standard_fonts/` : undefined,
+            isEvalSupported:false }).promise;
         try {
             const figure = await doc.getPage(page || 1);
             const natural = figure.getViewport({ scale: 1 });
@@ -2008,7 +2149,7 @@ async function decodeTxdlImage(reply, page) {
             canvas.height = Math.ceil(viewport.height);
             await figure.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
             return { source: canvas, widthBp: natural.width, heightBp: natural.height, originBp: [figure.view[0], figure.view[1]] };
-        } finally { doc.destroy(); }
+        } finally { await doc.destroy(); }
     }
     const bitmap = await createImageBitmap(new Blob([bytes], { type: reply.mime || 'image/png' }));
     return { source: bitmap, widthBp: bitmap.width, heightBp: bitmap.height };
@@ -2020,10 +2161,23 @@ function txdlState() {
 }
 
 /** The PDF stays on this page: the host must not treat it as a live page. */
-function txdlFellBack(page) {
+function txdlFellBack(page, reason = 'The live renderer could not draw this page completely.') {
     removeTxdlOverlay(page);
     restorePdfLinks(page);
-    vscode.postMessage({ type: 'txdlFallback', page });
+    (state.txdlFallbacks ||= new Map()).set(page, reason);
+    paintPreviewFallbackBadge();
+    vscode.postMessage({ type: 'txdlFallback', page, reason });
+}
+
+function txdlFallbackReason(txdl, fetched, result) {
+    if (txdl.unsupported?.length) return `Unsupported drawing: ${txdl.unsupported.map(x => typeof x === 'string' ? x : JSON.stringify(x)).join(', ').slice(0, 300)}`;
+    if (fetched?.errors?.length) return fetched.errors.map(e => {
+        const font = txdl.fonts?.find(f => f.definition_digest === e.font);
+        return `${e.font ? `Font ${font?.name || e.font}` : `Figure ${e.image || ''}`}: ${e.error?.message || String(e.error)}`;
+    }).join('; ');
+    const missing = result?.missing || [];
+    if (missing.length) return missing.map(e => `Font ${txdl.fonts?.find(f => f.definition_digest === e.font)?.name || e.font}: glyphs unavailable`).join('; ');
+    return 'The live renderer could not draw every glyph or figure on this page.';
 }
 
 /** Every preview overlay goes; the PDF canvases underneath are untouched. */
@@ -2045,35 +2199,43 @@ function ensureLiveExtraPage(page) {
     if (pagesEl().querySelector(`.page[data-page="${page}"]`)) return;
     const pages = [...pagesEl().querySelectorAll('.page')];
     const last = pages[pages.length - 1];
-    if (!last || Number(last.dataset.page) !== page - 1) return;
-    const wrap = document.createElement('div');
-    wrap.className = 'page';
-    wrap.dataset.page = String(page);
-    wrap.dataset.liveExtra = 'true';
-    wrap.style.width = last.style.width;
-    wrap.style.height = last.style.height;
-    // The paper size in bp, from any rendered page: TeX papers are uniform.
-    for (const r of state.rendered.values()) {
-        const view = r && r.view;
-        if (view && view.length === 4) {
-            wrap.dataset.widthBp = String(view[2] - view[0]);
-            wrap.dataset.heightBp = String(view[3] - view[1]);
-            break;
+    if (!last) return;
+    // An earlier extra page may have fallen back to PDF, or the stream may
+    // deliver the visible last page first. Keep a box for every intervening
+    // page so the last line can still paint before the full PDF arrives.
+    for (let n = state.pageCount + 1; n <= page; n++) {
+        if (pagesEl().querySelector(`.page[data-page="${n}"]`)) continue;
+        const wrap = document.createElement('div');
+        wrap.className = 'page';
+        wrap.dataset.page = String(n);
+        wrap.dataset.liveExtra = 'true';
+        wrap.style.width = last.style.width;
+        wrap.style.height = last.style.height;
+        // The paper size in bp, from any rendered page: TeX papers are uniform.
+        for (const r of state.rendered.values()) {
+            const view = r && r.view;
+            if (view && view.length === 4) {
+                wrap.dataset.widthBp = String(view[2] - view[0]);
+                wrap.dataset.heightBp = String(view[3] - view[1]);
+                break;
+            }
         }
+        const num = document.createElement('div');
+        num.className = 'pagenum';
+        num.textContent = String(n);
+        wrap.appendChild(num);
+        insertPagePlaceholder(wrap);
+        if (observer) observer.observe(wrap);
     }
-    const num = document.createElement('div');
-    num.className = 'pagenum';
-    num.textContent = String(page);
-    wrap.appendChild(num);
-    last.after(wrap);
-    if (observer) observer.observe(wrap);
 }
 
 /** Placeholders for live-only pages that no longer hold a preview. */
 function dropEmptyLiveExtraPages(count = Infinity) {
+    const activeEnd = Math.max(state.pageCount || 0,
+        ...[...(state.txdl?.pages.keys() || []), ...(state.txdlPending?.keys() || [])].filter(p => p <= count));
     for (const wrap of pagesEl().querySelectorAll('.page[data-live-extra="true"]')) {
         const page = Number(wrap.dataset.page);
-        if (page > count || (!wrap.querySelector('canvas.txdl-overlay') && !state.txdlPending?.has(page))) wrap.remove();
+        if (page > count || (page > activeEnd && !wrap.querySelector('canvas.txdl-overlay') && !state.txdlPending?.has(page))) wrap.remove();
     }
 }
 
@@ -2133,7 +2295,8 @@ function ensureLiveFirstPage(page, pageSize) {
     };
     const existing = pagesEl().querySelector(`.page[data-page="${page}"]`);
     if (existing) { if (existing.dataset.liveFirst === 'true') size(existing); return; }
-    for (let n = pagesEl().querySelectorAll('.page').length + 1; n <= page; n++) {
+    for (let n = 1; n <= page; n++) {
+        if (pagesEl().querySelector(`.page[data-page="${n}"]`)) continue;
         const wrap = document.createElement('div');
         wrap.className = 'page';
         wrap.dataset.page = String(n);
@@ -2143,7 +2306,7 @@ function ensureLiveFirstPage(page, pageSize) {
         num.className = 'pagenum';
         num.textContent = String(n);
         wrap.appendChild(num);
-        pagesEl().appendChild(wrap);
+        insertPagePlaceholder(wrap);
         if (observer) observer.observe(wrap); else observeVisible();
     }
     el('pagecount').textContent = String(page);
@@ -2204,6 +2367,18 @@ function removeTxdlOverlay(page) {
     t.pages.delete(page);
 }
 
+/** Include queued pages in the handoff: they can draw immediately after
+ * `opened`, even though the full PDF already contains their source. */
+function livePreviewIdentities() {
+    const pages = new Map();
+    for (const [page,e] of state.txdl?.pages || []) pages.set(page,e.identity);
+    for (const [page,e] of state.txdlPending || []) pages.set(page,e.msg.identity);
+    for (const [page,e] of state.txdlFragments || []) pages.set(page,e.msg.mapIdentity);
+    for (const [page,m] of state.txdlDeferred || []) pages.set(page,m.identity);
+    for (const [page,m] of state.txdlFragmentDeferred || []) pages.set(page,m.mapIdentity);
+    return Object.fromEntries(pages);
+}
+
 /**
  * The box an overlay for this page must fill, in CSS px, with the PDF page
  * size in bp when it is known. A rendered page answers from its own viewport;
@@ -2254,7 +2429,7 @@ async function drawTxdlPage(msg, { duringOpen = false, force = false } = {}) {
     // Before the first PDF, the page box comes from the live page itself —
     // also for a page it cannot draw, which stays blank until the PDF.
     if (!state.doc && state.liveFirst) ensureLiveFirstPage(page, msg.pageSize);
-    if (Array.isArray(txdl.unsupported) && txdl.unsupported.length) { txdlFellBack(page); return; }
+    if (Array.isArray(txdl.unsupported) && txdl.unsupported.length) { txdlFellBack(page, txdlFallbackReason(txdl)); return; }
     if (page > (state.pageCount || 0)) ensureLiveExtraPage(page);
     const wrap = pagesEl().querySelector(`.page[data-page="${page}"]`);
     if (!wrap) return;
@@ -2302,15 +2477,16 @@ async function drawTxdlPage(msg, { duringOpen = false, force = false } = {}) {
     const opts = { scale, dpr, background: '#fff', mediaSize: [widthPt, heightPt] };
     let result;
     try { result = renderer.render(txdl, ctx, opts); }
-    catch (_) { return; }
+    catch (error) { txdlFellBack(page, error.message || String(error)); return; }
     // A glyph that has no outline would be a hole in the text: keep the PDF.
-    if (result.fallback || result.skipped > 0) { txdlFellBack(page); return; }
+    if (result.fallback || result.skipped > 0) { txdlFellBack(page, txdlFallbackReason(txdl, null, result)); return; }
     const entry = { canvas, txdl, pageSize: msg.pageSize || null, generation: msg.generation,
         identity: msg.identity || null, openSeq: state.openSeq };
     removeTxdlOverlay(page);
     // The page itself replaces the paragraph drawn ahead of it.
     removeTxdlFragment(page);
     t.pages.set(page, entry);
+    invalidateSelectionGeometry(page, entry.identity);
     // ABOVE THE PDF CANVAS, BELOW EVERYTHING ELSE. Highlights, chips, links
     // and cards are later siblings and therefore keep painting on top.
     const pdfCanvas = wrap.querySelector('canvas:not(.txdl-overlay)');
@@ -2329,15 +2505,25 @@ async function drawTxdlPage(msg, { duringOpen = false, force = false } = {}) {
     // Glyphs whose outline was not cached were skipped, not drawn wrong. Ask
     // for them and draw the same page again when they land.
     if (result.pending > 0) {
-        try { await renderer.prefetch(txdl); } catch (_) { return; }
+        let fetched;
+        try { fetched = await renderer.prefetch(txdl); } catch (error) {
+            if (txdlState().pages.get(page) === entry) txdlFellBack(page, error.message || String(error));
+            return;
+        }
         if (txdlState().pages.get(page) !== entry || !canvas.isConnected) return;
         // A figure that could not be loaded puts the page back on the PDF.
         let again = null;
         try { again = renderer.render(txdl, ctx, opts); } catch (_) { /* keep what is drawn */ }
         // Outlines that never arrived (an unresolved font) or figures that
         // could not load would leave holes on an opaque page: keep the PDF.
-        if (again && (again.fallback || again.pending > 0 || again.skipped > 0)) txdlFellBack(page);
+        if (!again || again.fallback || again.pending > 0 || again.skipped > 0) {
+            txdlFellBack(page, txdlFallbackReason(txdl, fetched, again));
+            return;
+        }
     }
+    state.txdlFallbacks?.delete(page);
+    paintPreviewFallbackBadge();
+    if (state.errorAnnotations?.length) paintErrorAnnotations();
 }
 
 /** Pages within this distance of the viewport are drawn at once. */
@@ -2469,6 +2655,7 @@ async function drawTxdlFragment(msg, { duringOpen = false } = {}) {
     }
     // A hole in the paragraph is worse than a page a moment old.
     if (!result || result.fallback || result.pending > 0 || result.skipped > 0) removeTxdlFragment(page);
+    else invalidateSelectionGeometry(page, msg.mapIdentity ?? null);
 }
 
 /** Whether a live page is far enough from the visible ones to wait. */
@@ -2494,39 +2681,132 @@ function flushTxdlPending(page, { duringOpen = false } = {}) {
     drawTxdlPage(pending.msg, { force: true, duringOpen }).catch(() => {});
 }
 
-/**
- * TeX errors of the last live build, marked on the page they were typeset on.
- *
- * The Problems panel says WHAT went wrong; the page says WHERE it shows —
- * which is where the reader is looking while they type. One mark per page
- * (the first error, with a count), replaced by every live build and gone
- * when a build has none. A click opens the line in the editor.
- */
+/** Live-only messages remain supported; host annotations also cover failed
+ * previews and conventional compiles, and take precedence once received. */
 function paintLiveErrors(errors) {
-    state.liveErrors = Array.isArray(errors) && errors.length ? errors : null;
-    for (const old of document.querySelectorAll('.live-error')) old.remove();
-    const byPage = new Map();
-    for (const e of Array.isArray(errors) ? errors : []) {
-        if (!Number.isInteger(e.page) || e.page < 1) continue;
-        if (!byPage.has(e.page)) byPage.set(e.page, []);
-        byPage.get(e.page).push(e);
+    if (state.errorAnnotationsOwned) return;
+    setErrorAnnotations((errors || []).map((e, i) => ({ ...e,
+        id:`legacy:${e.file}:${e.line}:${i}`, messages:[e.message], rects:[], exact:false })), false);
+}
+
+function setErrorAnnotations(items, owned = true) {
+    state.errorAnnotationsOwned = owned;
+    state.errorAnnotations = Array.isArray(items) ? items : [];
+    const ids = new Set(state.errorAnnotations.map(item => item.id));
+    for (const id of state.errorExpanded || []) if (!ids.has(id)) state.errorExpanded.delete(id);
+    paintErrorAnnotations();
+}
+
+/** Expand beside the affected line without moving the paper or its editor. */
+function errorBanner(item) {
+    const banner = document.createElement('details');
+    banner.className = 'compile-error';
+    banner.dataset.errorId = item.id;
+    banner.open = state.errorExpanded?.has(item.id) || false;
+    const summary = document.createElement('summary');
+    const title = document.createElement('span');
+    title.className = 'error-title';
+    title.textContent = `LaTeX error · ${item.messages?.[0] || 'Compilation failed'}`;
+    const where = document.createElement('span');
+    where.className = 'error-where';
+    where.textContent = item.line ? `line ${item.line}` : 'details';
+    summary.append(title, where);
+    banner.appendChild(summary);
+    const body = document.createElement('div');
+    body.className = 'error-body';
+    for (const message of item.messages || []) {
+        const text = document.createElement('p');
+        text.textContent = message;
+        body.appendChild(text);
     }
-    for (const [page, list] of byPage) {
-        const wrap = pagesEl().querySelector(`.page[data-page="${page}"]`);
-        if (!wrap) continue;
-        const first = list[0];
-        const mark = document.createElement('div');
-        mark.className = 'live-error';
-        mark.textContent = `${first.message}${first.name ? ` — ${first.name}:${first.line}` : ''}` +
-            (list.length > 1 ? ` (+${list.length - 1} more on this page)` : '');
-        mark.title = 'TeX reported this while typesetting this page (live preview). Click to open the line.';
-        mark.addEventListener('click', ev => {
+    const position = document.createElement('div');
+    position.className = 'error-location';
+    position.textContent = item.exact ? 'Mapped source line' : item.rects?.length
+        ? 'Approximate position on the displayed page' + (item.matchedLine && item.matchedLine !== item.line
+            ? ` · nearest mapped line ${item.matchedLine}` : '') : 'No mapped position available';
+    body.appendChild(position);
+    if (item.file && item.line) {
+        const source = document.createElement('button');
+        source.className = 'error-source';
+        source.textContent = `${item.name || item.file}:${item.line} · Open source`;
+        source.addEventListener('click', ev => {
             ev.preventDefault();
-            ev.stopPropagation();
-            vscode.postMessage({ type: 'openSourceLine', file: first.file, line: first.line });
+            vscode.postMessage({ type:'openSourceLine', file:item.file, line:item.line });
         });
-        wrap.appendChild(mark);
+        body.appendChild(source);
     }
+    banner.appendChild(body);
+    // The banner must not become a click-to-source or mini-editor gesture.
+    for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu', 'keydown'])
+        banner.addEventListener(type, ev => ev.stopPropagation());
+    banner.addEventListener('toggle', () => {
+        const expanded = (state.errorExpanded ||= new Set());
+        if (banner.open) expanded.add(item.id); else expanded.delete(item.id);
+        layoutErrorBanners();
+    });
+    return banner;
+}
+
+function errorRect(page, rect) {
+    const vp = rectToViewport(page, rect);
+    if (vp) return vp;
+    const box = txdlPageBox(page);
+    return box ? { x:rect.x * state.scale, y:rect.y * state.scale,
+        w:rect.w * state.scale, h:rect.h * state.scale } : null;
+}
+
+function layoutErrorBanners() {
+    for (const wrap of pagesEl().querySelectorAll('.page')) {
+        const banners = [...wrap.querySelectorAll('.compile-error')]
+            .sort((a, b) => Number(a.dataset.anchorY) - Number(b.dataset.anchorY));
+        let bottom = 4;
+        for (const banner of banners) {
+            const top = Math.max(4, Number(banner.dataset.anchorY) || 4, bottom);
+            banner.style.top = `${top}px`;
+            bottom = top + banner.offsetHeight + 4;
+        }
+    }
+}
+
+function paintErrorAnnotations() {
+    const items = state.errorAnnotations || [];
+    const ids = new Set(items.map(item => item.id));
+    for (const old of document.querySelectorAll('.compile-error'))
+        if (!ids.has(old.dataset.errorId)) old.remove();
+    for (const old of document.querySelectorAll('.compile-error-ink')) old.remove();
+    const unplaced = el('compileerrorlist');
+    for (const item of items) {
+        const wrap = item.page && pagesEl().querySelector(`.page[data-page="${item.page}"]`);
+        const container = wrap || unplaced;
+        if (!container) continue;
+        let banner = [...document.querySelectorAll('.compile-error')].find(n => n.dataset.errorId === item.id);
+        // Reuse unchanged details nodes so refreshes preserve keyboard focus.
+        const content = JSON.stringify([item.messages, item.name, item.line, item.exact, !!item.rects?.length]);
+        if (!banner || banner.dataset.content !== content) {
+            const next = errorBanner(item);
+            next.dataset.content = content;
+            if (banner) banner.replaceWith(next);
+            banner = next;
+        }
+        if (banner.parentNode !== container) container.appendChild(banner);
+        banner.classList.toggle('unplaced', !wrap);
+        const rect = item.rects?.[0] && errorRect(item.page, item.rects[0]);
+        banner.dataset.anchorY = String(rect ? rect.y + rect.h + 3 : 8);
+        const left = rect ? Math.max(8, Math.min(rect.x, wrap.clientWidth - 250)) : 8;
+        banner.style.left = `${left}px`;
+        banner.style.width = wrap ? `${Math.min(420, wrap.clientWidth - left - 8)}px` : '';
+        if (wrap) for (const r of item.rects || []) {
+            const px = errorRect(item.page, r);
+            if (!px) continue;
+            const ink = document.createElement('div');
+            ink.className = 'compile-error-ink';
+            Object.assign(ink.style, { left:`${px.x}px`, top:`${px.y}px`,
+                width:`${Math.max(3, px.w)}px`, height:`${Math.max(3, px.h)}px` });
+            wrap.appendChild(ink);
+        }
+    }
+    if (unplaced) unplaced.hidden = !unplaced.childElementCount;
+    layoutErrorBanners();
 }
 
 /**
@@ -2614,7 +2894,7 @@ function redrawTxdlOverlay(page) {
     // the open had already dropped.
     if (state.openInFlight) return;
     drawTxdlPage({ generation: entry.generation, page, changed: true,
-        txdl: entry.txdl, pageSize: entry.pageSize }).catch(() => {});
+        txdl: entry.txdl, pageSize: entry.pageSize, identity:entry.identity }).catch(() => {});
 }
 
 // --- text layer ---------------------------------------------------------------
@@ -3224,16 +3504,28 @@ function reviewHunks() {
     return r.groups.flatMap(g => g.hunks);
 }
 
+function reviewHunkReady(h) {
+    return !!(h && h.ready!==false && state.doc && !state.openInFlight &&
+        !state.openError && !state.workerDead && reviewPlacementCurrent(h));
+}
+function reviewReadyHunks() { return reviewHunks().filter(reviewHunkReady); }
+function reviewPanelReady() {
+    return !!(state.review?.pending && reviewReadyHunks().length);
+}
+
 function renderReview() {
     const panel = el('reviewlist');
     const r = state.review;
-    document.body.classList.toggle('reviewing', !!(r && r.pending));
+    document.body.classList.toggle('reviewing', !!r?.pending);
     if (el('reviewfeedbackbutton')) {
         const n = state.comments && state.comments.items ? state.comments.items.length : 0;
         el('reviewfeedbackbutton').textContent = `Comments${n ? ' · ' + n : ''}`;
     }
     if (!panel) return;
-    if (!r || !r.pending) { panel.innerHTML = ''; renderReviewDiff(); paintReview(); return; }
+    if (!r?.pending) { panel.innerHTML = ''; renderReviewDiff(); paintReview(); return; }
+    const waiting=reviewHunks().filter(h=>!reviewHunkReady(h));
+    for(const id of ['reviewkeepall','reviewundoall'])if(el(id))el(id).disabled=waiting.length>0;
+    for(const id of ['reviewprev','reviewnext'])if(el(id))el(id).disabled=!reviewPanelReady();
 
     el('reviewtitle').textContent = `Review · ${r.pending} change${r.pending === 1 ? '' : 's'}`;
     // The census opens with the same count the title just gave; what is worth
@@ -3247,7 +3539,7 @@ function renderReview() {
         return `${Math.round(s / 3600)} h ago`;
     };
     const esc = (x) => String(x == null ? '' : x)
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g,'&quot;');
     const verbWord = { add: 'added', del: 'removed', change: 'changed' };
 
     // HOW THE LIST IS COLLATED.
@@ -3257,7 +3549,10 @@ function renderReview() {
     // writer asks while reading, and it is the one asked for. The hunks are the
     // same either way — only the headings and what "keep the group" means
     // change — so this is a rendering decision and nothing else.
-    const groups = state.reviewGroup === 'arrival' ? r.groups : sectionGroups(r);
+    const available={...r,groups:r.groups.map(g=>({...g,hunks:g.hunks.filter(reviewHunkReady)}))
+        .filter(g=>g.hunks.length).map(g=>({...g,count:g.hunks.length}))};
+    const groups = state.reviewGroup === 'arrival' ? available.groups : sectionGroups(available);
+    if(waiting.length)groups.push({kind:'waiting',hunks:waiting,count:waiting.length});
     const shallowest = groups.reduce((m, g) => (g.kind === 'section' && g.level ? Math.min(m, g.level) : m), 99);
 
     const parts = [];
@@ -3265,7 +3560,9 @@ function renderReview() {
         // An arrival is an EPISODE: several writes close together are one
         // group, so the age shown is that of the LAST write in it, and the
         // number of writes is worth saying when it was more than one.
-        if (g.kind === 'section') {
+        if (g.kind === 'waiting') {
+            parts.push(`<div class="grp waiting">◷ Preparing · ${g.count} change${g.count===1 ? '' : 's'}</div>`);
+        } else if (g.kind === 'section') {
             // The indent carries the level, so a subsection reads as inside the
             // section above it rather than as a sibling of it. RELATIVE to the
             // shallowest heading in the list: the scanner numbers \section 2
@@ -3290,10 +3587,12 @@ function renderReview() {
             const writes = g.writes > 1 ? ` · ${g.writes} writes` : '';
             parts.push(`<div class="grp"><span>${esc(new Date(g.at).toLocaleString())} · ${esc(ago(g.lastAt || g.at))} · ${esc(g.author?.name || 'External / unknown')}${g.author?.sessionId ? ' · ' + esc(g.author.sessionId.slice(0, 6)) : ''} · ${esc(g.source)}${writes} · ` +
                 `${g.count} change${g.count === 1 ? '' : 's'}</span><span class="sp"></span>` +
-                `<button data-batch="${esc(g.id)}">Keep batch</button></div>`);
+                `<button ${waiting.length ? 'data-keepmany="'+esc(g.hunks.map(h=>h.id).join(','))+'"' : 'data-batch="'+esc(g.id)+'"'}>Keep batch</button></div>`);
         }
         for (const h of g.hunks) {
-            const where = h.where === 'rows' ? `p.${h.page} · on the page`
+            const ready=reviewHunkReady(h),disabled=ready ? '' : ' disabled';
+            const where = !ready ? '◷ Preparing…' : h.contextual ? `p.${h.page} · source marker`
+                : h.where === 'rows' ? `p.${h.page} · on the page`
                 : h.where === 'gap' ? `p.${h.page} · marked at the seam`
                     : h.where === 'none' ? 'not locatable on the page'
                         : `p.${h.page} · approximate`;
@@ -3304,11 +3603,11 @@ function renderReview() {
             // One column each: what happened, to what, how much, where, and the
             // two verdicts. A wide panel reads down its columns.
             parts.push(
-                `<div class="rh${h.id === r.focus ? ' on' : ''}" data-hunk="${esc(h.id)}">` +
-                `<span class="v ${esc(h.verb)}">${h.verb === 'add' ? '+' : h.verb === 'del' ? '\u2212' : '~'}</span>` +
+                `<div class="rh${h.id === r.focus ? ' on' : ''}${ready ? '' : ' waiting'}" data-hunk="${esc(h.id)}" aria-disabled="${!ready}">` +
+                `<span class="v ${esc(h.verb)}"${ready ? '' : ' title="Preparing the page for this change"'}>${!ready ? '◷' : h.verb === 'add' ? '+' : h.verb === 'del' ? '\u2212' : '~'}</span>` +
                 `<span class="name" title="${esc(name)}">${esc(name)}</span>` +
                 `<span class="meta">${esc(size)}</span>` +
-                `<span class="where">${esc(where)}<br><small>${esc(h.author?.name || 'External / unknown')} · ${esc(new Date(h.at).toLocaleTimeString())}</small></span>` +
+                `<span class="where">${esc(where)}<br><small title="${esc(reviewAuthorTitle(h.author))}">${esc(h.author?.name || 'External / unknown')} · ${esc(new Date(h.at).toLocaleTimeString())}</small></span>` +
                 // A change the reader has typed inside cannot be UNDONE — that
                 // would throw their own words away — but it can still be kept,
                 // and withholding both left it in the list with no way out.
@@ -3317,11 +3616,12 @@ function renderReview() {
                 (h.editedByYou
                     ? '<span class="acts">' +
                       '<span class="flag" title="Undo would throw away what you typed">you edited this</span>' +
-                      `<button class="keep" data-keep="${esc(h.id)}" title="Agree to this change, your words included">\u2713 Keep</button>` +
+                      `<button class="keep"${disabled} data-keep="${esc(h.id)}" title="Agree to this change, your words included">\u2713 Keep</button>` +
+                      '<button class="undo" disabled title="You typed inside this change — undoing it would throw your own words away">\u21ba Undo</button>' +
                       '</span>'
                     : '<span class="acts">' +
-                      `<button class="keep" data-keep="${esc(h.id)}" title="Agree to this change">\u2713 Keep</button>` +
-                      `<button class="undo" data-undo="${esc(h.id)}" title="Put this back the way it was">\u21ba Undo</button>` +
+                      `<button class="keep"${disabled} data-keep="${esc(h.id)}" title="Agree to this change">\u2713 Keep</button>` +
+                      `<button class="undo"${disabled} data-undo="${esc(h.id)}" title="Put this back the way it was">\u21ba Undo</button>` +
                       '</span>') +
                 '</div>');
         }
@@ -3332,8 +3632,35 @@ function renderReview() {
         parts.push(`<div class="done">this session: ${kept} kept, ${undone} undone</div>`);
     }
     panel.innerHTML = parts.join('');
-    renderReviewDiff();
     paintReview();
+    renderReviewDiff();
+}
+
+// Selection changes neither source nor placement. Retain the list, page ink,
+// scroll position and controls; only the focus classes/contour and diff change.
+function selectReviewHunk(id) {
+    const r=state.review,h=reviewHunks().find(h=>h.id===id);
+    if(!r || !h || !reviewHunkReady(h))return false;
+    if(r.focus===id)return true;
+    r.focus=id;
+    for(const node of document.querySelectorAll('.rh.on,.rband.on'))node.classList.remove('on');
+    for(const node of document.querySelectorAll('.rh,.rband'))if(node.dataset.hunk===id)node.classList.add('on');
+    for(const node of document.querySelectorAll('.rcontour'))node.remove();
+    if(reviewPlacementCurrent(h)) {
+        const pages=new Map();
+        for(const rect of h.rects || []) {
+            if(rect.caret || !state.rendered.has(rect.page))continue;
+            const v=rectToViewport(rect.page,rect);if(!v)continue;
+            if(!pages.has(rect.page))pages.set(rect.page,[]);
+            pages.get(rect.page).push({x:v.x,y:v.y,w:v.w,h:v.h});
+        }
+        for(const [page,fragments] of pages) {
+            const wrap=pagesEl().querySelector(`.page[data-page="${page}"]`);
+            if(wrap)paintReviewContour(wrap,fragments,id);
+        }
+    }
+    renderReviewDiff();
+    return true;
 }
 
 /**
@@ -3346,35 +3673,97 @@ function renderReview() {
  * extension (`words`), computed by the same refineHunk the census counts with,
  * so there is no second differ in here to disagree with the first.
  */
+const reviewPreview = { mode:'rendered', seq:0, key:null, response:null, marks:{}, timer:null, requested:false };
+
+function reviewAuthorTitle(author) {
+    if(!author)return 'External / unknown';
+    if(author.source!=='git')return author.name || 'External / unknown';
+    return 'Git '+(author.scope==='update' ? 'update contributors' : 'authors')+': '+
+        (author.contributors || []).map(p=>`${p.name}${p.email ? ' <'+p.email+'>' : ''} · ${(p.commit || '').slice(0,8)}${p.date ? ' · '+p.date : ''}`).join('\n');
+}
+
+// The current ink already exists. Copy it rather than compiling/reopening an
+// identical document; source/generation/page identities guard this fast path.
+function paintReviewAfterFromPage(h) {
+    const holder=el('reviewdiff')?.querySelector('[data-reviewside="after"]');
+    if(!holder || holder.dataset.snapshotPreview==='true' || holder._reviewMapResolve || !reviewPlacementCurrent(h) || !h.rects?.length)return false;
+    const output=document.createDocumentFragment(), crops=[];
+    for(const number of new Set(h.rects.filter(r=>!r.caret).map(r=>r.page))) {
+        const rects=h.rects.filter(r=>r.page===number && !r.caret && r.w>0 && r.h>0);
+        const crop={page:number,x:Math.min(...rects.map(r=>r.x))-2,y:Math.min(...rects.map(r=>r.y))-2};
+        crop.w=Math.max(...rects.map(r=>r.x+r.w))-crop.x+2;crop.h=Math.max(...rects.map(r=>r.y+r.h))-crop.y+2;
+        const drawn=state.rendered.get(number);
+        const source=state.txdlFragments?.get(number)?.canvas || state.txdl?.pages?.get(number)?.canvas || drawn?.canvas;
+        const v=rectToViewport(number,crop);
+        if(!source?.isConnected || !v || !drawn?.viewport || !(crop.w>0 && crop.h>0))return false;
+        const style=getComputedStyle(holder), width=(holder.clientWidth || 540)-parseFloat(style.paddingLeft)-parseFloat(style.paddingRight);
+        const scale=Math.min(1.5,Math.max(.35,width/crop.w));
+        const wrap=document.createElement('div');wrap.className='rd-crop';wrap._reviewCrop={...crop,scale};
+        wrap.style.width=`${crop.w*scale}px`;wrap.style.height=`${crop.h*scale}px`;
+        const canvas=document.createElement('canvas');canvas.width=Math.ceil(crop.w*scale*2);canvas.height=Math.ceil(crop.h*scale*2);
+        const ctx=canvas.getContext('2d'), sx=source.width/drawn.viewport.width, sy=source.height/drawn.viewport.height;
+        ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height);
+        ctx.drawImage(source,v.x*sx,v.y*sy,v.w*sx,v.h*sy,0,0,canvas.width,canvas.height);
+        wrap.appendChild(canvas);output.appendChild(wrap);crops.push(crop);
+    }
+    if(!crops.length)return false;
+    holder.querySelector('.rd-fast')?.remove();
+    const fast=document.createElement('div');fast.className='rd-fast';fast.appendChild(output);holder.appendChild(fast);
+    for(const n of holder.querySelectorAll('.rd-fallback,.rd-preview-status'))n.style.display='none';
+    holder.dataset.pagePreview='true';
+    paintReviewRenderedMarks({requestId:reviewPreview.seq,side:'after',marks:reviewInk.marks.get(h.id)||[],crops},true);
+    return true;
+}
+
 function renderReviewDiff() {
     const pane = el('reviewdiff');
     if (!pane) return;
     const r = state.review;
-    const h = r && reviewHunks().find(x => x.id === r.focus);
+    const h = r && reviewHunks().find(x => x.id === r.focus && reviewHunkReady(x));
     if (!h) {
+        for (const holder of pane.querySelectorAll('[data-reviewside]')) holder._reviewMapResolve?.(null);
+        clearTimeout(reviewPreview.timer);
+        if (reviewPreview.requested) vscode.postMessage({ type:'reviewRender', id:null });
+        reviewPreview.key = null; reviewPreview.requested = false; reviewPreview.response = null;
+        pane.dataset.reviewKey = '';
         pane.innerHTML = r && r.pending
-            ? '<div class="rd-none">Select a change to see it.</div>' : '';
+            ? '<div class="rd-none">'+(reviewPanelReady() ? 'Select a change to see it.' : '◷ Preparing the corrections…')+'</div>' : '';
         return;
     }
     const esc = (x) => String(x == null ? '' : x)
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    // Mark the words that differ, line by line, from the ranges given.
-    const block = (text, ranges, cls) => {
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g,'&quot;');
+    const key = `${r.file || ''}|${r.renderRevision || ''}|${h.id}|${h.ourText}|${h.theirText}`;
+    if (key !== reviewPreview.key) {
+        clearTimeout(reviewPreview.timer);
+        if (reviewPreview.requested) vscode.postMessage({ type:'reviewRender', id:null });
+        Object.assign(reviewPreview, { key, seq:reviewPreview.seq + 1, response:null, marks:{}, requested:false });
+    }
+    const viewKey = `${key}|${reviewPreview.mode}|${r.generation}|${JSON.stringify(r.livePages || null)}|${JSON.stringify(h.author || null)}`;
+    if (pane.dataset.reviewKey === viewKey) return;
+    pane.dataset.reviewKey = viewKey;
+    // Unchanged text stays neutral. Only the differing spans receive colour.
+    const block = (text, ranges, cls, firstLine) => {
         const lines = String(text || '').split('\n');
         return lines.map((line, i) => {
-            const marks = (ranges || []).filter(w => w.line === i)
+            const marks = (ranges || (h.verb === 'change' ? [] : [{ line:i, col:0, len:line.length }])).filter(w => w.line === i)
                 .sort((a, b) => a.col - b.col);
             let out = ''; let at = 0;
             for (const w of marks) {
                 const from = Math.max(at, Math.min(w.col, line.length));
                 const to = Math.max(from, Math.min(w.col + w.len, line.length));
-                out += esc(line.slice(at, from)) + '<mark>' + esc(line.slice(from, to)) + '</mark>';
+                out += esc(line.slice(at, from)) + '<mark title="' + (cls === 'was' ? 'Removed' : 'Added') + '">' + esc(line.slice(from, to)) + '</mark>';
                 at = to;
             }
             out += esc(line.slice(at));
-            return '<div class="rd-line ' + cls + '">' + (out || '&nbsp;') + '</div>';
+            return '<div class="rd-line ' + cls + '"><span class="rd-number">' + (firstLine + i) + '</span>' +
+                '<span class="rd-sign">' + (marks.length ? (cls === 'was' ? '−' : '+') : '') + '</span>' +
+                '<span class="rd-source">' + (out || '&nbsp;') + '</span></div>';
         }).join('');
     };
+    const pending = (side, text, ranges, cls, firstLine) =>
+        '<div class="rd-render ' + cls + '" data-reviewside="' + side + '">' +
+        '<div class="rd-preview-status" role="status">Showing code while the rendered preview loads…</div>' +
+        '<div class="rd-fallback">' + block(text, ranges, cls, firstLine) + '</div></div>';
     const words = h.words || {};
     const parts = [];
     // THE VERDICTS, HERE TOO. The list's own buttons are in its last column,
@@ -3390,25 +3779,329 @@ function renderReviewDiff() {
         '</span>';
     parts.push('<div class="rd-head"><b>' + esc(h.name || ('line ' + h.startLine)) + '</b>' +
         '<span>line ' + h.startLine + '</span>' +
+        (h.author ? '<span class="rd-author" title="'+esc(reviewAuthorTitle(h.author)).replace(/"/g,'&quot;')+'">'+esc(h.author.name)+'</span>' : '') +
         (h.editedByYou ? '<span class="rd-flag">\u00b7 you edited this</span>' : '') +
         acts + '</div>');
+    parts.push('<div class="rd-tools"><span class="rd-modes" role="group" aria-label="Review display">' +
+        ['rendered','code'].map(mode => '<button data-reviewmode="' + mode + '" aria-pressed="' + (reviewPreview.mode === mode) + '">' +
+            (mode === 'rendered' ? 'Rendered' : 'Code') + '</button>').join('') + '</span>' +
+        '<span class="rd-legend was">− Removed</span><span class="rd-legend now">+ Added</span></div>');
     if (h.verb !== 'add' && h.theirText) {
         parts.push('<div class="rd-tag">before</div>');
-        parts.push(block(h.theirText, words.theirs, 'was'));
+        parts.push(reviewPreview.mode === 'code' ? block(h.theirText, words.theirs, 'was', h.beforeLine || h.startLine) :
+            pending('before', h.theirText, words.theirs, 'was', h.beforeLine || h.startLine));
     }
     if (h.verb !== 'del' && h.ourText) {
         if (parts.length > 1) parts.push('<div class="rd-sep"></div>');
         parts.push('<div class="rd-tag">' + (h.verb === 'add' ? 'added' : 'after') + '</div>');
-        parts.push(block(h.ourText, words.ours, 'now'));
+        parts.push(reviewPreview.mode === 'code' ? block(h.ourText, words.ours, 'now', h.startLine) :
+            pending('after', h.ourText, words.ours, 'now', h.startLine));
     }
+    for (const holder of pane.querySelectorAll('[data-reviewside]')) holder._reviewMapResolve?.(null);
     pane.innerHTML = parts.join('');
     pane.scrollTop = 0;
+    if (reviewPreview.mode === 'rendered') {
+        paintReviewAfterFromPage(h);
+        if (reviewPreview.response) paintReviewRendered(reviewPreview.response);
+        else if (!reviewPreview.requested) {
+            clearTimeout(reviewPreview.timer);
+            const seq = reviewPreview.seq;
+            const started=Date.now();
+            const request=()=> {
+                if (seq !== reviewPreview.seq || reviewPreview.mode !== 'rendered') return;
+                if(reviewInk.pending.has(h.id) && Date.now()-started<250){reviewPreview.timer=setTimeout(request,20);return;}
+                reviewPreview.requested = true;
+                vscode.postMessage({ type:'reviewRender', requestId:seq, id:h.id, file:r.file, revision:r.renderRevision,
+                    pagePreview:!!pane.querySelector('[data-reviewside="after"][data-page-preview="true"]') });
+            };
+            reviewPreview.timer=setTimeout(request,0);
+        }
+    }
 }
+
+// Two immutable documents serve every correction in a review. Keep their
+// PDF.js workers, fonts and measured page text instead of reopening them for
+// each selection. Retired entries stay alive until their current paint ends.
+const reviewPdfCache = new Map();
+function acquireReviewPdf(preview) {
+    const key = preview.pdfId || preview.pdfBase64;
+    let entry = reviewPdfCache.get(key);
+    if (!entry) {
+        const bytes = Uint8Array.from(atob(preview.pdfBase64), c => c.charCodeAt(0));
+        const task = state.pdfjs.getDocument({ data:bytes, worker:state.pdfWorker,
+            standardFontDataUrl:state.pdfBase ? `${state.pdfBase}/standard_fonts/` : undefined, isEvalSupported:false });
+        entry = { task, promise:task.promise, pages:new Map(), users:0, retired:false };
+        reviewPdfCache.set(key, entry);
+        entry.promise.catch(() => {
+            if (reviewPdfCache.get(key) === entry) reviewPdfCache.delete(key);
+            entry.retired = true;
+        });
+    }
+    entry.users++;
+    reviewPdfCache.delete(key); reviewPdfCache.set(key, entry);
+    while (reviewPdfCache.size > 4) {
+        const oldest = reviewPdfCache.keys().next().value, stale = reviewPdfCache.get(oldest);
+        reviewPdfCache.delete(oldest); stale.retired = true;
+        if (!stale.users) stale.task.destroy().catch(() => {});
+    }
+    return entry;
+}
+function releaseReviewPdf(entry) {
+    if (entry && --entry.users === 0 && entry.retired) entry.task.destroy().catch(() => {});
+}
+async function reviewPdfPage(entry, number) {
+    if (!entry.pages.has(number)) entry.pages.set(number, (async () => {
+        const doc = await entry.promise, page = await doc.getPage(number);
+        const natural = page.getViewport({ scale:1 }), text = await page.getTextContent(), pageItems = [];
+        for (const it of text.items) {
+            if (!it.str?.trim() || !it.transform) continue;
+            const [x, baseline] = natural.convertToViewportPoint(it.transform[4], it.transform[5]);
+            const h = Math.hypot(it.transform[2], it.transform[3]) || it.height || 10;
+            const font = text.styles[it.fontName];
+            const ink = Number.isFinite(font?.ascent) && Number.isFinite(font?.descent)
+                ? { inkY:baseline - h * font.ascent, inkH:h * (font.ascent - font.descent) } : {};
+            pageItems.push({ page:number, str:it.str, x, y:baseline - h, baseline, w:it.width, h, font:it.fontName, ...ink });
+        }
+        await measureReviewChars(text, natural, pageItems);
+        return { page, natural, pageItems };
+    })());
+    return entry.pages.get(number);
+}
+async function warmReviewPdfs(msg) {
+    const current = () => state.review?.renderRevision === msg.revision && state.review?.file === msg.file;
+    for (const preview of msg.pdfs || []) {
+        if (!current()) return;
+        let entry;
+        try {
+            entry = acquireReviewPdf(preview);
+            for (const number of preview.pages || []) {
+                if (!current()) return;
+                await reviewPdfPage(entry, number);
+                // Preloading gives foreground input and page rendering priority.
+                await new Promise(resolve => setTimeout(resolve, 30));
+            }
+        } catch (_) { /* code remains readable if warming is unavailable */ }
+        finally { releaseReviewPdf(entry); }
+    }
+}
+
+async function paintReviewRendered(msg) {
+    const seq = reviewPreview.seq;
+    for (const side of ['before','after']) {
+        const holder = el('reviewdiff').querySelector(`[data-reviewside="${side}"]`);
+        if (!holder) continue;
+        const current = () => seq === reviewPreview.seq && reviewPreview.mode === 'rendered' && holder.isConnected;
+        const unavailable = reason => {
+            if (!current()) return;
+            holder.querySelector('.rd-fast')?.remove();
+            for(const n of holder.querySelectorAll('.rd-fallback,.rd-preview-status'))n.style.display='';
+            delete holder.dataset.pagePreview;
+            const note = holder.querySelector('.rd-preview-status');
+            if (note) note.textContent = 'Showing code. ' + String(reason).replace(/\s*Use Code to [^.]*\./g, '');
+        };
+        const preview = msg[side];
+        if (!preview && !msg.error) continue; // the other side is still preparing
+        if (msg.error || preview?.error) {
+            unavailable(msg.error || preview.error); continue;
+        }
+        if (!preview || preview.empty || !preview.crops?.length) {
+            unavailable('This change has no printed content.'); continue;
+        }
+        let entry;
+        try {
+            entry = acquireReviewPdf(preview);
+            await entry.promise;
+            if (!current()) continue;
+            // Keep readable source until every canvas is ready. A detached
+            // fragment also prevents stale or failed renders replacing it.
+            const output = document.createDocumentFragment();
+            const pages = new Map(), items = [];
+            // Extract complete candidate pages first. A narrow SyncTeX crop
+            // can miss prose or point to the following display altogether.
+            for (const number of new Set(preview.crops.map(c => c.page))) {
+                const data = await reviewPdfPage(entry, number);
+                if (!current()) break;
+                pages.set(number, data);
+                const { pageItems } = data;
+                items.push(...pageItems);
+            }
+            if (!current()) continue;
+            let mapping = reviewPreview.marks[side];
+            if (!mapping) {
+                let timer;
+                try {
+                    mapping = await new Promise(resolve => {
+                        holder._reviewMapResolve = resolve;
+                        timer = setTimeout(() => resolve({ error:'The printed change could not be located in time.' }), 15000);
+                        vscode.postMessage({ type:'reviewRenderMap', requestId:seq, side, items });
+                    });
+                } finally { clearTimeout(timer); holder._reviewMapResolve = null; }
+            }
+            if (!current()) continue;
+            if (!mapping || mapping.error || !mapping.crops?.length) {
+                unavailable(mapping?.error || 'The printed change could not be located reliably.'); continue;
+            }
+            for (const original of mapping.crops) {
+                const crop = { ...original };
+                const { page, natural, pageItems } = pages.get(crop.page);
+                if (!current()) break;
+                // SyncTeX can begin a row after its first word. Include the
+                // complete PDF text runs crossing the measured crop edges.
+                const crossing = pageItems.filter(it => it.baseline >= crop.y && it.baseline <= crop.y + crop.h &&
+                    it.x + it.w > crop.x && it.x < crop.x + crop.w);
+                if (crossing.length) {
+                    const right = Math.min(natural.width, Math.max(crop.x + crop.w, ...crossing.map(it => it.x + it.w + 3)));
+                    crop.x = Math.max(0, Math.min(crop.x, ...crossing.map(it => it.x - 3)));
+                    crop.w = right - crop.x;
+                }
+                const style = getComputedStyle(holder);
+                const width = (holder.clientWidth || 540) - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+                const scale = Math.min(1.5, Math.max(.35, width / crop.w));
+                const vp = page.getViewport({ scale:scale * 2 });
+                const viewport = vp.clone({ offsetX:-crop.x * scale * 2, offsetY:-crop.y * scale * 2 });
+                const wrap = document.createElement('div'); wrap.className = 'rd-crop';
+                wrap.style.width = `${crop.w * scale}px`; wrap.style.height = `${crop.h * scale}px`;
+                wrap._reviewCrop = { ...crop, scale };
+                const canvas = document.createElement('canvas');
+                canvas.width = Math.ceil(crop.w * scale * 2); canvas.height = Math.ceil(crop.h * scale * 2);
+                wrap.appendChild(canvas); output.appendChild(wrap);
+                const context = canvas.getContext('2d');
+                const clips = mapping.clipRects?.filter(r => r.page === crop.page);
+                if (clips?.length) {
+                    context.beginPath();
+                    for (const r of clips) context.rect((r.x - crop.x) * scale * 2, (r.y - crop.y) * scale * 2,
+                        r.w * scale * 2, r.h * scale * 2);
+                    context.clip();
+                }
+                await page.render({ canvasContext:context, viewport }).promise;
+            }
+            if (current()) {
+                const note = document.createElement('div'); note.className = 'rd-mapping';
+                output.appendChild(note);
+                holder.replaceChildren(output); holder.dataset.snapshotPreview='true';
+                paintReviewRenderedMarks(mapping);
+            }
+        } catch (error) { unavailable(`Preview unavailable: ${error.message}`); }
+        finally { releaseReviewPdf(entry); }
+    }
+}
+
+async function measureReviewChars(text, viewport, items, {ink=false,fonts=null}={}) {
+    // PDF.js's text layer uses the embedded fonts and run width corrections.
+    // DOM ranges give actual letter widths in proportional fonts; dividing a
+    // whole line uniformly would put a highlight beside the changed word.
+    const layer = document.createElement('div');
+    Object.assign(layer.style, { position:'fixed', left:'0', top:'0', visibility:'hidden',
+        pointerEvents:'none', width:`${viewport.width}px`, height:`${viewport.height}px`, overflow:'hidden' });
+    layer.style.setProperty('--total-scale-factor', '1');
+    document.body.appendChild(layer);
+    try {
+        if (ink && fonts) {
+            // TextContent styles can name only a generic serif/sans family.
+            // The page renderer has the actual embedded face under loadedName.
+            const styles={...text.styles};
+            for (const name of Object.keys(styles)) {
+                try {
+                    const font=fonts.get(name);
+                    if (font?.loadedName && !font.disableFontFace && !font.isType3Font)
+                        styles[name]={...styles[name],fontFamily:font.loadedName};
+                } catch (_) { /* keep the supplied fallback face */ }
+            }
+            text={...text,styles};
+        }
+        const task = new state.pdfjs.TextLayer({ textContentSource:text, container:layer, viewport });
+        // TextLayer normally inherits rounding variables from PDFViewer.
+        // This measurement layer has its own natural dimensions instead.
+        layer.style.width = `${viewport.width}px`; layer.style.height = `${viewport.height}px`;
+        await task.render();
+        if (ink && document.fonts) await document.fonts.ready;
+        const context=ink ? document.createElement('canvas').getContext('2d') : null;
+        for (const div of task.textDivs) {
+            const h = parseFloat(div.style.getPropertyValue('--font-height')) || 10;
+            const xScale = parseFloat(div.style.getPropertyValue('--scale-x')) || 1;
+            const rotate = div.style.getPropertyValue('--rotate') || '0deg';
+            Object.assign(div.style, { position:'absolute', whiteSpace:'pre', lineHeight:'1',
+                fontSize:`${h}px`, transformOrigin:'0 0', transform:`rotate(${rotate}) scaleX(${xScale})` });
+        }
+        const bounds = layer.getBoundingClientRect();
+        let index = 0, itemIndex = 0;
+        for (const it of text.items) {
+            if (typeof it.str !== 'string') continue;
+            const div = task.textDivs[index++];
+            if (!it.str.trim() || !it.transform) continue;
+            const item = items[itemIndex++], node = div?.firstChild;
+            if (!item || !node || node.nodeType !== Node.TEXT_NODE || node.textContent !== it.str) continue;
+            const range = document.createRange(), boxes = []; let at = 0;
+            const h=parseFloat(div.style.getPropertyValue('--font-height')) || item.h;
+            const scaleX=parseFloat(div.style.getPropertyValue('--scale-x')) || 1;
+            if (context) context.font=`${h}px ${div.style.fontFamily || 'serif'}`;
+            for (const ch of it.str) {
+                const from=at;range.setStart(node, at); at += ch.length; range.setEnd(node, at);
+                const r = range.getBoundingClientRect();
+                const metrics=context?.measureText(ch),baseline=item.baseline ?? item.y+item.h;
+                if (metrics && Number.isFinite(metrics.actualBoundingBoxAscent) && Number.isFinite(metrics.actualBoundingBoxDescent)) {
+                    boxes.push({from,to:at,x:r.left-bounds.left-metrics.actualBoundingBoxLeft*scaleX,
+                        w:(metrics.actualBoundingBoxLeft+metrics.actualBoundingBoxRight)*scaleX,
+                        y:baseline-metrics.actualBoundingBoxAscent,h:metrics.actualBoundingBoxAscent+metrics.actualBoundingBoxDescent});
+                } else boxes.push({ x:r.left - bounds.left, w:r.width });
+            }
+            if (boxes.some(b => b.w > 0)) item.charBoxes = boxes;
+        }
+    } finally { layer.remove(); }
+}
+
+function reviewInkRuns(marks) {
+    const runs = [];
+    for (const mark of marks.slice().sort((a,b) => a.page - b.page || (a.y + a.h) - (b.y + b.h) || a.x - b.x)) {
+        const last = runs.at(-1);
+        if (last && last.page === mark.page && Math.abs(last.y + last.h - mark.y - mark.h) < 1 &&
+            Math.abs(last.h - mark.h) < 2 && mark.x >= last.x && mark.x <= last.x + last.w + 1.5) {
+            last.w = Math.max(last.w, mark.x + mark.w - last.x);
+        } else runs.push({ ...mark });
+    }
+    return runs;
+}
+
+function paintReviewRenderedMarks(msg, fast = false) {
+    if (msg.requestId !== reviewPreview.seq || reviewPreview.mode !== 'rendered') return;
+    if(!fast)reviewPreview.marks[msg.side] = msg;
+    const holder = el('reviewdiff').querySelector(`[data-reviewside="${msg.side}"]`);
+    if (!holder) return;
+    if (!fast && holder._reviewMapResolve) { holder._reviewMapResolve(msg); return; }
+    for (const old of holder.querySelectorAll('.rd-inkmark')) old.remove();
+    for (const wrap of holder.querySelectorAll('.rd-crop')) {
+        const crop = wrap._reviewCrop;
+        for (const mark of reviewInkRuns(msg.marks || [])) {
+            if (mark.page !== crop.page) continue;
+            const x = Math.max(mark.x, crop.x), y = Math.max(mark.y, crop.y);
+            const w = Math.min(mark.x + mark.w, crop.x + crop.w) - x, h = Math.min(mark.y + mark.h, crop.y + crop.h) - y;
+            if (w <= 0 || h <= 0) continue;
+            const tag = document.createElement('span'); tag.className = 'rd-inkmark';
+            tag.title = msg.side === 'before' ? 'Removed' : 'Added';
+            Object.assign(tag.style, { left:`${(x - crop.x) * crop.scale}px`,
+                top:`${((msg.side === 'before' ? mark.y + mark.h * .55 : mark.y + mark.h) - crop.y) * crop.scale + 1}px`,
+                width:`${w * crop.scale}px`, height:'0' });
+            wrap.appendChild(tag);
+        }
+    }
+    const note = holder.querySelector('.rd-mapping');
+    if (note) note.textContent = msg.mapped < msg.changed ?
+        'Some source changes have no matching printed text. See Code for all changes.' : '';
+}
+
+el('reviewdiff').addEventListener('click', ev => {
+    const button = ev.target.closest('[data-reviewmode]');
+    if (!button) return;
+    ev.preventDefault(); ev.stopPropagation();
+    reviewPreview.mode = button.dataset.reviewmode;
+    if (reviewPreview.mode === 'code') clearTimeout(reviewPreview.timer);
+    renderReviewDiff();
+});
 
 let reviewContourSequence = 0;
 
 /**
- * Draw one outline around a focused change on one page.
+ * Build one continuous review shape on a page, shared by fill and outline.
  *
  * pdf.js gives a Range as several rectangles (often several on the SAME
  * printed line).  Stroke those rectangles independently and the paper turns
@@ -3416,8 +4109,7 @@ let reviewContourSequence = 0;
  * leading between consecutive lines.  The SVG filter outlines the UNION of
  * those tiles, so shared edges simply do not exist in the result.
  */
-function paintReviewContour(wrap, fragments) {
-    if (!wrap || !fragments.length) return;
+function reviewRegionRows(fragments) {
     const sorted = fragments.slice().sort((a, b) => a.y - b.y || a.x - b.x);
     const rows = [];
     for (const box of sorted) {
@@ -3445,10 +4137,17 @@ function paintReviewContour(wrap, fragments) {
             row.h = next.y - row.y + .25;
         }
     }
+    return rows;
+}
+
+function paintReviewContour(wrap, fragments, hunkId) {
+    if (!wrap || !fragments.length) return;
+    const rows = reviewRegionRows(fragments);
 
     const ns = 'http://www.w3.org/2000/svg';
     const svg = document.createElementNS(ns, 'svg');
     svg.classList.add('rcontour');
+    if(hunkId)svg.dataset.hunk=hunkId;
     svg.setAttribute('viewBox', `0 0 ${wrap.clientWidth} ${wrap.clientHeight}`);
     svg.setAttribute('aria-hidden', 'true');
 
@@ -3511,27 +4210,100 @@ function paintReviewContour(wrap, fragments) {
  * Unknown placement is suppressed too: during an external edit the list can
  * already describe the new source while no corresponding render exists yet.
  */
-function reviewPlacementCurrent() {
+function reviewPlacementCurrent(h) {
     const r = state.review;
     if (!r) return true;
     // Unknown is not a render. During an external edit the list is current but
     // there is deliberately no trustworthy page placement yet.
     if (r.generation == null || state.generation == null) return false;
-    return String(r.generation) === String(state.generation);
+    if(String(r.generation)!==String(state.generation))return false;
+    const rows=h?.rects || (r.groups || []).flatMap(g=>g.hunks || []).filter(h=>h.ready!==false).flatMap(h=>h.rects || []);
+    return selectionGeometryCurrent({rows,geometry:{generation:r.generation,livePages:r.livePages || {}}});
 }
 
 /** The pending changes, marked where they print. */
-function paintReview() {
-    paintBookmarks();
-    for (const el of document.querySelectorAll('.rband, .rcontour, .rchip')) el.remove();
+const reviewInk = { key:null, geometryKey:null, hunkKeys:new Map(), seq:0, marks:new Map(), pending:new Set(), pages:new Map() };
+let reviewHover = null, reviewHoverTimer = null;
+
+async function requestReviewInk(h) {
+    if (h.verb === 'del' || reviewInk.pending.has(h.id) || reviewInk.marks.has(h.id)) return;
+    const r = state.review, seq = reviewInk.seq, doc = state.doc;
+    const current = () => seq === reviewInk.seq && doc === state.doc && reviewPlacementCurrent(h);
+    reviewInk.pending.add(h.id);
+    try {
+        const items = [];
+        // Use the map of the displayed PDF, not the licence badge. Pro can
+        // show a conventional fallback PDF, which still needs measured text.
+        if (!state.nativeMapAvailable && !r.livePages && doc) {
+            for (const number of new Set((h.rects || []).map(rect => rect.page))) {
+                if (!reviewInk.pages.has(number)) reviewInk.pages.set(number, (async () => {
+                    const page = await doc.getPage(number), vp = page.getViewport({ scale:1 });
+                    const text = await page.getTextContent(), rows = [];
+                    for (const it of text.items) {
+                        if (!it.str?.trim() || !it.transform) continue;
+                        const [x, baseline] = vp.convertToViewportPoint(it.transform[4], it.transform[5]);
+                        const h = Math.hypot(it.transform[2], it.transform[3]) || it.height || 10;
+                        rows.push({ page:number, str:it.str, x, y:baseline - h, baseline, w:it.width, h, font:it.fontName });
+                    }
+                    if (current()) await measureReviewChars(text, vp, rows);
+                    return rows;
+                })());
+                items.push(...await reviewInk.pages.get(number));
+                if (!current()) return;
+            }
+        }
+        if (current()) vscode.postMessage({ type:'reviewPageMap', requestId:seq, id:h.id, file:r.file,
+            generation:r.generation, revision:r.renderRevision, livePages:r.livePages || null, items });
+    } catch (_) { if (current()) reviewInk.marks.set(h.id, []); }
+}
+
+function paintReview(onlyHunk=null) {
     const r = state.review;
+    const geometryKey = r && `${r.file}|${r.generation}|${!!state.nativeMapAvailable}|${JSON.stringify(r.livePages || null)}`;
+    const key = r && `${geometryKey}|${r.renderRevision}`;
+    if (reviewInk.key !== key) {
+        onlyHunk=null;
+        const sameGeometry=geometryKey===reviewInk.geometryKey,marks=new Map(),hunkKeys=new Map();
+        for (const h of reviewHunks()) {
+            const signature=JSON.stringify([h.ourText,h.theirText,h.words,h.wordContext,h.rects]);
+            hunkKeys.set(h.id,signature);
+            // Keep advances the baseline's revision, not the displayed ink.
+            // Retain completed marks for exactly unchanged corrections.
+            if (sameGeometry && signature===reviewInk.hunkKeys.get(h.id) && reviewInk.marks.has(h.id))
+                marks.set(h.id,reviewInk.marks.get(h.id));
+        }
+        Object.assign(reviewInk, { key, geometryKey,hunkKeys,seq:reviewInk.seq + 1, marks,
+            pending:new Set(),pages:sameGeometry ? reviewInk.pages : new Map() });
+    }
+    if(!onlyHunk)paintBookmarks();
+    for(const node of document.querySelectorAll('.rband, .rcontour, .rchip, .runderline, .rinkfill, .rremoved')) {
+        if(!onlyHunk || (node.dataset.hunk || node.dataset.reviewHunk || node.dataset.reviewControls)===onlyHunk)node.remove();
+    }
     if (!r || !r.pending) return;
     // The list, the diff pane and the counts are all still true — it is only
     // the placement that has gone out of date, and only until the re-placed
     // payload arrives a moment later.
-    if (!reviewPlacementCurrent()) return;
-    for (const h of reviewHunks()) {
-        const focusedByPage = new Map();
+    const hunks=onlyHunk ? reviewHunks().filter(h=>h.id===onlyHunk) : reviewHunks();
+    if (!reviewPlacementCurrent(onlyHunk ? hunks[0] : null)) return;
+    for (const h of hunks) {
+        if(!reviewHunkReady(h))continue;
+        const removedOnly = h.verb === 'del' || (h.verb === 'change' &&
+            h.words?.theirs?.length > 0 && h.words?.ours?.length === 0);
+        if ((h.rects || []).some(rect => state.rendered.has(rect.page))) requestReviewInk(h);
+        for (const mark of reviewInkRuns(reviewInk.marks.get(h.id) || [])) {
+            const wrap = pagesEl().querySelector(`.page[data-page="${mark.page}"]`);
+            const v = rectToViewport(mark.page, mark);
+            if (!wrap || !state.rendered.has(mark.page) || !v) continue;
+            const line = document.createElement('div'); line.className = 'runderline';
+            line.dataset.hunk = h.id; line.title = h.verb === 'add' ? 'Added text' : 'Replacement text';
+            Object.assign(line.style, { left:`${v.x}px`, top:`${v.y + v.h}px`, width:`${v.w}px` });
+            wrap.appendChild(line);
+            const fill = document.createElement('div'); fill.className = 'rinkfill';
+            fill.dataset.hunk = h.id;
+            Object.assign(fill.style, { left:`${v.x}px`, top:`${v.y}px`, width:`${v.w}px`, height:`${v.h}px` });
+            wrap.appendChild(fill);
+        }
+        const byPage = new Map();
         for (const rect of (h.rects || [])) {
             const wrap = pagesEl().querySelector(`.page[data-page="${rect.page}"]`);
             if (!wrap || !state.rendered.has(rect.page)) continue;
@@ -3539,41 +4311,164 @@ function paintReview() {
             if (!v) continue;
             const width = rect.caret ? Math.max(v.w, 24) : v.w;
             const height = rect.caret ? 2 : v.h;
+            if (!rect.caret) {
+                if (!byPage.has(rect.page)) byPage.set(rect.page, { wrap, fragments:[] });
+                byPage.get(rect.page).fragments.push({ x:v.x, y:v.y, w:width, h:height });
+                continue;
+            }
             const band = document.createElement('div');
-            band.className = `rband ${h.verb}${h.id === r.focus ? ' on' : ''}`;
+            band.className = `rband ${h.verb}${h.contextual ? ' contextual' : ''}${h.id === r.focus ? ' on' : ''}`;
+            band.dataset.hunk = h.id;
             band.style.left = `${v.x}px`;
             band.style.top = `${v.y}px`;
             band.style.width = `${width}px`;
             band.style.height = `${rect.caret ? 0 : v.h}px`;
-            band.title = `${h.name || `line ${h.startLine}`} — ${h.verb}`;
+            band.title = h.contextual ? `Source change at line ${h.startLine} — nearest printed content` : `${h.name || `line ${h.startLine}`} — ${h.verb}`;
             wrap.appendChild(band);
-            if (h.id === r.focus) {
-                if (!focusedByPage.has(rect.page)) focusedByPage.set(rect.page, { wrap, fragments: [] });
-                focusedByPage.get(rect.page).fragments.push({ x: v.x, y: v.y, w: width, h: height });
-            }
         }
-        for (const { wrap, fragments } of focusedByPage.values()) paintReviewContour(wrap, fragments);
-        // THE CHIP IS FOR THE FOCUSED CHANGE ONLY. One per change turns a
-        // reviewed page into a wall of buttons — the same lesson the label
-        // overlay taught.
-        if (h.id === r.focus && !h.editedByYou) {
-            const rect = (h.rects || [])[0];
+        // One filled envelope per printed row, using the same tiled shape as
+        // the focus contour. Glyph runs and their spaces have no internal edges.
+        for (const { wrap, fragments } of byPage.values()) {
+            for (const row of reviewRegionRows(fragments)) {
+                const band = document.createElement('div');
+                band.className = `rband ${h.verb}${removedOnly ? ' removal' : ''}${h.id === r.focus ? ' on' : ''}`;
+                band.dataset.hunk = h.id;
+                Object.assign(band.style, { left:`${row.x}px`, top:`${row.y}px`, width:`${row.w}px`, height:`${row.h}px` });
+                band.title = `${h.name || `line ${h.startLine}`} — ${h.verb}`;
+                wrap.appendChild(band);
+            }
+            if (h.id === r.focus) paintReviewContour(wrap, fragments,h.id);
+        }
+        if (removedOnly || h.contextual) {
+            const rect = (h.rects || []).find(r => state.rendered.has(r.page));
             const wrap = rect && pagesEl().querySelector(`.page[data-page="${rect.page}"]`);
             const v = rect && rectToViewport(rect.page, rect);
             if (wrap && v) {
-                const chip = document.createElement('div');
-                chip.className = 'rchip';
-                chip.style.left = `${v.x}px`;
-                chip.style.top = `${Math.max(0, v.y - 26)}px`;
-                chip.innerHTML = `<button class="keep" data-keep="${h.id}">\u2713 Keep</button>` +
-                    `<button class="undo" data-undo="${h.id}">\u21ba Undo</button>`;
-                wrap.appendChild(chip);
+                const fragments = byPage.get(rect.page)?.fragments || [];
+                const x = Math.min(v.x, ...fragments.map(f => f.x));
+                const y = Math.min(v.y, ...fragments.map(f => f.y));
+                const badge = document.createElement('button');
+                badge.className = `rremoved${h.contextual ? ' contextual' : ''}`; badge.dataset.reviewHunk = h.id;
+                badge.textContent = h.contextual ? '◇ Source change' : '− Removed';
+                badge.title = h.contextual ? `Source change at line ${h.startLine} — marked beside the nearest printed content` : 'Show the removed text in the before/after comparison';
+                // A whole-block deletion has only a seam, which can be in
+                // the middle of a surviving line. Keep its badge in the margin.
+                Object.assign(badge.style, { left:`${h.verb === 'del' || h.contextual ? 3 : Math.max(3, x - 85)}px`,
+                    top:`${Math.max(0, y - (x < 85 ? 20 : 0))}px` });
+                wrap.appendChild(badge);
             }
         }
+        // Every correction can offer controls on hover without first focusing
+        // it in the list. Continuations need their own page-local toolbar.
+        const controlPages = new Map();
+        for (const rect of h.rects || []) {
+            if (!state.rendered.has(rect.page)) continue;
+            if (!controlPages.has(rect.page)) controlPages.set(rect.page, []);
+            controlPages.get(rect.page).push(rect);
+        }
+        for (const [page, rects] of controlPages) {
+            const wrap = pagesEl().querySelector(`.page[data-page="${page}"]`);
+            if (!wrap) continue;
+            const chip = document.createElement('div');
+            chip.className = 'rchip'; chip.dataset.reviewControls = h.id;
+            chip.hidden=true; chip.style.display='none';
+            chip.setAttribute('role','group');
+            chip.setAttribute('aria-label',`${h.name || `line ${h.startLine}`} correction`);
+            chip._reviewRects = rects;
+            if (h.author) {
+                const author=document.createElement('span'); author.className='r-author';
+                author.textContent=h.author.name; author.title=reviewAuthorTitle(h.author); chip.appendChild(author);
+            }
+            const keep=document.createElement('button'); keep.className='keep'; keep.dataset.keep=h.id;
+            keep.textContent='\u2713 Keep'; keep.title=h.editedByYou ? 'Agree to this change, your words included' : 'Agree to this change';
+            const undo=document.createElement('button'); undo.className='undo'; undo.textContent='\u21ba Undo';
+            undo.disabled=!!h.editedByYou;
+            undo.title=h.editedByYou ? 'You typed inside this change — undoing it would throw your own words away' : 'Put this back the way it was';
+            if (!undo.disabled) undo.dataset.undo=h.id;
+            chip.append(keep,undo); wrap.appendChild(chip);
+        }
+    }
+    positionReviewControls();
+}
+
+/** Reveal only the hovered correction's toolbar, inside the viewport. No
+ * source-map request or highlight repaint runs on pointer movement. */
+function positionReviewControls() {
+    const main=document.querySelector('main'); if (!main) return;
+    const mr=main.getBoundingClientRect();
+    for (const chip of document.querySelectorAll('.rchip')) {
+        const wrap=chip.parentElement, page=Number(wrap.dataset.page);
+        if (reviewHover?.id!==chip.dataset.reviewControls || reviewHover.page!==page) {
+            chip.hidden=true;chip.style.display='none';continue;
+        }
+        const wr=wrap.getBoundingClientRect();
+        const left=wr.left+wrap.clientLeft, top=wr.top+wrap.clientTop;
+        const clip={left:Math.max(0,mr.left+main.clientLeft-left)+4,
+            right:Math.min(wrap.clientWidth,mr.left+main.clientLeft+main.clientWidth-left)-4,
+            top:Math.max(0,mr.top+main.clientTop-top)+4,
+            bottom:Math.min(wrap.clientHeight,mr.top+main.clientTop+main.clientHeight-top)-4};
+        const rows=(chip._reviewRects || []).map(r=>rectToViewport(page,r)).filter(v=>v &&
+            v.y+Math.max(v.h,2)>=clip.top && v.y<=clip.bottom &&
+            v.x+Math.max(v.w,24)>=clip.left && v.x<=clip.right).sort((a,b)=>a.y-b.y || a.x-b.x);
+        chip.hidden=!rows.length; chip.style.display=rows.length ? 'flex' : 'none';
+        if (!rows.length) continue;
+        const w=chip.offsetWidth,h=chip.offsetHeight;
+        if (clip.right-clip.left<w || clip.bottom-clip.top<h) { chip.hidden=true;chip.style.display='none';continue; }
+        const x=Math.max(clip.left,Math.min(rows[0].x,clip.right-w));
+        const y=Math.max(clip.top,Math.min(rows[0].y-h-4,clip.bottom-h));
+        chip.style.left=`${x}px`; chip.style.top=`${y}px`;
     }
 }
 
-const reviewAct = (action, extra) => vscode.postMessage({ type: 'reviewAction', action, ...extra });
+function hideReviewControls() {
+    clearTimeout(reviewHoverTimer);reviewHoverTimer=null;
+    if (!reviewHover) return;
+    reviewHover=null;positionReviewControls();
+}
+
+function hoverReviewControls(event) {
+    if (event.pointerType==='touch') return;
+    const chip=event.target.closest?.('.rchip');
+    if (chip && !chip.hidden) { clearTimeout(reviewHoverTimer);reviewHoverTimer=null;return; }
+    let hit=null;
+    const wrap=event.target.closest?.('.page');
+    if (wrap && !event.buttons && !event.target.closest?.('.editcard,.mmacard')) {
+        const removed=event.target.closest?.('.rremoved');
+        if (removed) hit={id:removed.dataset.reviewHunk,page:Number(wrap.dataset.page)};
+        else {
+            const hits=[...wrap.querySelectorAll('.rband[data-hunk],.rinkfill[data-hunk]')].map(el=>({el,r:el.getBoundingClientRect()}))
+                .filter(({r})=>event.clientX>=r.left && event.clientX<=r.right &&
+                    event.clientY>=r.top && event.clientY<=r.top+Math.max(r.height,3))
+                .sort((a,b)=>a.r.width*a.r.height-b.r.width*b.r.height);
+            if (hits.length) hit={id:hits[0].el.dataset.hunk,page:Number(wrap.dataset.page)};
+        }
+    }
+    if (hit && reviewReadyHunks().some(h=>h.id===hit.id)) {
+        clearTimeout(reviewHoverTimer);reviewHoverTimer=null;
+        if (reviewHover?.id===hit.id && reviewHover.page===hit.page) return;
+        reviewHover=hit;positionReviewControls();
+    } else if (reviewHover && !reviewHoverTimer) {
+        // Bridge the small gap from highlighted text to its buttons.
+        reviewHoverTimer=setTimeout(hideReviewControls,220);
+    }
+}
+document.addEventListener('pointermove',hoverReviewControls,{passive:true});
+document.addEventListener('pointerleave',hideReviewControls);
+window.addEventListener('blur',hideReviewControls);
+
+const reviewAct = (action, extra={}) => {
+    if(extra.id && !reviewReadyHunks().some(h=>h.id===extra.id))return;
+    if(['keepAll','undoAll'].includes(action) && reviewReadyHunks().length!==reviewHunks().length)return;
+    if (['show','prev','next','keep','undo','keepComment','keepMany','keepBatch','keepAll','undoAll'].includes(action))
+        rememberReviewStart();
+    if (action === 'close') state.reviewStartKey = null;
+    if(action==='prev' || action==='next') {
+        const hunks=reviewReadyHunks();if(!hunks.length)return;
+        const i=hunks.findIndex(h=>h.id===state.review?.focus),delta=action==='prev' ? -1 : 1;
+        extra={id:hunks[(i+delta+hunks.length)%hunks.length].id};action='show';
+    }
+    vscode.postMessage({ type:'reviewAction',action,file:state.review?.file,paperRoot:state.paperRoot,...extra });
+};
 if (el('reviewhistory')) el('reviewhistory').onclick = () => reviewAct('history');
 
 // ===========================================================================
@@ -3662,7 +4557,7 @@ function positionCommentsDropdown() {
 function openCommentFromMenu(item) {
     closeCommentsDropdown();
     commentLastDirection = 0;
-    openCommentThread(item.cellId, null, true, 0);
+    openCommentThread(commentThreadId(item), null, true, 0);
     requestAnimationFrame(() => {
         const textarea = document.querySelector(`.cp-text[data-comment="${CSS.escape(item.id)}"]`);
         const card = textarea && textarea.closest('.cp-card');
@@ -3693,8 +4588,8 @@ function commentAge(value) {
 
 function requestCommentDelete(item) {
     if (!item) return;
-    if (commentThreadOpen() && item.cellId === activeCommentCellId) {
-        const threadItems = (state.comments.items || []).filter(x => x.cellId === item.cellId);
+    if (commentThreadOpen() && commentThreadId(item) === activeCommentCellId) {
+        const threadItems = (state.comments.items || []).filter(x => commentThreadId(x) === commentThreadId(item));
         const threads = commentThreads();
         const at = threads.findIndex(([cellId]) => cellId === activeCommentCellId);
         let fallbackCellId = activeCommentCellId;
@@ -3846,10 +4741,14 @@ function saveCommentSoon(item, textarea, now = false) {
     else commentTimers.set(item.id, setTimeout(save, 350));
 }
 
+// Different quoted fragments in one paragraph need their own context cards.
+// Their durable source attachment still uses the paragraph's shared cell id.
+function commentThreadId(item) { return item.selection ? item.id : item.cellId || item.id; }
+
 function commentGroups() {
     const groups = new Map();
     for (const item of state.comments.items || []) {
-        const id = item.cellId || item.id;
+        const id = commentThreadId(item);
         if (!groups.has(id)) groups.set(id, []);
         groups.get(id).push(item);
     }
@@ -4176,7 +5075,7 @@ function renderCommentThread() {
     if (title) title.textContent = commentTarget ? 'New comment'
         : `${items.length} comment${items.length === 1 ? '' : 's'}`;
     if (subtitle && subject) {
-        const kind = friendlyCommentKind(subject.kind);
+        const kind = subject.selection ? 'Selection' : friendlyCommentKind(subject.kind);
         subtitle.textContent = subject.detached ? `${kind} · location changed`
             : `${kind} · ${friendlyCommentLines(subject)}`;
         subtitle.title = String(subject.file || '').split(/[\\/]/).pop();
@@ -4186,6 +5085,7 @@ function renderCommentThread() {
         const section = Array.isArray(subject.sectionPath) && subject.sectionPath.length
             ? subject.sectionPath[subject.sectionPath.length - 1] : '';
         location.textContent = subject.detached ? `Last known ${friendlyCommentKind(subject.kind).toLowerCase()}`
+            : subject.selection ? `${String(subject.file || '').split(/[\\/]/).pop()}:${subject.line}${subject.endLine > subject.line ? '–' + subject.endLine : ''}${section ? ' · ' + section : ''}`
             : section ? `In ${section}` : `On this ${friendlyCommentKind(subject.kind).toLowerCase()}`;
         location.title = String(subject.file || '').split(/[\\/]/).pop();
     }
@@ -4294,10 +5194,11 @@ function renderComments(msg) {
     renderCommentsDropdown();
 
     if (lastComposedTarget) {
-        const found = items.find(item => item.file === lastComposedTarget.file &&
-            item.line <= lastComposedTarget.line && item.endLine >= lastComposedTarget.line);
+        const found = [...items].reverse().find(item => item.file === lastComposedTarget.file &&
+            item.line <= lastComposedTarget.line && item.endLine >= lastComposedTarget.line &&
+            (!lastComposedTarget.quote || item.selection?.quote === lastComposedTarget.quote));
         if (found) {
-            activeCommentCellId = found.cellId;
+            activeCommentCellId = commentThreadId(found);
             commentTargetPlacement = null;
             lastComposedTarget = null;
             for (const marker of document.querySelectorAll('.comment-marker.add')) marker.remove();
@@ -4363,10 +5264,6 @@ async function commentAnchorAt(n, x, y) {
 }
 
 function requestCommentTarget(n, pt, marker, row) {
-    if (state.tracePaused && !state.nativeMapAvailable) {
-        status('wait for the page to catch up before adding a comment', 'warn');
-        return;
-    }
     clearTimeout(commentTargetTimer);
     commentTarget = null;
     activeCommentCellId = null;
@@ -4381,9 +5278,14 @@ function requestCommentTarget(n, pt, marker, row) {
     // Comment attachment needs the semantic object at a PDF point; it does
     // not need the slower word/glyph disambiguation used for source editing.
     // Sending the coordinates immediately also makes a click feel immediate.
+    const overlay=state.txdl?.pages.get(n),fragment=state.txdlFragments?.get(n);
+    const fragmentIdentity=fragment?.canvas?.isConnected
+        ? fragment.msg?.mapIdentity || `fragment-pending:${fragment.msg?.generation}:${n}:${fragment.msg?.index}` : null;
     vscode.postMessage({
         type: 'click', generation:state.generation, page: n, xBp: pt.xBp, yTopBp: pt.yTopBp,
         commentTarget: true, commentRow: rowRect,
+        ...(fragmentIdentity!=null ? {overlay:fragmentIdentity}
+            : overlay?.canvas.isConnected ? {overlay:overlay.identity} : {}),
     });
     commentTargetTimer = setTimeout(() => {
         if (!commentTargetPending) return;
@@ -4392,7 +5294,9 @@ function requestCommentTarget(n, pt, marker, row) {
     }, 5000);
 }
 
+let commentTargetWarningTimer=null;
 function showCommentTarget(target, reason) {
+    clearTimeout(commentTargetWarningTimer);
     clearTimeout(commentTargetTimer);
     commentTargetTimer = null;
     commentTargetPending = false;
@@ -4401,7 +5305,12 @@ function showCommentTarget(target, reason) {
     setCommentArmed(false);
     if (!target) {
         closeCommentThread(false);
-        status(reason || 'that paragraph could not be located', 'warn');
+        const warning=reason || 'that paragraph could not be located';
+        status(warning, 'warn');
+        // This is a rejected gesture, not an ongoing compile/map state.
+        commentTargetWarningTimer=setTimeout(()=>{
+            if(el('status').textContent===warning)status('');
+        },6000);
         return;
     }
     setCommentsOpen(true);
@@ -4428,7 +5337,7 @@ if (el('reviewfeedbackbutton')) {
     el('reviewfeedbackbutton').onclick = () => {
         setCommentsOpen(true);
         const first = (state.comments.items || [])[0];
-        if (first) openCommentThread(first.cellId);
+        if (first) openCommentThread(commentThreadId(first));
         else setCommentArmed(true);
     };
 }
@@ -4448,7 +5357,7 @@ el('commentcancel').onclick = () => {
 el('commentsave').onclick = () => {
     const text = el('commentdraft').value.trim();
     if (!commentTarget || !text) { el('commentdraft').focus(); return; }
-    lastComposedTarget = { file: commentTarget.file, line: commentTarget.line };
+    lastComposedTarget = { file: commentTarget.file, line: commentTarget.line, quote: commentTarget.selection?.quote };
     commentPost('add', { targetId: commentTarget.id, text });
 };
 el('commentdraft').addEventListener('keydown', (e) => {
@@ -4501,19 +5410,44 @@ window.addEventListener('resize', positionCommentsDropdown);
 // once the comment is posted.  The semantic attachment still happens in the
 // extension, so the visual affordance cannot weaken the cell-ID guarantee.
 let commentHoverFrame = 0;
+function cancelCommentHover() {
+    cancelAnimationFrame(commentHoverFrame);
+    commentHoverFrame = 0;
+    return ++commentHoverRequest;
+}
+
+function crossingCommentMargin(marker, cx, cy) {
+    const row = marker?._commentHoverRow;
+    const wrap = marker?.closest('.page');
+    if (!row || !wrap) return false;
+    const page = wrap.getBoundingClientRect();
+    const button = marker.getBoundingClientRect();
+    // The marker can be outside the page or inset at high zoom. Preserve the
+    // whole route from its printed line to the button, without a time limit:
+    // crossing a wide blank margin is not leaving the paragraph.
+    return cx >= Math.min(page.left + row.x, button.left) - 8 &&
+        cx <= Math.max(page.left + row.x + row.w, button.right) + 8 &&
+        cy >= Math.min(page.top + row.y, button.top) - 6 &&
+        cy <= Math.max(page.top + row.y + row.h, button.bottom) + 6;
+}
+
 pagesEl().addEventListener('pointermove', (event) => {
+    const request = cancelCommentHover();
     if (!commentsOpen() || commentArmed || event.target.closest('.comment-marker')) return;
+    const offered = document.querySelector('.comment-marker.add');
+    if (offered?.classList.contains('pending') ||
+        (offered && commentThreadOpen() && commentPopoverAnchor === offered) ||
+        crossingCommentMargin(offered, event.clientX, event.clientY)) return;
     const wrap = event.target.closest('.page');
     if (!wrap || !state.rendered.has(Number(wrap.dataset.page))) return;
     const cx = event.clientX; const cy = event.clientY;
-    cancelAnimationFrame(commentHoverFrame);
     commentHoverFrame = requestAnimationFrame(async () => {
-        const request = ++commentHoverRequest;
+        commentHoverFrame = 0;
         const n = Number(wrap.dataset.page);
         const r = wrap.getBoundingClientRect();
         const x = cx - r.left; const y = cy - r.top;
         const anchor = await commentAnchorAt(n, x, y);
-        if (request !== commentHoverRequest || !commentsOpen()) return;
+        if (request !== commentHoverRequest || !commentsOpen() || commentArmed || !wrap.isConnected) return;
         for (const old of document.querySelectorAll('.comment-marker.add')) old.remove();
         if (!anchor || anchor.distance > Math.max(80, anchor.row.h * 8)) return;
         const nearest = anchor.row;
@@ -4523,10 +5457,13 @@ pagesEl().addEventListener('pointermove', (event) => {
         if (occupied) return;
         const marker = document.createElement('button');
         marker.type = 'button'; marker.className = 'comment-marker add';
+        marker._commentHoverRow = nearest;
         marker.style.top = `${top}px`; marker.title = 'Add a comment to this paragraph';
         marker.setAttribute('aria-label', marker.title); marker.appendChild(makeToolIcon('comment-plus'));
+        marker.addEventListener('pointerenter', cancelCommentHover);
         marker.onclick = (ev) => {
             ev.preventDefault(); ev.stopPropagation();
+            cancelCommentHover();
             requestCommentTarget(n, anchor.pt, marker, nearest);
         };
         wrap.appendChild(marker);
@@ -4541,7 +5478,7 @@ pagesEl().addEventListener('pointermove', (event) => {
 // bar have each paid for.
 for (const evt of ['pointerdown', 'mousedown']) {
     document.addEventListener(evt, (e) => {
-        if (e.target.closest && e.target.closest('.rchip, #reviewpanel, #reviewbar, #commentpanel, .comment-marker')) {
+        if (e.target.closest && e.target.closest('.rchip, .rremoved, #reviewpanel, #reviewbar, #commentpanel, .comment-marker')) {
             e.stopPropagation();
         }
     }, true);
@@ -4549,6 +5486,13 @@ for (const evt of ['pointerdown', 'mousedown']) {
 document.addEventListener('click', (e) => {
     const t = e.target;
     if (!t || !t.closest) return;
+    const removed = t.closest('.rremoved');
+    if (removed) {
+        e.preventDefault(); e.stopPropagation();
+        selectReviewHunk(removed.dataset.reviewHunk);
+        reviewAct('show', { id:removed.dataset.reviewHunk });
+        return;
+    }
     const keepComment = t.closest('[data-keep-comment]');
     if (keepComment) { e.preventDefault(); e.stopPropagation(); reviewAct('keepComment', { id: keepComment.dataset.keepComment }); return; }
     const keep = t.closest('[data-keep]');
@@ -4581,9 +5525,10 @@ document.addEventListener('click', (e) => {
     const row = t.closest('.rh');
     if (row) {
         e.stopPropagation();
+        if(row.getAttribute('aria-disabled')==='true')return;
         // Locally first: the diff appears with the click, and the extension's
         // answer (which also scrolls the page) confirms it a moment later.
-        if (state.review) { state.review.focus = row.dataset.hunk; renderReview(); }
+        selectReviewHunk(row.dataset.hunk);
         reviewAct('show', { id: row.dataset.hunk });
     }
 }, true);
@@ -4713,7 +5658,7 @@ function paintSections() {
     if (!S || !S.items) return;
     const shift = labelsVisible();
     for (const it of S.items) {
-        if (!it.page || !state.rendered.has(it.page)) continue;
+        if (!it.page || !Number.isFinite(it.y) || !state.rendered.has(it.page)) continue;
         // A folded section is always announced; everything else is Shift-only.
         if (!it.collapsed && !shift) continue;
         const wrap = pagesEl().querySelector('.page[data-page="' + it.page + '"]');
@@ -4854,10 +5799,16 @@ for (const evt of ['pointerdown', 'mousedown']) {
     }, true);
 }
 
+let labelPaintSeq = 0;
 async function paintLabels() {
-    for (const el of document.querySelectorAll('.lbc, .lbcink')) el.remove();
-    hideChipPreview();
-    if (!labelsVisible() || !state.labels || !state.labels.items) return;
+    const paint = ++labelPaintSeq;
+    const previous = new Map([...document.querySelectorAll('.lbc')].map(node => [node.dataset.labelKey, node]));
+    for (const node of document.querySelectorAll('.lbcink')) node.remove();
+    if (!labelsVisible() || !state.labels || !state.labels.items) {
+        for (const node of previous.values()) node.remove();
+        hideChipPreview();
+        return;
+    }
 
     const byPage = new Map();
     for (const c of state.labels.items) {
@@ -4867,6 +5818,7 @@ async function paintLabels() {
         byPage.get(p).push(c);
     }
     const pending = [];
+    const occurrences = new Map();
     for (const [page, chips] of byPage) {
         const wrap = pagesEl().querySelector(`.page[data-page="${page}"]`);
         if (!wrap || !state.rendered.has(page)) continue;
@@ -4874,9 +5826,25 @@ async function paintLabels() {
         for (const c of chips) {
             const v = rectToViewport(page, { ...c.at, w: c.at.w || 1, h: c.at.h || 8 });
             if (!v) continue;
-            const el = document.createElement('div');
+            // Generated dN/rN IDs shift as more pages acquire geometry. Source
+            // identity stays stable while that background map is filling in.
+            const identity = JSON.stringify([state.generation, page, c.role, c.name, c.file, c.line, c.blockId]);
+            const occurrence = occurrences.get(identity) || 0;
+            occurrences.set(identity, occurrence + 1);
+            const key = `${identity}|${occurrence}`;
+            const el = previous.get(key) || document.createElement('div');
+            previous.delete(key);
+            const fresh = !el.isConnected;
+            const hovered = !fresh && el.matches(':hover');
+            el._labelNeedsLayout = hovered;
+            el.dataset.labelKey = key;
+            el._chip = c;
+            el._labelGeneration = state.generation;
+            el._labelDoc = state.doc;
+            el._labelRetained = false;
+            const copied = el.classList.contains('lbc-copied');
             el.className = `lbc lbc-${c.role}${c.approx ? ' lbc-approx' : ''}` +
-                (c.broken ? ' lbc-broken' : '');
+                (c.broken ? ' lbc-broken' : '') + (copied ? ' lbc-copied' : '');
             // A DECLARATION AND A REFERENCE ARE DIFFERENT CLAIMS, so they read
             // differently: a label states what a thing is CALLED, a reference
             // points AT one. Same information, opposite direction, and telling
@@ -4885,11 +5853,12 @@ async function paintLabels() {
             // a thing is called; this says the thing was GENERATED, and is the
             // only visible sign that a figure has code behind it — the block
             // itself is a comment and prints nothing.
-            el.textContent = c.role === 'mma'
+            const caption = c.role === 'mma'
                 ? (c.text || '∑')
                 : c.role === 'decl'
                     ? (c.printed ? `${c.name} ${c.printed}` : c.name)
                     : `→ ${c.name}`;
+            if (!hovered && el.textContent !== caption) el.textContent = caption;
             if (c.role === 'mma') {
                 el.classList.add(`lbc-mma-${c.state || 'unknown'}`);
                 el.title = c.title || 'Mathematica computation';
@@ -4905,7 +5874,7 @@ async function paintLabels() {
             // reference, just below.
             if (c.role === 'mma') { /* title set above, deliberately not a hint */ }
             else if (c.broken) el.title = `${c.name} — no \\label with that name`;
-            else armHint(el, 'chip', 'Click to copy the reference · Alt-click for the bare name');
+            else if (fresh) armHint(el, 'chip', 'Click to copy the reference · Alt-click for the bare name');
             el.dataset.name = c.name;
             el.dataset.role = c.role;
             el.dataset.kind = c.kind;
@@ -4915,21 +5884,40 @@ async function paintLabels() {
             // column's rightwards, and both are capped to the margin they sit
             // in (`at.maxW`) so a long name elides instead of running off the
             // sheet or back over the text.
-            el.style.left = `${v.x}px`;
-            el.style.top = `${v.y}px`;
+            if (!hovered) {
+                el.style.left = `${v.x}px`;
+                el.style.top = `${v.y}px`;
+            }
             const anchor = (c.at && c.at.anchor) || c.side;
-            if (anchor === 'left') el.style.transform = 'translateX(-100%)';
+            if (!hovered) el.style.transform = anchor === 'left' ? 'translateX(-100%)' : '';
             if (c.at && c.at.maxW > 0) el.style.maxWidth = `${c.at.maxW * state.scale}px`;
-            wrap.appendChild(el);
+            if (el.parentElement !== wrap) wrap.appendChild(el);
             made.push(el);
             if (c.find) pending.push({ el, chip: c, page });
-            if (c.target && c.target.length) {
-                el.addEventListener('mouseenter', () => showChipPreview(c, el));
-                el.addEventListener('mouseleave', hideChipPreview);
+            if (fresh) {
+                // Copy is available before target geometry or its image arrives.
+                // Read the current chip rather than capturing an old map update.
+                el.addEventListener('mouseenter', () => showChipPreview(el._chip, el));
+                el.addEventListener('mouseleave', () => {
+                    hideChipPreview();
+                    if (el._labelRetained) el.remove();
+                    else if (el._labelNeedsLayout) paintLabels().catch(() => {});
+                });
             }
+            if (hovered && JSON.stringify(c.target || []) !== el._previewTarget)
+                showChipPreview(c, el).catch(() => {});
         }
         deoverlap(made);
     }
+    for (const node of previous.values()) {
+        // A partial map may momentarily omit this badge while other pages are
+        // materializing. Keep the current click target until the pointer leaves,
+        // but never carry it into a different PDF or generation.
+        if (node.matches(':hover') && node._labelGeneration === state.generation && node._labelDoc === state.doc)
+            node._labelRetained = true;
+        else node.remove();
+    }
+    if (chipPreviewAnchor && !chipPreviewAnchor.isConnected) hideChipPreview();
 
     // THE NUMBER IT PRINTED, UNDERLINED — not covered.
     //
@@ -4942,6 +5930,7 @@ async function paintLabels() {
     for (const { el, chip, page } of pending) {
         // eslint-disable-next-line no-await-in-loop
         const hit = await inkMatching(chip.find, page);
+        if (paint !== labelPaintSeq) return;
         if (!hit || !el.isConnected) continue;
         const wrap = pagesEl().querySelector(`.page[data-page="${page}"]`);
         if (wrap) {
@@ -4955,7 +5944,7 @@ async function paintLabels() {
             wrap.appendChild(mark);
         }
         // Level with the row it printed on, still in the margin column.
-        el.style.top = `${Math.max(0, hit.y)}px`;
+        if (!el.matches(':hover')) el.style.top = `${Math.max(0, hit.y)}px`;
         el.classList.remove('lbc-approx');
     }
 }
@@ -4976,8 +5965,13 @@ function deoverlap(els) {
     });
     const hits = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w &&
         a.y < b.y + b.h && b.y < a.y + a.h;
-    const sorted = els.slice().sort((a, b) => a.offsetTop - b.offsetTop || a.offsetLeft - b.offsetLeft);
+    const sorted = els.slice().sort((a, b) => Number(b.matches(':hover')) - Number(a.matches(':hover')) ||
+        a.offsetTop - b.offsetTop || a.offsetLeft - b.offsetLeft);
     for (const el of sorted) {
+        if (el.matches(':hover')) {
+            placed.push(el._chipLayout || boxOf(el));
+            continue; // Never remove the click target under the reader's pointer.
+        }
         let box = boxOf(el);
         let steps = 0;
         while (steps < 3 && placed.some(p => hits(box, p))) {
@@ -4989,10 +5983,36 @@ function deoverlap(els) {
         }
         if (placed.some(p => hits(box, p))) { el.remove(); continue; }
         placed.push(box);
+        el._chipLayout = box;
+    }
+}
+
+/** The paper's semantic cell edges, in the same coordinates as its ink. */
+function paintPaperCellBoundaries() {
+    document.querySelectorAll('.paper-cell-boundary').forEach(n => n.remove());
+    if (!state.cellBoundariesOn || state.tracePaused || state.generation == null) return;
+    if (state.cellBoundaries?.generation !== state.generation) {
+        if (state.cellBoundariesAsked !== state.generation) {
+            state.cellBoundariesAsked = state.generation;
+            vscode.postMessage({ type:'cellBoundariesWanted' });
+        }
+        return;
+    }
+    for (const rect of state.cellBoundaries.items || []) {
+        const wrap = pagesEl().querySelector(`.page[data-page="${rect.page}"]`);
+        const v = rectToViewport(rect.page, { ...rect, h:0.1 });
+        if (!wrap || !v) continue;
+        const line = document.createElement('div');
+        line.className = 'paper-cell-boundary'; line.setAttribute('aria-hidden','true');
+        Object.assign(line.style, { left:`${v.x}px`, top:`${v.y}px`, width:`${v.w}px` });
+        wrap.appendChild(line);
     }
 }
 
 function showLabels() {
+    state.cellBoundariesOn = true;
+    paintEditCellBoundaries();
+    paintPaperCellBoundaries();
     if (state.labelsOn) return;
     state.labelsOn = true;
     hintLabels();
@@ -5009,6 +6029,9 @@ function showLabels() {
 }
 
 function hideLabels() {
+    state.cellBoundariesOn = false;
+    paintEditCellBoundaries();
+    paintPaperCellBoundaries();
     if (!state.labelsOn) return;
     state.labelsOn = false;
     paintLabels().catch(() => {});
@@ -5042,13 +6065,17 @@ function hintLabels() {
  * paper and wants the paper's own answer.
  */
 let previewSeq = 0;
+let chipPreviewAnchor = null;
 async function showChipPreview(chip, anchor) {
     const my = ++previewSeq;
+    chipPreviewAnchor = anchor;
+    anchor._previewTarget = JSON.stringify(chip?.target || []);
     for (const el of document.querySelectorAll('.lbcprev')) el.remove();
     if (!chip || !chip.target || !chip.target.length) return;
     const page = chip.target[0].page;
     let shot = null;
-    try { shot = await cropFragment({ id: 'hover', rects: chip.target, scale: 2, pad: 4 }); }
+    try { shot = await cropFragment({ id: 'hover', rects: chip.target, scale: 2, pad: 4,
+        priority: 'hover', current: () => my === previewSeq && anchor.isConnected && labelsVisible() }); }
     catch (_) { shot = null; }
     if (!shot || !shot.dataUrl || my !== previewSeq) return;
     const wrap = pagesEl().querySelector(`.page[data-page="${page}"]`);
@@ -5093,6 +6120,7 @@ function hideChipPreview() {
     // this, a quick mouse-out can be followed by a late preview appearing with
     // no pointer anywhere near its reference.
     previewSeq++;
+    chipPreviewAnchor = null;
     for (const el of document.querySelectorAll('.lbcprev')) el.remove();
 }
 
@@ -5241,6 +6269,15 @@ function paintInkCaret() {
 }
 
 function setInkCaret(msg) {
+    // A selection replacement established a NEW source caret. Its buffered
+    // keys belong there, never at the caret left by the earlier paper click.
+    if (Number.isFinite(msg?.typingRequest)) {
+        if (pendingPaperTyping?.id !== msg.typingRequest || pendingPaperTyping.mode !== 'selection') return;
+        const request=pendingPaperTyping;
+        clearTimeout(request.timer);pendingPaperTyping=null;
+        clearSelectionOverlay();
+        for (const key of request.keys) vscode.postMessage({type:'inkKey',...key,typingRequest:request.id});
+    }
     clearTimeout(state.inkTypingTimer);
     state.ink = msg && !msg.clear ? { page: msg.page, x: msg.x, y: msg.y, h: msg.h, typing: !!msg.typing } : null;
     paintInkCaret();
@@ -5357,7 +6394,7 @@ const INK_KEYS = new Set(['Enter', 'Backspace', 'Delete', 'ArrowLeft', 'ArrowRig
 window.addEventListener('keydown', (e) => {
     if (state.ink || !proActive() || !(e.metaKey || e.ctrlKey) || !e.shiftKey || e.altKey || !['r', 'c'].includes(e.key.toLowerCase())) return;
     const t = e.target;
-    if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable)) return;
+    if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable || t.closest?.('.compile-error'))) return;
     status('Click in the text on the page first: references and citations go in at the caret', 'warn');
     e.preventDefault();
 }, true);
@@ -5367,7 +6404,7 @@ window.addEventListener('keydown', (e) => {
     if (!proActive() || !(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
     const kind = { b: 'bold', i: 'italic' }[e.key.toLowerCase()];
     const t = e.target;
-    if (!kind || (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable))) return;
+    if (!kind || (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable || t.closest?.('.compile-error')))) return;
     if (state.selection && !state.selection.pendingStart) vscode.postMessage({ type: 'selectionAction', action: kind });
     else if (state.ink) vscode.postMessage({ type: 'inkKey', key: `format:${kind}` });
     else return;
@@ -5375,11 +6412,12 @@ window.addEventListener('keydown', (e) => {
     e.stopImmediatePropagation();
 }, true);
 window.addEventListener('keydown', (e) => {
+    if (bufferSelectionTyping(e)) return;
     if (!state.ink) return;
     // A selection on the page takes the keys (typing replaces it).
     if (state.selection && !state.selection.pendingStart) return;
     const t = e.target;
-    if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable)) return;
+    if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable || t.closest?.('.compile-error'))) return;
     if (e.isComposing) return;
     let key = null;
     if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'z') key = e.shiftKey ? 'redo' : 'undo';
@@ -5541,6 +6579,40 @@ function nativeBands(rects) {
  * all. Each paint tags what it draws; the newest paint removes everything
  * else once its own is in, and a paint overtaken by a newer one removes its own.
  */
+function selectionGeometryCurrent(span) {
+    const geometry = span?.geometry;
+    if (!geometry) return true; // older hosts and pending range gestures
+    if (geometry.generation != null && String(geometry.generation) !== String(state.generation)) return false;
+    return (span.rows || []).every(r => {
+        const fragment = state.txdlFragments?.get(r.page);
+        const identity = fragment?.msg?.mapIdentity ?? state.txdl?.pages?.get(r.page)?.identity ?? null;
+        return identity === (geometry.livePages?.[r.page] ?? null);
+    });
+}
+
+function invalidateSelectionGeometry(page = null, liveIdentity = null) {
+    if(state.review) {
+        renderReview();renderEditNav();
+        const holder=el('reviewdiff')?.querySelector('[data-page-preview="true"]');
+        const h=reviewHunks().find(h=>h.id===state.review.focus);
+        if(holder && !reviewPlacementCurrent(h)) {
+            holder.querySelector('.rd-fast')?.remove();delete holder.dataset.pagePreview;
+            for(const n of holder.querySelectorAll('.rd-fallback,.rd-preview-status'))n.style.display='';
+        }
+    }
+    const span = state.selection;
+    if (!span || page != null && !(span.rows || []).some(r => r.page === page)) return;
+    if (page != null && span.geometry && selectionGeometryCurrent(span)) return;
+    state.selectionGeometryPending = true;
+    state.selPaint = (state.selPaint || 0) + 1;
+    state.selShape = null;
+    for (const node of document.querySelectorAll('.selfill, .selbrk, .selact')) node.remove();
+    // Keep the source selection for right-click/copy, but never draw its old
+    // coordinates on changed ink. The host reprojects it without navigation.
+    if (page != null) vscode.postMessage({ type:'selectionReproject', generation:state.generation,
+        page, liveIdentity });
+}
+
 async function paintSelection(span) {
     const token = String((state.selPaint = (state.selPaint || 0) + 1));
     try { await paintSelectionNow(span, token); }
@@ -5552,6 +6624,7 @@ async function paintSelection(span) {
 }
 
 async function paintSelectionNow(span, token) {
+    if (span && (state.selectionGeometryPending || !selectionGeometryCurrent(span))) return;
     const navigationEpoch = state.navigationEpoch || 0;
     for (const el of document.querySelectorAll('.selact')) el.remove();
     state.selection = span || null;
@@ -5560,8 +6633,10 @@ async function paintSelectionNow(span, token) {
     if (!span) return;
     if (!span.pendingStart && !(span.rows && span.rows.length)) return;
 
-    for (const r of (span.rows || [])) await renderPage(r.page);
-    for (const r of ((span.start && span.start.rects) || [])) await renderPage(r.page);
+    // Native selections carry one rectangle per glyph. An already visible
+    // page needs no PDF render, nor one asynchronous lookup for every letter.
+    const pages = new Set([...(span.rows || []),...(span.start?.rects || [])].map(r=>r.page));
+    for (const page of pages) if (!state.rendered.has(page)) await renderPage(page);
 
     const edge = async (anchor, side) => {
         if (anchor?.exactEdge) return { ...anchor.exactEdge, word: false };
@@ -5625,7 +6700,8 @@ async function paintSelectionNow(span, token) {
     // mark before the second shift-click would claim a range that does not
     // exist yet; the single mark says "from here" and nothing more.
     const to = span.pendingStart ? null : await edge(span.end, 'end');
-    if (span.native && state.selection !== span) return;
+    if (state.selection !== span || String(state.selPaint) !== token ||
+        state.selectionGeometryPending || !selectionGeometryCurrent(span)) return;
     if (span.pendingStart) {
         if (from) {
             const wrap = pagesEl().querySelector(`.page[data-page="${from.page}"]`);
@@ -5799,9 +6875,9 @@ async function paintSelectionNow(span, token) {
 /**
  * WHAT TO DO WITH THE THING YOU JUST SELECTED.
  *
- * A small bar of four actions — copy, cut, paste, delete — pinned to the
+ * A small action bar — copy, source location, comment, cut, paste, delete — pinned to the
  * selection. It exists because the selection is now a first-class object on the
- * page: you can drag it to move it, so the other four things one does with a
+ * page: you can drag it to move it, so the other things one does with a
  * fragment should not require going back to the editor either.
  *
  * TWO THINGS MAKE IT WORK RATHER THAN GET IN THE WAY:
@@ -5816,6 +6892,8 @@ const ACTION_ICONS = {
     // Simple, evenly-weighted 16x16 paths on currentColor — a set that reads as
     // one family at 13 px, which emoji do not.
     copy: 'M6 2h6a2 2 0 0 1 2 2v6h-1.5V4a.5.5 0 0 0-.5-.5H6zM3.5 5h6A1.5 1.5 0 0 1 11 6.5v6A1.5 1.5 0 0 1 9.5 14h-6A1.5 1.5 0 0 1 2 12.5v-6A1.5 1.5 0 0 1 3.5 5m0 1.5v6h6v-6z',
+    copyLocation: 'M3 1h7l3 3v11H3zm1.5 1.5v11h7V5H9V2.5zM10 3v1h1zM5.5 7h5v1.2h-5zm0 2.5h5v1.2h-5z',
+    comment: 'M2 2h12v9H7l-4 3v-3H2zm1.5 1.5v6H4.5v1.5l2-1.5h6v-6zM5 5h6v1.2H5zm0 2.5h4v1.2H5z',
     cut: 'M4.5 2 8 7.2 11.5 2h1.7L9 8.4l1 1.5a2.6 2.6 0 1 1-1.2.8L8 9.6l-.8 1.1a2.6 2.6 0 1 1-1.2-.8l1-1.5L2.8 2zM4.6 11.4a1.3 1.3 0 1 0 0 2.6 1.3 1.3 0 0 0 0-2.6m6.8 0a1.3 1.3 0 1 0 0 2.6 1.3 1.3 0 0 0 0-2.6',
     paste: 'M6.5 1.5h3a1 1 0 0 1 1 1V3h1.5A1.5 1.5 0 0 1 13.5 4.5v9A1.5 1.5 0 0 1 12 15H4a1.5 1.5 0 0 1-1.5-1.5v-9A1.5 1.5 0 0 1 4 3h1.5v-.5a1 1 0 0 1 1-1M4 4.5v9h8v-9h-1.5v1h-5v-1zm3-1.5v1h2v-1z',
     delete: 'M6.5 1.5h3a1 1 0 0 1 1 1V3H13v1.5h-1V13a1.5 1.5 0 0 1-1.5 1.5h-5A1.5 1.5 0 0 1 4 13V4.5H3V3h2.5v-.5a1 1 0 0 1 1-1M5.5 4.5V13h5V4.5zM7 6h1.2v5.5H7zm2 0h1.2v5.5H9z',
@@ -5832,6 +6910,8 @@ const FORMAT_ACTIONS = [
 ];
 const ACTIONS = [
     { id: 'copy', title: 'Copy the LaTeX (⌘C)' },
+    { id: 'copyLocation', title: 'Copy source location (file:line)' },
+    { id: 'comment', title: 'Add comment — quote the selection and its source line' },
     { id: 'cut', title: 'Cut the LaTeX (⌘X)' },
     { id: 'paste', title: 'Replace it with the clipboard (⌘V)' },
     { id: 'delete', title: 'Delete it (⌫)' },
@@ -5997,11 +7077,30 @@ function bookmarkSection(b) {
 }
 
 function bookmarkLabel(b) {
-    return `${bookmarkSection(b) || 'Bookmark'} · p.${b.page}${b.approximate ? ' · saved position' : ''}`;
+    return `${isReviewStartBookmark(b) ? 'Review start · ' : ''}${bookmarkSection(b) || 'Bookmark'} · p.${b.page}${b.approximate ? b.revisionId ? ' · approximate page location' : ' · saved position' : ''}`;
 }
 
 function bookmarkCompactLabel(b) {
-    return `${bookmarkSection(b) || 'Bookmark'} · p.${b.page}${b.approximate ? ' ≈' : ''}`;
+    return `${isReviewStartBookmark(b) ? 'Review start' : bookmarkSection(b) || 'Bookmark'} · p.${b.page}${b.approximate ? ' ≈' : ''}`;
+}
+
+function isReviewStartBookmark(b) { return b.id?.startsWith('review-start-') === true; }
+
+/** Save once per visit, before any review action can move the paper. Keep a
+ * single return bookmark per paper, alongside the reader's own bookmarks. */
+function rememberReviewStart() {
+    const key = state.paperRoot || state.review?.file;
+    if (!key || state.reviewStartKey === key || !state.review?.pending) return;
+    const point = semanticViewPoint();
+    if (!point || !Number.isInteger(point.focusPage)) return;
+    const page = point.focusPage, entry = state.rendered.get(page);
+    const b = {id:`review-start-${Date.now()}-${Math.random().toString(36).slice(2,8)}`,
+        page,x:point.focusXBp,y:point.focusYTopBp,viewportFrac:point.focusViewportFrac,
+        height:entry?.viewport?.height / state.scale || 842,at:Date.now(),generation:state.generation};
+    b.section = bookmarkSection(b);
+    state.bookmarks = [...(state.bookmarks || []).filter(b=>!isReviewStartBookmark(b)),b];
+    state.reviewStartKey = key;
+    saveViewNow();paintBookmarks();
 }
 
 function bookmarkScreenY(b) {
@@ -6031,25 +7130,43 @@ function nearbySectionBookmarks(items, bounds, screenY) {
 
 function revisionEdgeLinks(hunks) {
     return hunks.flatMap(h => {
+        if (h.ready === false) return [];
         const r = h.rects?.find(r => r.page > 0 && Number.isFinite(r.x) && Number.isFinite(r.y));
-        if (!r) return [];
+        const page = r?.page || h.page;
+        if (!Number.isInteger(page) || page < 1) return [];
+        const section = h.section?.number ? `§ ${h.section.number}` :
+            r ? bookmarkSection({ page, y: r.y }) : h.section?.title;
         return [{ id: `revision:${h.id}`, revisionId: h.id, automatic: true,
-            page: r.page, x: r.x, y: r.y,
-            section: `Δ ${bookmarkSection({ page: r.page, y: r.y }) || 'Change'}`,
+            page, x: r?.x || 0, y: r?.y || 0, approximate: !r,
+            section: `Δ ${section || 'Change'}`,
             title: h.name || h.verb || 'Pending revision' }];
     });
+}
+
+// Page hints navigate without claiming a measured text position. Distant
+// pages may have no mounted wrapper; their links still belong on the rails.
+function revisionBookmarkEdge(b, bounds, screenY, viewPage) {
+    if (b.approximate) return b.page <= viewPage ? 'above' : 'below';
+    const y = screenY(b);
+    if (Number.isFinite(y)) return y < bounds.top ? 'above' : y > bounds.bottom ? 'below' : null;
+    return b.page < viewPage ? 'above' : b.page > viewPage ? 'below' : null;
 }
 
 async function gotoBookmark(b) {
     if (!state.doc || b.page > state.pageCount) { status('This bookmark’s page is no longer in the paper', 'warn'); return; }
     hideChipPreview(); bookmarkPreviewToken++;
+    claimViewerNavigation();
+    const doc = state.doc;
     await renderPage(b.page);
+    // The host echoes our viewer-navigation claim while a distant page loads.
+    // That acknowledgement is not a new navigation gesture.
+    if (state.doc !== doc || state.navigationOwner !== 'viewer') return;
     const wrap = pagesEl().querySelector(`.page[data-page="${b.page}"]`);
     const main = document.querySelector('main');
     const v = rectToViewport(b.page, { x: b.x, y: b.y, w: 1, h: 1 });
     if (wrap && main && v) {
         main.scrollTo({ top: Math.max(0, main.scrollTop + wrap.getBoundingClientRect().top + v.y -
-            main.getBoundingClientRect().top - main.clientHeight * .35), behavior: 'smooth' });
+            main.getBoundingClientRect().top - main.clientHeight * (Number.isFinite(b.viewportFrac) ? b.viewportFrac : .35)), behavior: 'smooth' });
         status(bookmarkLabel(b));
     }
 }
@@ -6060,6 +7177,12 @@ async function previewBookmark(b, anchor) {
     const previewEpoch = previewSeq;
     await new Promise(resolve => setTimeout(resolve, 140));
     if (token !== bookmarkPreviewToken || !doc || !anchor.isConnected) return;
+    if (b.revisionId && b.approximate) {
+        showDestinationCard({ title: bookmarkLabel(b), heading: bookmarkLabel(b),
+            note: `Pending revision · ${b.title} · page located; exact text position is not mapped yet`,
+            onOpen: () => reviewAct('show', { id: b.revisionId }) }, anchor);
+        return;
+    }
     let shot;
     try {
         const p = await doc.getPage(b.page), vp = p.getViewport({ scale: 1 });
@@ -6121,7 +7244,8 @@ function paintBookmarks() {
         const above = [], below = [];
         const nearest = nearbySectionBookmarks(state.sections?.generation === state.generation ? state.sections?.items || [] : [],
             bounds, bookmarkScreenY);
-        const revisionLinks = reviewPlacementCurrent() ? revisionEdgeLinks(reviewHunks()) : [];
+        const revisionLinks = revisionEdgeLinks(reviewReadyHunks());
+        const viewPage = currentPage();
         for (const b of bookmarks) {
             const wrap = pagesEl().querySelector(`.page[data-page="${b.page}"]`);
             if (!wrap) { below.push(b); continue; }
@@ -6142,10 +7266,9 @@ function paintBookmarks() {
                 document.body.appendChild(rail);
             }
             const automatic = nearest[edge];
-            const revisions = revisionLinks.filter(b => {
-                const y = bookmarkScreenY(b);
-                return y != null && (edge === 'above' ? y < bounds.top : y > bounds.bottom);
-            }).sort((a, b) => a.page - b.page || a.y - b.y);
+            const revisions = revisionLinks.filter(b =>
+                revisionBookmarkEdge(b, bounds, bookmarkScreenY, viewPage) === edge)
+                .sort((a, b) => (edge === 'above' ? -1 : 1) * (a.page - b.page || a.y - b.y));
             const displayed = [...(automatic ? [automatic] : []), ...revisions, ...list];
             rail.hidden = !displayed.length;
             rail.style.left = `${bounds.left}px`; rail.style.maxWidth = `${Math.max(0, bounds.width)}px`;
@@ -6155,7 +7278,8 @@ function paintBookmarks() {
             if (rail.dataset.items !== key) {
                 rail.replaceChildren(); rail.dataset.items = key;
                 const count = document.createElement('span'); count.className = 'bookmark-direction';
-                count.textContent = `${edge === 'above' ? '↑' : '↓'}${list.length ? ' ' + list.length : ''}`;
+                const n = list.length + revisions.length;
+                count.textContent = `${edge === 'above' ? '↑' : '↓'}${n ? ' ' + n : ''}`;
                 count.title = `${list.length} saved bookmarks · ${revisions.length} revisions ${edge}${automatic ? ' · nearest heading' : ''}`;
                 rail.appendChild(count);
                 for (const b of displayed) rail.appendChild(bookmarkControl(b, true));
@@ -6166,7 +7290,7 @@ function paintBookmarks() {
 
 function bookmarkGesture(ev) {
     return ev.button === 0 && ev.shiftKey && !ev.ctrlKey && !ev.metaKey && !ev.altKey &&
-        !ev.target.closest('button, a, input, textarea, .lbc, .wpa, .selact, .selbrk, .bookmark-marker');
+        !ev.target.closest('button, a, input, textarea, .lbc, .wpa, .selact, .selbrk, .bookmark-marker, .compile-error');
 }
 pagesEl().addEventListener('mousedown', ev => {
     if (bookmarkGesture(ev)) { ev.preventDefault(); ev.stopImmediatePropagation(); }
@@ -6180,7 +7304,7 @@ pagesEl().addEventListener('click', ev => {
     const bookmarks = state.bookmarks || [];
     const existing = bookmarks.find(b => b.page === page && Math.abs(b.y - pt.yTopBp) < 10);
     if (existing) { status('This passage is already bookmarked'); return; }
-    if (bookmarks.length >= 200) { status('This paper has 200 bookmarks. Remove one before adding another.', 'warn'); return; }
+    if (bookmarks.filter(b=>!isReviewStartBookmark(b)).length >= 200) { status('This paper has 200 bookmarks. Remove one before adding another.', 'warn'); return; }
     const b = { id: `bm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, page,
         x: pt.xBp, y: pt.yTopBp, height: state.rendered.get(page)?.viewport.height / state.scale,
         at: Date.now(), generation: state.generation };
@@ -6298,6 +7422,16 @@ pagesEl().addEventListener('click', (ev) => {
     if (!b) return;
     ev.preventDefault();
     ev.stopPropagation();
+    if (b.dataset.action === 'comment') {
+        commentPopoverAnchor = null;
+        const rects = (state.selShape || []).flatMap(r => {
+            const a = fromViewport(r.page, r.x, r.y);
+            const z = fromViewport(r.page, r.x + r.w, r.y + r.h);
+            return a && z ? [{ page: r.page, x: a.xBp, y: a.yTopBp,
+                w: z.xBp - a.xBp, h: z.yTopBp - a.yTopBp }] : [];
+        });
+        commentTargetPlacement = rects.length ? { rects } : null;
+    }
     vscode.postMessage({ type: 'selectionAction', action: b.dataset.action });
 }, true);
 
@@ -6580,6 +7714,7 @@ window.addEventListener('mouseup', (ev) => {
  * Double-click is an editing gesture — it puts the cursor in the editor and
  * leaves full screen, because the editor is what you now want to look at.
  */
+let sourceFocusEpoch = 0;
 pagesEl().addEventListener('dblclick', (ev) => {
     const wrap = ev.target.closest ? ev.target.closest('.page') : null;
     if (!wrap) return;
@@ -6589,6 +7724,9 @@ pagesEl().addEventListener('dblclick', (ev) => {
     const pt = fromViewport(n, ev.clientX - r.left, ev.clientY - r.top);
     if (!pt) return;
     ev.preventDefault();
+    sourceFocusEpoch++;
+    // Focus must not wait for PDF text extraction or an inverse-map query.
+    if (state.layoutMode === 'all') vscode.postMessage({ type: 'focusSource' });
     // Nothing to undo any more: the two single clicks before this one each
     // selected the same tightest thing rather than widening.
     sendClick(n, pt, ev.clientX - r.left, ev.clientY - r.top, { takeMe: true });
@@ -6627,8 +7765,9 @@ pagesEl().addEventListener('drop', async (ev) => {
 
 // RIGHT-CLICK MEANS "EDIT THIS, HERE".
 //
-// The paragraph or equation under the pointer opens in a mini-editor pinned
-// below its own rendered block. Everything typed there goes through the real
+// The pointer owns this gesture: cancel any viewer selection and open the
+// paragraph or equation under the pointer with the caret at that point.
+// Everything typed there goes through the real
 // text document — same undo stack, same live recompile — so the page and the
 // editor never disagree.
 pagesEl().addEventListener('contextmenu', (ev) => {
@@ -6641,11 +7780,16 @@ pagesEl().addEventListener('contextmenu', (ev) => {
     const pt = fromViewport(n, ev.clientX - r.left, ev.clientY - r.top);
     if (!pt) return;
     ev.preventDefault();
+    clearPaperTypingTarget(true, 'right-click');
+    setInkCaret(null);
+    clearSelectionOverlay();
+    vscode.postMessage({ type: 'selectionClear' });
     // Said at once: the card follows, or the extension says why not.
     const opening = 'opening the editor…';
     status(opening, 'busy');
     setTimeout(() => { if (el('status').textContent === opening) status(''); }, 6000);
-    sendClick(n, pt, ev.clientX - r.left, ev.clientY - r.top, {}, 'editHere');
+    sendClick(n, pt, ev.clientX - r.left, ev.clientY - r.top,
+        { preserveSelection: false }, 'editHere');
 });
 
 // --- the mini-editor card ----------------------------------------------------
@@ -6657,6 +7801,7 @@ let deferredEditSelect = null;
 let pendingPaperTyping = null;
 
 function closeEditCard(notify = true) {
+    if (notify && state.edit?._extendPending) { state.edit._extendPending.close = true; return; }
     for (const c of document.querySelectorAll('.editcard')) c.remove();
     if (state.edit && notify) vscode.postMessage({ type: 'editClose', editId: state.edit.id });
     state.edit = null;
@@ -6667,7 +7812,7 @@ function closeEditCard(notify = true) {
 /** Persist the mini-editor's caret and hand-chosen page position. */
 function postEditView() {
     const e = state.edit;
-    if (!e) return;
+    if (!e || e._extendPending) return;
     const ta = document.querySelector('.editcard textarea');
     const start = ta ? ta.selectionStart : (Number(e.caretStart) || 0);
     const end = ta ? ta.selectionEnd : (Number(e.caretEnd) || Number(e.caretStart) || 0);
@@ -6722,9 +7867,12 @@ function highlightLatex(src, sel) {
         const a = m.index; const b = re.lastIndex;
         if (t[0] === '%') push(a, b, 'x');
         else if (t === '\\\\' || t === '&') push(a, b, 'o');
-        else if (/^\\(?:begin|end)\b/.test(t)) {
+        else if (/^\\(?:begin|end)\b/.test(t) && t.includes('{')) {
             // \begin{equation} is two things a reader tracks separately: the
-            // structural word, and WHICH environment.
+            // structural word, and WHICH environment. Incomplete commands
+            // are ordinary command tokens: there is no brace to split at.
+            // Splitting at -1 duplicates the preceding character (often a
+            // newline) in the visible layer while leaving the textarea alone.
             const br = t.indexOf('{');
             push(a, a + br, 'k');
             push(a + br, a + br + 1, 'b');
@@ -6773,6 +7921,57 @@ function highlightLatex(src, sel) {
     return out.join('');
 }
 
+/** Move cell starts through an exact local edit, including paste and undo. */
+function rebaseCellStarts(starts, before, after, operation) {
+    if (before === after) return starts || [0];
+    let start = operation?.start, end = operation?.end;
+    if (!operation || operation.before !== before) {
+        start = 0; end = before.length; let nextEnd = after.length;
+        while (start < end && start < nextEnd && before[start] === after[start]) start++;
+        while (end > start && nextEnd > start && before[end - 1] === after[nextEnd - 1]) { end--; nextEnd--; }
+    }
+    const delta = after.length - before.length;
+    // A boundary deleted with its block disappears. Insertion at a boundary
+    // belongs to that following block, so its start stays at the same offset.
+    return [0, ...new Set((starts || []).filter(p => p > 0 && !(p >= start && p < end))
+        .map(p => p > start ? p + delta : p).filter(p => p > 0 && p < after.length))];
+}
+
+/** Dividers are decorations outside both text layers: no added characters,
+ * line boxes, selection interception or changes to the textarea's metrics. */
+function paintEditCellBoundaries(card = document.querySelector('.editcard')) {
+    if (!card) return;
+    card.querySelectorAll('.ec-cell-boundary').forEach(n => n.remove());
+    if (!state.cellBoundariesOn) return;
+    const pre = card.querySelector('.ec-hl'), box = card.querySelector('.ec-editor');
+    const ta = card.querySelector('textarea');
+    if (!pre || !box || !ta) return;
+    const nodes = [], walker = document.createTreeWalker(pre, NodeFilter.SHOW_TEXT);
+    let node, offset = 0;
+    while ((node = walker.nextNode())) { nodes.push({ node, start:offset, end:offset + node.length }); offset += node.length; }
+    const br = box.getBoundingClientRect(), pr = pre.getBoundingClientRect();
+    const lineHeight = parseFloat(getComputedStyle(pre).lineHeight) || 18.6;
+    for (const at of state.edit?.cellStarts || []) {
+        if (at <= 0 || at >= ta.value.length) continue;
+        const part = nodes.find(n => n.start <= at && n.end > at);
+        if (!part) continue;
+        const range = document.createRange();
+        range.setStart(part.node, at - part.start);
+        range.setEnd(part.node, at - part.start + 1);
+        const rect = range.getClientRects()[0];
+        if (!rect) continue;
+        const line = document.createElement('div');
+        line.className = 'ec-cell-boundary'; line.setAttribute('aria-hidden', 'true');
+        line.dataset.offset = String(at);
+        // Centre the rule in the blank line before the cell, if there is one.
+        const blank = /\n[\t ]*\n[\t ]*$/.test(ta.value.slice(0, at));
+        line.style.top = `${rect.top - br.top + box.scrollTop - (blank ? lineHeight / 2 : 2)}px`;
+        line.style.left = `${pr.left - br.left + box.scrollLeft + 10}px`;
+        line.style.width = `${Math.max(0, pre.clientWidth - 20)}px`;
+        box.appendChild(line);
+    }
+}
+
 /** Repaint the highlight layer and match the textarea's height to it. */
 function syncHighlight(card) {
     const ta = card.querySelector('textarea');
@@ -6783,6 +7982,7 @@ function syncHighlight(card) {
     // it at the FULL content height and never scrolls itself, so the wrapper
     // scrolls both together and there is no scroll offset to keep in sync.
     ta.style.height = `${pre.offsetHeight}px`;
+    paintEditCellBoundaries(card);
 }
 
 /**
@@ -6832,14 +8032,20 @@ function makeDraggable(card, handle, session) {
             card.style.left = `${left}px`;
             card.style.top = `${top}px`;
             const e = sess.get();
-            if (e) { e.fixedGeometry = null; e.pos = { fx: left / W, fy: top / H }; e.userMoved = true; }
+            if (e) {
+                e.fixedGeometry = null; e.pos = { fx: left / W, fy: top / H }; e.userMoved = true;
+                if (e === state.edit) e.blockAnchor = null;
+            }
         };
         const up = () => {
             handle.removeEventListener('pointermove', move);
             handle.removeEventListener('pointerup', up);
             handle.removeEventListener('pointercancel', up);
             try { handle.releasePointerCapture(ev.pointerId); } catch (_) { /* fine */ }
-            if (sess.get() === state.edit) postEditView();
+            if (sess.get() === state.edit) {
+                if (moved && state.edit) rememberEditCardAnchor(state.edit, card, wrap);
+                postEditView();
+            }
         };
         handle.addEventListener('pointermove', move);
         handle.addEventListener('pointerup', up);
@@ -6849,7 +8055,10 @@ function makeDraggable(card, handle, session) {
     handle.addEventListener('dblclick', (ev) => {
         if (ev.target.closest('button')) return;
         const e = sess.get();
-        if (e) { e.pos = null; e.fixedGeometry = null; e.userMoved = false; }
+        if (e) {
+            e.pos = null; e.fixedGeometry = null; e.userMoved = false;
+            if (e === state.edit) e.blockAnchor = null;
+        }
         sess.repaint();
         if (e === state.edit) postEditView();
     });
@@ -6876,15 +8085,51 @@ function applyCardEdit(ta, r) {
             ta.dispatchEvent(new Event('input'));
         }
     }
-    ta.setSelectionRange(r.caret, r.caret);
+    if (r.select) ta.setSelectionRange(r.select[0], r.select[1], r.direction || 'forward');
+    else ta.setSelectionRange(r.caret, r.caret);
+}
+
+/** LaTeX comments use '%' on each selected line; preserve indentation/EOLs. */
+function miniCommentEdit(text, from, to, mode = 'toggle') {
+    const start = from === 0 ? 0 : text.lastIndexOf('\n', from - 1) + 1;
+    const last = to > from && text[to - 1] === '\n' ? to - 1 : to;
+    const newline = text.indexOf('\n', last);
+    const end = newline < 0 ? text.length : newline;
+    const lines = text.slice(start, end).split('\n');
+    const content = lines.filter(line => line.trim());
+    const uncomment = mode === 'remove' || mode === 'toggle' && content.length &&
+        content.every(line => /^[ \t]*%/.test(line));
+    const indent = Math.min(...(content.length ? content : lines).map(line => /^[ \t]*/.exec(line)[0].length));
+    const edits = [];
+    let at = start;
+    for (const line of lines) {
+        if (uncomment) {
+            const prefix = /^[ \t]*(% ?)/.exec(line);
+            if (prefix) edits.push({ at: at + prefix[0].length - prefix[1].length, remove: prefix[1].length, insert: '' });
+        } else if (line.trim() || !content.length) {
+            edits.push({ at: at + Math.min(indent, line.length), remove: 0, insert: '% ' });
+        }
+        at += line.length + 1;
+    }
+    let insert = text.slice(start, end);
+    for (const edit of [...edits].reverse()) {
+        const offset = edit.at - start;
+        insert = insert.slice(0, offset) + edit.insert + insert.slice(offset + edit.remove);
+    }
+    const moved = position => position + edits.reduce((delta, edit) =>
+        delta + (position >= edit.at ? edit.insert.length - Math.min(edit.remove, position - edit.at) : 0), 0);
+    return { start, end, insert, select: [moved(from), moved(to)] };
 }
 
 /** The card's maths keys (capture phase: before the card's own Esc and ⌃Enter). */
 function wireMathKeys(card, ta) {
+    if (ta._wpaperMathKeys) return;
+    ta._wpaperMathKeys = true;
     let alias = null;       // where an escape alias began, while one is typed
     const endAlias = () => { alias = null; card.classList.remove('aliasing'); };
     ta.addEventListener('blur', endAlias);
     ta.addEventListener('keydown', ev => {
+        if (!proActive()) { endAlias(); return; }
         const math = inMathAt(ta.value, ta.selectionStart);
         const key = mathKeyFor(ev);
         // ⌃Enter saves outside maths; inside, it is a new row.
@@ -7227,6 +8472,7 @@ function buildFigureBar(card, ta, e) {
 function buildEditCard(e) {
     const card = document.createElement('div');
     card.className = 'editcard';
+    if (typeof card.showPopover === 'function') card.setAttribute('popover', 'manual');
     card.dataset.edit = String(e.id);
     // Clicks inside the card are the card's business — they must not fall
     // through to the page's click-to-source handler underneath.
@@ -7252,7 +8498,10 @@ function buildEditCard(e) {
         b.addEventListener('click', fn);
         return b;
     };
-    const step = (d) => vscode.postMessage({ type: 'editStep', editId: state.edit.id, delta: d });
+    const step = (d) => {
+        if (e._extendPending) { e._extendPending.step = d; return; }
+        vscode.postMessage({ type: 'editStep', editId: state.edit.id, delta: d });
+    };
     head.append(title, lines, spacer,
         btn('‹', 'Previous block (⌥↑)', () => step(-1)),
         btn('›', 'Next block (⌥↓)', () => step(1)),
@@ -7282,6 +8531,12 @@ function buildEditCard(e) {
     catch (_) { /* a usable card matters more */ }
     e._caretSent = `${caretStart}:${caretEnd}:${caretDirection}`;
     box.append(pre, ta);
+    const cellsResize = new ResizeObserver(() => {
+        if (!card.isConnected) { cellsResize.disconnect(); return; }
+        ta.style.height = `${pre.offsetHeight}px`;
+        paintEditCellBoundaries(card);
+    });
+    cellsResize.observe(pre);
     let debounce = null;
     const caretSnapshot = () => {
         const start = ta.selectionStart;
@@ -7302,6 +8557,7 @@ function buildEditCard(e) {
     // Clearing the pending change is essential: otherwise it arrives after the
     // save and immediately makes the just-saved document dirty again.
     function saveCurrent() {
+        if (e._extendPending) { e._extendPending.save = true; return; }
         clearTimeout(debounce);
         debounce = null;
         vscode.postMessage({
@@ -7324,35 +8580,24 @@ function buildEditCard(e) {
         const beforeText = beforeInput?.text ?? e.text;
         const operation = miniInputOperation(beforeInput, ta.value, ta.selectionStart);
         beforeInput = null;
+        e.cellStarts = rebaseCellStarts(e.cellStarts, beforeText, ta.value, operation);
         e._localText = ta.value;
         boundaryArm = null;
         state.edit.text = ta.value;               // survives zoom/generation rebuilds
         caretSnapshot();                         // capture before host/compile replies
         state.edit.sel = null;                    // the located range is stale once typed over
         clearTimeout(debounce);
-        if (e.native) {
-            debounce = null;
-            if (e.conflict) { syncHighlight(card); return; }
-            const caret = caretSnapshot();
-            state.edit._caretSent = `${caret.start}:${caret.end}:${caret.direction}`;
-            vscode.postMessage({ type:'editChange', editId:e.id, text:ta.value, caret, operation, beforeText });
-            syncHighlight(card);
-            return;
-        }
-        debounce = setTimeout(() => {
-            debounce = null;
-            const caret = caretSnapshot();
-            // The textarea and TextDocument must advance as one state. After
-            // a deletion these offsets describe the NEW text; posting them as
-            // a separate, earlier editCaret made the host resolve them against
-            // the OLD text and select a different fragment on the page.
-            state.edit._caretSent = `${caret.start}:${caret.end}:${caret.direction}`;
-            vscode.postMessage({
-                type: 'editChange', editId: e.id, text: ta.value, caret,
-            });
-        }, 250);
+        debounce = null;
+        if (e.conflict || e._extendPending) { syncHighlight(card); return; }
+        // Source edits are immediate on both rendering engines. The host
+        // serializes them; only compiling is debounced. Text and caret must
+        // travel together so deletion never resolves against the old text.
+        const caret = caretSnapshot();
+        state.edit._caretSent = `${caret.start}:${caret.end}:${caret.direction}`;
+        vscode.postMessage({
+            type: 'editChange', editId: e.id, text: ta.value, caret, operation, beforeText,
+        });
         syncHighlight(card);
-        sendCaret();
     });
 
     // THE CARET IN THE CARD IS A CARET IN THE PAPER.
@@ -7383,7 +8628,7 @@ function buildEditCard(e) {
         // update has not gone out yet. The debounce callback sends the latest
         // caret bundled with that text; never send new offsets against the old
         // document in the meantime.
-        if (debounce) return;
+        if (debounce || e._extendPending) return;
         caretLastSent = Date.now();
         if (!state.edit) return;
         const caret = caretSnapshot();
@@ -7468,7 +8713,33 @@ function buildEditCard(e) {
         // C, X or V at the textarea boundary makes all three appear broken.
         // The page-level handlers already ignore textarea targets. Only the
         // shortcuts which this card actually owns are stopped below.
+        const command = ev.metaKey || ev.ctrlKey;
+        if (!ev.isComposing && ((command && !ev.altKey && (ev.key === '/' || ev.code === 'Slash')) ||
+            (!command && ev.shiftKey && ev.altKey && (ev.key.toLowerCase() === 'a' || ev.code === 'KeyA')))) {
+            ev.preventDefault(); ev.stopPropagation(); boundaryArm = null;
+            const r = miniCommentEdit(ta.value, ta.selectionStart, ta.selectionEnd);
+            r.direction = ta.selectionDirection;
+            applyCardEdit(ta, r);
+            return;
+        }
+        const verticalEdge = !ev.altKey && !ev.metaKey && !ev.ctrlKey && !ev.shiftKey && !ev.isComposing &&
+            ta.selectionStart === ta.selectionEnd &&
+            (ev.key === 'ArrowUp' && ta.selectionStart === 0 ||
+                ev.key === 'ArrowDown' && ta.selectionEnd === ta.value.length);
+        if (verticalEdge) {
+            ev.preventDefault(); ev.stopPropagation(); boundaryArm = null;
+            if (ev.repeat || e._extendPending || e.conflict) return;
+            clearTimeout(debounce); clearTimeout(caretT);
+            pinEditCard();
+            const requestId = e._extendSeq = (e._extendSeq || 0) + 1;
+            const caret = caretSnapshot();
+            e._extendPending = { requestId, text:ta.value, caret };
+            vscode.postMessage({ type:'editExtend', editId:e.id, requestId,
+                delta:ev.key === 'ArrowUp' ? -1 : 1, text:ta.value, caret });
+            return;
+        }
         if ((ev.metaKey || ev.ctrlKey) && ev.altKey && ev.key === 'Enter') {
+            if (e._extendPending) { ev.preventDefault(); ev.stopPropagation(); e._extendPending.git = ev.shiftKey ? 'gitPush' : 'gitCommit'; return; }
             boundaryArm = null;
             ev.preventDefault();
             ev.stopPropagation();
@@ -7485,6 +8756,7 @@ function buildEditCard(e) {
             boundaryArm = null;
             ev.preventDefault();
             ev.stopPropagation();
+            if (e._extendPending) { e._extendPending.step = ev.key === 'ArrowUp' ? -1 : 1; return; }
             clearTimeout(debounce);
             // Flush first: stepping replaces the session, and an unsent edit
             // belonging to the OLD block would be applied to the new one.
@@ -7503,7 +8775,7 @@ function buildEditCard(e) {
             ev.stopPropagation();
             // A held key emits repeat=true keydowns. It may sit at the edge,
             // but it neither arms nor triggers cross-block navigation.
-            if (ev.repeat) return;
+            if (ev.repeat || e._extendPending) return;
             const here = `${ev.key}:${ta.selectionStart}:${ta.selectionEnd}`;
             if (boundaryArm === here) {
                 boundaryArm = null;
@@ -7534,23 +8806,39 @@ function buildEditCard(e) {
 
     const hint = document.createElement('div');
     hint.className = 'ec-hint';
-    hint.textContent = 'drag title · ←←/→→ previous/next · ⌘S save · ⌘⌥↵ commit · ⇧⌘⌥↵ push · Esc close';
+    hint.textContent = 'drag title · ↑/↓ at edge adds block · ←←/→→ previous/next · ⌘S save · ⌘⌥↵ commit · ⇧⌘⌥↵ push · Esc close';
 
     // A table's card has the grid; its cells' maths is typed in the source below.
     // WLaTeX Pro's card: the grid, the figure bar, the maths bar and its
     // keys. Without Pro the card is the plain editor it always was.
-    const pro = proActive();
-    const tableGrid = pro ? buildTableGrid(card, ta, e) : null;
-    const figureBar = pro ? buildFigureBar(card, ta, e) : null;
-    const mathBar = !pro ? null
-        : tableGrid || figureBar ? (wireMathKeys(card, ta), null) : buildMathBar(card, ta, e);
     // The text and, beside it when opened, the block's comments.
     const body = document.createElement('div');
     body.className = 'ec-body';
     body.append(box);
-    card.append(head, ...[mathBar, figureBar, tableGrid].filter(Boolean), body, hint);
+    card.append(head, body, hint);
+    refreshCardProControls(card, e);
     if (cardCommentsOpen()) openCardComments(card, e, false);
     return card;
+}
+
+function refreshCardProControls(card, e) {
+    const active = proActive();
+    if (card._pro === active) return;
+    card._pro = active;
+    if (active && !card._proControls) {
+        const ta = card.querySelector('.ec-editor textarea');
+        const table = buildTableGrid(card, ta, e);
+        const figure = buildFigureBar(card, ta, e);
+        const math = table || figure ? (wireMathKeys(card, ta), null) : buildMathBar(card, ta, e);
+        card._proControls = [math, figure, table].filter(Boolean);
+    }
+    // Detach/reuse controls; rebuilding the textarea loses its undo history,
+    // and rewiring the controls on every toggle leaks duplicate listeners.
+    for (const node of card._proControls || []) {
+        if (active) card.insertBefore(node, card.querySelector('.ec-body'));
+        else node.remove();
+    }
+    if (!active) card.classList.remove('aliasing');
 }
 
 // --- THE CARD'S COMMENTS PANE ---------------------------------------------------
@@ -7610,7 +8898,10 @@ function openCardComments(card, e, focus) {
     pane.style.width = `${cardCommentsWidth()}px`;
     // Keys typed here are the pane's: the card's own handlers (stepping,
     // aliases, Esc) stay with its text.
-    pane.addEventListener('keydown', ev => { if (ev.key !== 'Escape') ev.stopPropagation(); });
+    pane.addEventListener('keydown', ev => {
+        const clipboard = (ev.metaKey || ev.ctrlKey) && !ev.altKey && /^[cxv]$/i.test(ev.key);
+        if (ev.key !== 'Escape' && !clipboard) ev.stopPropagation();
+    });
     body.append(divider, pane);
     divider.addEventListener('mousedown', ev => {
         ev.preventDefault(); ev.stopPropagation();
@@ -7799,7 +9090,7 @@ async function ensureWolframHighlighter() {
     return mmaHl;
 }
 
-const escHtml = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const escHtml = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g,'&quot;');
 
 /**
  * Repaint one cell's highlight layer.
@@ -8125,7 +9416,7 @@ function paintMmaCard(focus = false) {
     }
 }
 
-/** Place (or re-place) the card under its block's rendered rows. */
+/** Freeze the card before replacing its page or source-map geometry. */
 function pinEditCard() {
     const card = document.querySelector('.editcard'), wrap = card?.parentElement;
     if (!state.edit || !card || !wrap) return;
@@ -8133,33 +9424,59 @@ function pinEditCard() {
     state.edit.pos = { fx: (parseFloat(card.style.left) || 0) / Math.max(1, wrap.clientWidth),
         fy: (parseFloat(card.style.top) || 0) / Math.max(1, wrap.clientHeight) };
     state.edit.fixedGeometry = { left: card.style.left, top: card.style.top, width: card.style.width };
+    rememberEditCardAnchor(state.edit, card, wrap);
 }
 
-/**
- * THE CARD FOLLOWS ITS BLOCK'S BOTTOM. Typing that adds a line to the block
- * printed it under the card, where the reader could not see it: the card now
- * sits just below the block's new last row (and comes back up when the block
- * shrinks). A card the reader dragged elsewhere stays, unless the block now
- * reaches under it — then it is pushed down just enough.
- */
-function followBlockBottom(e) {
-    const card = document.querySelector('.editcard');
-    const wrap = card?.parentElement;
-    if (!e?.fixedGeometry || !card || !wrap) return;
-    const page = Number(wrap.dataset.page);
-    let bottom = null;
+function editBlockBounds(e, page) {
+    let top = Infinity, bottom = -Infinity;
     for (const r of e.rects || []) {
         if (r.page !== page) continue;
         const v = rectToViewport(page, r);
-        if (v) bottom = Math.max(bottom ?? -Infinity, v.y + v.h);
+        if (v) { top = Math.min(top, v.y); bottom = Math.max(bottom, v.y + v.h); }
     }
-    if (bottom == null) return;
-    const want = bottom + 8;
+    return Number.isFinite(top) && Number.isFinite(bottom) ? { top, bottom } : null;
+}
+
+/** Choose the edge when placed, before new lines or editor growth can change
+ * which side the card appears to occupy. Overlapping cards follow the side
+ * containing most of their height. Remember the reader's gap, including overlap. */
+function rememberEditCardAnchor(e, card, wrap) {
+    const page = Number(wrap.dataset.page);
+    if (e.blockAnchor?.page === page) return;
+    const bounds = editBlockBounds(e, page);
+    if (!bounds) return;
+    const top = parseFloat(card.style.top) || 0;
+    const edge = top + card.offsetHeight / 2 >= (bounds.top + bounds.bottom) / 2 ? 'bottom' : 'top';
+    e.blockAnchor = { page, edge, gap: top - bounds[edge] };
+}
+
+/** Above follows the top; below follows the bottom, with the chosen distance.
+ * Missing map geometry leaves the editor in place until its anchor arrives. */
+function followEditCardAnchor(e) {
+    const card = document.querySelector('.editcard'), wrap = card?.parentElement;
+    if (!e?.fixedGeometry || !card || !wrap) return;
+    // Equation glyph bounds change on almost every key: incomplete commands,
+    // fractions and scripts all change the top/bottom without moving the
+    // reader's editing task. Keep the card where it was placed for this
+    // session, while still accepting its fresh source-map rectangles below.
+    if (e.stationaryEquation) return;
+    const page = Number(wrap.dataset.page), a = e.blockAnchor;
+    if (!a || a.page !== page) return;
+    const bounds = editBlockBounds(e, page);
+    if (!bounds) return;
+    const want = bounds[a.edge] + a.gap;
     const top = parseFloat(e.fixedGeometry.top) || 0;
-    if (e.userMoved && top >= want) return;
-    if (Math.abs(top - want) < 1) return;
+    if (Math.abs(top - want) < 0.01) return;
     e.fixedGeometry = { ...e.fixedGeometry, top: `${want}px` };
     e.pos = { ...(e.pos || {}), fy: want / Math.max(1, wrap.clientHeight) };
+}
+
+/** Choose this once at open, not from temporarily incomplete typed LaTeX.
+ * Prose still follows genuine paragraph growth; standalone displays stay put. */
+function isEquationEditCard(msg) {
+    if (/^(?:display-equation|equation|align(?:ed|at)?|gather(?:ed)?|multline|flalign|eqnarray|displaymath)\b/.test(msg.label || '')) return true;
+    const text = String(msg.text || '').replace(/^(?:\s|%[^\r\n]*(?:\r?\n|$))*/, '');
+    return /^(?:\\\[|\$\$|\\begin\s*\{(?:equation|align(?:ed|at)?|gather(?:ed)?|multline|flalign|eqnarray|displaymath|split)\*?\})/.test(text);
 }
 
 function editCardPage(e) {
@@ -8169,6 +9486,17 @@ function editCardPage(e) {
     // beneath its final line on another page. Old/reflowed anchors fall back.
     if (Number(e.page) > 0 && (!rects.length || rects.some(r => r.page === Number(e.page)))) return Number(e.page);
     return rects.length ? rects[rects.length - 1].page : 1;
+}
+
+/** Lift the card above the corrections drawer without changing its page parent.
+ * Page-relative left/top still drive dragging, pinning and restored geometry. */
+function positionEditCardOverlay() {
+    const card = document.querySelector('.editcard[popover]');
+    const wrap = card?.parentElement;
+    if (!wrap) return;
+    const r = wrap.getBoundingClientRect();
+    card.style.transform = `translate(${r.left + wrap.clientLeft}px, ${r.top + wrap.clientTop}px)`;
+    if (!card.matches(':popover-open')) card.showPopover();
 }
 
 function paintEditCard(focus = false) {
@@ -8250,6 +9578,8 @@ function paintEditCard(focus = false) {
         card.style.left = `${x}px`;
         card.style.top = `${bottom + 8}px`;
     }
+    positionEditCardOverlay();
+    rememberEditCardAnchor(e, card, wrap);
 
     // FOCUS ONLY ONCE THE CARD IS WHERE IT IS GOING TO BE, AND NEVER LET THE
     // BROWSER DO THE SCROLLING.
@@ -8281,9 +9611,12 @@ function revealEditCard(card) {
     if (!main || !card) return;
     const mr = main.getBoundingClientRect();
     const cr = card.getBoundingClientRect();
+    const bottom = card.hasAttribute('popover') && card.matches(':popover-open')
+        ? (document.querySelector('footer')?.getBoundingClientRect().top ?? mr.bottom)
+        : mr.bottom;
     const pad = 12;
     const above = (mr.top + pad) - cr.top;              // >0: the card starts off the top
-    const below = cr.bottom - (mr.bottom - pad);        // >0: it runs past the bottom
+    const below = cr.bottom - (bottom - pad);           // >0: it runs past the bottom
     let delta = 0;
     if (above > 0) delta = -above;
     else if (below > 0) delta = Math.min(below, Math.max(0, cr.top - (mr.top + pad)));
@@ -8305,8 +9638,60 @@ function updateEditTextPreservingCaret(ta, text) {
     ta.scrollTop = top; ta.scrollLeft = left;
 }
 
+/** Widen the existing textarea; keys typed during the host round trip are
+ * rebased into the expanded source range before being sent to the host. */
+function finishEditExtension(msg) {
+    const e = state.edit, pending = e?._extendPending;
+    if (!pending || e.id !== msg.editId || pending.requestId !== msg.requestId) return;
+    const card = document.querySelector('.editcard'), ta = card?.querySelector('textarea');
+    if (!ta) return;
+    const before = ta.value, a = ta.selectionStart, b = ta.selectionEnd, direction = ta.selectionDirection;
+    const moved = before !== pending.text || a !== pending.caret.start || b !== pending.caret.end;
+    delete e._extendPending;
+    const prefix = msg.added ? msg.prefix || '' : '', suffix = msg.added ? msg.suffix || '' : '';
+    const text = prefix + before + suffix;
+    if (msg.added) {
+        const top = ta.scrollTop, left = ta.scrollLeft;
+        ta.setRangeText(text, 0, ta.value.length, 'preserve');
+        ta.setSelectionRange(moved ? a + prefix.length : msg.caret,
+            moved ? b + prefix.length : msg.caret, direction);
+        ta.scrollTop = top; ta.scrollLeft = left;
+        e.startLine = msg.startLine; e.endLine = msg.endLine; e.label = msg.label || 'blocks';
+        const label = card.querySelector('.ec-title'); if (label) label.textContent = e.label;
+        const lines = card.querySelector('.ec-lines');
+        if (lines) lines.textContent = `${e.file || ''} · lines ${e.startLine}–${e.endLine}`;
+    }
+    if (msg.added) {
+        e.cellStarts = Array.isArray(msg.cellStarts) ? rebaseCellStarts(msg.cellStarts, msg.text, text)
+            : [0, ...(e.cellStarts || []).map(p => p + prefix.length),
+                ...(suffix ? [prefix.length + before.length + (suffix.match(/^\s*/)?.[0].length || 0)] : [])];
+    }
+    e.text = text; e._localText = text; e.sel = null;
+    e.caretStart = ta.selectionStart; e.caretEnd = ta.selectionEnd; e.caretDirection = ta.selectionDirection;
+    syncHighlight(card); card._tableRefresh?.(); card._figureRefresh?.();
+    const baseline = msg.added ? msg.text : pending.text;
+    const caret = { start:e.caretStart, end:e.caretEnd, direction:e.caretDirection, pos:e.pos || null };
+    if (!e.conflict && text !== baseline) {
+        let start = 0, end = baseline.length, nextEnd = text.length;
+        while (start < end && start < nextEnd && baseline[start] === text[start]) start++;
+        while (end > start && nextEnd > start && baseline[end - 1] === text[nextEnd - 1]) { end--; nextEnd--; }
+        vscode.postMessage({ type:'editChange', editId:e.id, text, beforeText:baseline, caret,
+            operation:{ before:baseline, start, end, text:text.slice(start, nextEnd) } });
+    } else if (!e.conflict) vscode.postMessage({ type:'editCaret', editId:e.id, ...caret });
+    e._caretSent = `${caret.start}:${caret.end}:${caret.direction}`;
+    postEditView();
+    if (msg.added && document.activeElement === ta) selectInEditCard({ editId:e.id,
+        start:caret.start, end:caret.end, direction:caret.direction, focus:true });
+    if (pending.save) e._saveCurrent?.();
+    if (pending.compile) requestPaperCompile(pending.compile.exportPdf);
+    if (pending.close) closeEditCard();
+    else if (pending.git) vscode.postMessage({ type:pending.git, editId:e.id, text });
+    else if (pending.step) vscode.postMessage({ type:'editStep', editId:e.id, delta:pending.step });
+}
+
 /** Put the caret on a range of the open block, and show where it landed. */
 function selectInEditCard(msg) {
+    if (Number.isFinite(msg.typingRequest) && pendingPaperTyping?.id !== msg.typingRequest) return;
     const e = state.edit;
     if (!e || e.id !== msg.editId) return;
     const card = document.querySelector('.editcard');
@@ -8357,11 +9742,14 @@ function selectInEditCard(msg) {
     // accumulated while the extension resolved the click and built the card,
     // at the caret it just returned — never at textarea's default position.
     if (pendingPaperTyping && msg.typingRequest === pendingPaperTyping.id) {
-        const text = pendingPaperTyping.text;
+        const request = pendingPaperTyping, text = request.text;
         if (pendingPaperTyping.timer) clearTimeout(pendingPaperTyping.timer);
         pendingPaperTyping = null;
-        if (text) {
-            try { ta.setRangeText(text, ta.selectionStart, ta.selectionEnd, 'end'); }
+        if (text || request.mode === 'selection') {
+            try {
+                if (request.mode === 'selection') applySelectionTyping(ta,request);
+                else ta.setRangeText(text, ta.selectionStart, ta.selectionEnd, 'end');
+            }
             catch (_) {
                 const a = ta.selectionStart; const b = ta.selectionEnd;
                 ta.value = ta.value.slice(0, a) + text + ta.value.slice(b);
@@ -8384,6 +9772,59 @@ let paperTargetSeq = 0;
 let typingRequestSeq = 0;
 let paperTypingClearedBy = '';
 
+function bufferSelectionTyping(e) {
+    const request=pendingPaperTyping;
+    if (request?.mode !== 'selection') return false;
+    const t=e.target;
+    if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable)) return false;
+    if (e.metaKey || e.ctrlKey || e.altKey || e.isComposing ||
+        (!INK_KEYS.has(e.key) && [...e.key].length !== 1)) return false;
+    e.preventDefault();e.stopImmediatePropagation();
+    if (e.key === 'Escape') {
+        clearPaperTypingTarget(true,'selection typing cancelled');
+        return true;
+    }
+    request.keys.push({key:e.key,shift:e.shiftKey});
+    if (e.key === 'Backspace') request.text=[...request.text].slice(0,-1).join('');
+    else if (e.key === 'Enter') request.text+='\n';
+    else if ([...e.key].length === 1) request.text+=e.key;
+    return true;
+}
+
+function applySelectionTyping(ta,request) {
+    ta.setRangeText(request.firstText,ta.selectionStart,ta.selectionEnd,'end');
+    for (const {key,shift} of request.keys) {
+        let a=ta.selectionStart,b=ta.selectionEnd;
+        const prev=n=>n-([...ta.value.slice(0,n)].at(-1)?.length || 0);
+        const next=n=>n+([...ta.value.slice(n)][0]?.length || 0);
+        if (key === 'Backspace' || key === 'Delete') {
+            if (a === b) { if (key === 'Backspace') a=prev(a); else b=next(b); }
+            ta.setRangeText('',a,b,'end');
+        } else if (key === 'Enter' || [...key].length === 1) {
+            ta.setRangeText(key === 'Enter' ? '\n' : key,a,b,'end');
+        } else {
+            const active=ta.selectionDirection === 'backward' ? a : b;
+            const anchor=ta.selectionDirection === 'backward' ? b : a;
+            const start=active > 0 ? ta.value.lastIndexOf('\n',active-1)+1 : 0;
+            let end=ta.value.indexOf('\n',active);if (end < 0) end=ta.value.length;
+            let at=active;
+            if (key === 'ArrowLeft') at=!shift && a!==b ? a : prev(active);
+            if (key === 'ArrowRight') at=!shift && a!==b ? b : next(active);
+            if (key === 'Home') at=start;
+            if (key === 'End') at=end;
+            if (key === 'ArrowUp' && start > 0) {
+                const previous=ta.value.lastIndexOf('\n',start-2)+1;at=Math.min(start-1,previous+active-start);
+            }
+            if (key === 'ArrowDown' && end < ta.value.length) {
+                let following=ta.value.indexOf('\n',end+1);if (following < 0) following=ta.value.length;
+                at=Math.min(following,end+1+active-start);
+            }
+            ta.setSelectionRange(shift ? Math.min(anchor,at) : at,shift ? Math.max(anchor,at) : at,
+                shift && at < anchor ? 'backward' : 'forward');
+        }
+    }
+}
+
 function clearPaperTypingTarget(clearPending = false, reason = '') {
     paperTargetSeq++;
     paperTypingClearedBy = reason;
@@ -8391,6 +9832,8 @@ function clearPaperTypingTarget(clearPending = false, reason = '') {
     paperTypingResolving = null;
     if (clearPending) {
         if (pendingPaperTyping && pendingPaperTyping.timer) clearTimeout(pendingPaperTyping.timer);
+        if (pendingPaperTyping?.mode === 'selection')
+            vscode.postMessage({type:'selectionTypingCancel',typingRequest:pendingPaperTyping.id});
         pendingPaperTyping = null;
     }
 }
@@ -8411,25 +9854,30 @@ function miniInputOperation(before, after, caret) {
 }
 
 function sendClick(n, pt, cx, cy, extra, type = 'click') {
-    if (state.tracePaused && !state.nativeMapAvailable) {
+    if (type !== 'editHere' && state.tracePaused && !state.nativeMapAvailable) {
         vscode.postMessage({ type: 'traceRetry', generation: state.generation });
         return;
     }
+    const focusEpoch = sourceFocusEpoch;
     // A click on a live page names the page identity the overlay shows, so
     // the host answers it from that page's own map and never from the cold
     // map of the PDF underneath.
     const overlay = state.txdl && state.txdl.pages.get(n);
+    const fragment=state.txdlFragments?.get(n);
+    const fragmentIdentity=fragment?.canvas?.isConnected
+        ? fragment.msg?.mapIdentity || `fragment-pending:${fragment.msg?.generation}:${n}:${fragment.msg?.index}` : null;
     const base = {
         type, page: n, xBp: pt.xBp, yTopBp: pt.yTopBp,
         generation: state.generation, ...extra,
-        ...(overlay && overlay.canvas.isConnected ? { overlay: overlay.identity } : {}),
+        ...(fragmentIdentity != null ? {overlay:fragmentIdentity}
+            : overlay && overlay.canvas.isConnected ? { overlay: overlay.identity } : {}),
     };
     const ordinary = type === 'click' && !extra.pick && !extra.widen &&
         !extra.shrink && !extra.takeMe && !extra.commentTarget;
     if (type === 'click' && !ordinary) clearPaperTypingTarget(false, 'selection gesture');
     if (ordinary && pendingPaperTyping) clearPaperTypingTarget(true, 'new paper click');
     const seq = ordinary ? ++paperTargetSeq : 0;
-    const resolved = (state.nativeMapAvailable
+    const resolved = (state.nativeMapAvailable || (type === 'editHere' && (proActive() || extra.preserveSelection))
         ? Promise.resolve([null, null])
         : Promise.all([wordAtPoint(n, cx, cy, false), wordAtPoint(n, cx, cy, true)]))
         .then(([hit, g]) => ({
@@ -8456,6 +9904,9 @@ function sendClick(n, pt, cx, cy, extra, type = 'click') {
         paperTypingResolving = resolved;
     }
     resolved.then((msg) => {
+        // The single clicks preceding a double-click may still be extracting
+        // text. Their late replies must not return focus to an open card.
+        if (focusEpoch !== sourceFocusEpoch) return;
         if (ordinary && seq === paperTargetSeq) {
             paperTypingTarget = msg;
             paperTypingResolving = null;
@@ -8517,7 +9968,7 @@ updateFitControl();
 // for finding your way back to something.
 
 function reviewFocusIndex() {
-    const hunks = reviewHunks();
+    const hunks = reviewReadyHunks();
     if (!hunks.length) return -1;
     const r = state.review;
     const i = hunks.findIndex(h => String(h.id) === String(r && r.focus));
@@ -8532,21 +9983,23 @@ function renderEditNav() {
     const undo = el('ednundo');
     const done = el('edndone');
 
-    const reviewing = !!(state.review && state.review.pending);
+    const reviewing = !!state.review?.pending;
     wrap.classList.toggle('review', reviewing);
 
     const kind = el('ednkind');
     if (reviewing) {
-        const hunks = reviewHunks();
+        const hunks = reviewReadyHunks();
         const i = reviewFocusIndex();
         const h = i >= 0 ? hunks[i] : null;
         wrap.hidden = false;
         if (kind) { kind.textContent = 'to review'; kind.title = 'Changes still to be decided'; }
         keep.hidden = false; undo.hidden = false; done.hidden = true;
+        keep.disabled=!h;undo.disabled=!h || !!h.editedByYou;
+        el('ednprev').disabled=el('ednnext').disabled=!hunks.length;
         // The same name the review list gives it — `h.where` is a placement
         // code ('rows' | 'gap' | 'none'), not something to show a reader.
         const name = h ? (h.name || `line ${h.startLine}`) : '';
-        where.textContent = `change ${i + 1}/${hunks.length}` + (name ? ` · ${name}` : '');
+        where.textContent = hunks.length ? `change ${i + 1}/${hunks.length}` + (name ? ` · ${name}` : '') : '◷ Preparing corrections…';
         where.title = h && h.page
             ? `Changes still to be decided — this one is on p.${h.page}`
             : 'Changes still to be decided';
@@ -8554,6 +10007,7 @@ function renderEditNav() {
     }
 
     const st = state.editStack;
+    el('ednprev').disabled=el('ednnext').disabled=false;
     const items = (st && st.items) || [];
     if (!items.length) { wrap.hidden = true; return; }
     const i = Math.max(0, Math.min(items.length - 1, (st && st.index) || 0));
@@ -8573,21 +10027,21 @@ function renderEditNav() {
 function editNav(action) { vscode.postMessage({ type: 'editNav', action }); }
 
 el('ednprev').addEventListener('click', () => {
-    if (state.review && state.review.pending) vscode.postMessage({ type: 'reviewAction', action: 'prev' });
+    if (reviewPanelReady()) reviewAct('prev');
     else editNav('prev');
 });
 el('ednnext').addEventListener('click', () => {
-    if (state.review && state.review.pending) vscode.postMessage({ type: 'reviewAction', action: 'next' });
+    if (reviewPanelReady()) reviewAct('next');
     else editNav('next');
 });
 el('edndone').addEventListener('click', () => editNav('resolve'));
 el('ednkeep').addEventListener('click', () => {
-    const h = reviewHunks()[reviewFocusIndex()];
-    if (h) vscode.postMessage({ type: 'reviewAction', action: 'keep', id: h.id });
+    const h = reviewReadyHunks()[reviewFocusIndex()];
+    if (h) reviewAct('keep',{id:h.id});
 });
 el('ednundo').addEventListener('click', () => {
-    const h = reviewHunks()[reviewFocusIndex()];
-    if (h) vscode.postMessage({ type: 'reviewAction', action: 'undo', id: h.id });
+    const h = reviewReadyHunks()[reviewFocusIndex()];
+    if (h) reviewAct('undo',{id:h.id});
 });
 
 // FOLLOW IS THREE THINGS, not two.
@@ -8669,7 +10123,14 @@ fitToolbar();
 el('follow').addEventListener('click', () => {
     setFollowMode(FOLLOW_MODES[(FOLLOW_MODES.indexOf(state.followMode) + 1) % FOLLOW_MODES.length]);
 });
-el('recompile').addEventListener('click', () => vscode.postMessage({ type: 'recompile' }));
+function requestPaperCompile(exportPdf = false) {
+    const edit = state.edit;
+    const ta = document.querySelector('.ec-editor textarea');
+    if (edit?._extendPending) { edit._extendPending.compile = { exportPdf }; return; }
+    vscode.postMessage({ type: 'recompile', exportPdf,
+        ...(edit && ta ? { editId: edit.id, text: ta.value } : {}) });
+}
+el('recompile').addEventListener('click', event => requestPaperCompile(event.metaKey || event.ctrlKey));
 el('sourceunsaved').addEventListener('click', () => vscode.postMessage({ type: 'saveSource' }));
 el('addmma').addEventListener('click', () => setArmInsert(armMode !== 'insert', 'insert'));
 
@@ -8682,11 +10143,45 @@ window.addEventListener('keydown', (e) => {
     const key = String(e.key || '').toLowerCase();
     if (key !== 's' || !(e.metaKey || e.ctrlKey) || e.altKey) return;
     const t = e.target;
-    if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable)) return;
+    if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable || t.closest?.('.compile-error'))) return;
     e.preventDefault();
     if (state.edit && typeof state.edit._saveCurrent === 'function') state.edit._saveCurrent();
     else vscode.postMessage({ type: 'saveSource' });
 });
+
+// Ctrl+V must also work on macOS, and comments must not depend on browser
+// clipboard permissions. Capture before the comment pane stops its keys.
+let fieldPasteSeq = 0;
+const fieldPastes = new Map();
+window.addEventListener('keydown', (event) => {
+    const field = event.target;
+    if (event.defaultPrevented || event.isComposing || !(event.ctrlKey || event.metaKey) ||
+        event.altKey || event.shiftKey || String(event.key).toLowerCase() !== 'v' ||
+        !field || !['TEXTAREA', 'INPUT'].includes(field.tagName) ||
+        field.readOnly || field.disabled || typeof field.selectionStart !== 'number') return;
+    event.preventDefault(); event.stopPropagation();
+    for (const [id, pending] of fieldPastes) if (pending.field === field) fieldPastes.delete(id);
+    const requestId = ++fieldPasteSeq;
+    fieldPastes.set(requestId, { field, text: field.value,
+        start: field.selectionStart, end: field.selectionEnd });
+    vscode.postMessage({ type: 'fieldPaste', requestId });
+}, true);
+
+function finishFieldPaste(msg) {
+    const pending = fieldPastes.get(msg.requestId);
+    fieldPastes.delete(msg.requestId);
+    if (!pending) return;
+    const { field, text, start, end } = pending;
+    // Do not replace newer typing, a different selection or a reopened draft.
+    if (!field.isConnected || document.activeElement !== field || field.value !== text ||
+        field.selectionStart !== start || field.selectionEnd !== end) return;
+    if (msg.error) { status(`Could not paste: ${msg.error}`, 'err'); return; }
+    if (typeof msg.text !== 'string' || !msg.text) return;
+    if (!document.execCommand('insertText', false, msg.text)) {
+        field.setRangeText(msg.text, start, end, 'end');
+        field.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+}
 
 // ⌘V ON THE PAGE ASKS WHERE.
 //
@@ -8721,7 +10216,7 @@ window.addEventListener('keydown', (e) => {
 // paste still uses VS Code's clipboard rather than browser permissions.
 window.addEventListener('keydown', (e) => {
     const t = e.target;
-    if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable)) return;
+    if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable || t.closest?.('.compile-error'))) return;
     if (!state.selection || state.selection.pendingStart) return;
     const command = (e.metaKey || e.ctrlKey) && !e.altKey;
     const key = String(e.key || '').toLowerCase();
@@ -8732,10 +10227,25 @@ window.addEventListener('keydown', (e) => {
     else if (!e.metaKey && !e.ctrlKey && !e.altKey &&
         (e.key === 'Delete' || e.key === 'Backspace')) action = 'delete';
     else if (!e.metaKey && !e.ctrlKey && !e.altKey && !e.isComposing &&
-        (e.key.length === 1 || e.key === 'Enter')) action = 'replace';
+        ([...e.key].length === 1 || e.key === 'Enter')) action = 'replace';
     if (!action) return;
     e.preventDefault();
-    clearPaperTypingTarget(false, 'selection action');
+    clearPaperTypingTarget(true, 'selection action');
+    if (action === 'replace') {
+        const request={id:++typingRequestSeq,mode:'selection',text:e.key === 'Enter' ? '\n' : e.key,
+            firstText:e.key === 'Enter' ? '\n' : e.key,keys:[],timer:null};
+        pendingPaperTyping=request;
+        request.timer=setTimeout(()=>{
+            if (pendingPaperTyping !== request) return;
+            clearPaperTypingTarget(true,'selection typing timed out');
+            status('Could not start typing at the selection — select it again','warn');
+        },8000);
+        const s=state.selection, r=s.start?.rects?.[0] || s.rows?.[0];
+        vscode.postMessage({type:'selectionAction',action,key:e.key,text:request.text,
+            typingRequest:request.id,generation:state.generation,
+            ...(r ? {page:r.page,xBp:r.x,yTopBp:r.y} : {})});
+        return;
+    }
     vscode.postMessage({
         type: 'selectionAction', action,
         ...(action === 'replace' ? { text: e.key === 'Enter' ? '\n' : e.key } : {}),
@@ -8750,7 +10260,7 @@ window.addEventListener('keydown', (e) => {
 // source caret. Nothing is written against a guessed line or textarea offset.
 window.addEventListener('keydown', (e) => {
     const t = e.target;
-    if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable)) return;
+    if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable || t.closest?.('.compile-error'))) return;
     if (e.defaultPrevented || (state.tracePaused && !state.nativeMapAvailable) ||
         (state.selection && !state.selection.pendingStart)) return;
     const printable = !e.metaKey && !e.ctrlKey && !e.altKey && !e.isComposing &&
@@ -8837,13 +10347,13 @@ function claimViewerNavigation() {
         let lastLeft = main.scrollLeft;
         main.addEventListener('scroll', () => {
             dismissPreviewsOnScroll();
-            // Only the HORIZONTAL scroll moves the card: it is a child of the
-            // page, so it follows vertically on its own, but its width was
-            // computed from the visible band and that band has just moved.
+            // Horizontal scrolling also changes the card's available width.
             if (state.edit && main.scrollLeft !== lastLeft) {
                 lastLeft = main.scrollLeft;
                 paintEditCard();
             }
+            positionEditCardOverlay();
+            hideReviewControls();
             // Cheap enough to do on every scroll event: it walks the page
             // elements and touches one text node.
             paintPageNow();
@@ -8872,6 +10382,7 @@ function responsiveFit() {
 window.addEventListener('resize', () => {
     if (state.edit) paintEditCard();
     if (state.mma) paintMmaCard();
+    positionReviewControls();
     positionCommentMarkersX();
     if (commentThreadOpen()) placeCommentPopover();
     // Fit is a mode: a panel that changes width re-fits to it.
@@ -8880,7 +10391,11 @@ window.addEventListener('resize', () => {
 // VS Code normally resizes the whole webview, but observing the actual reader
 // also covers changes caused by in-view chrome without relying on a window
 // resize event.
-try { new ResizeObserver(responsiveFit).observe(document.querySelector('main')); }
+try { new ResizeObserver(() => {
+    responsiveFit();
+    positionEditCardOverlay();
+    positionReviewControls();
+}).observe(document.querySelector('main')); }
 catch (_) { /* window resize remains the fallback */ }
 
 el('full').addEventListener('click', () => {
@@ -9021,23 +10536,33 @@ function clearSelectionOverlay() {
     el('where').textContent = '';
 }
 
-// HOLD SHIFT TO SEE THE PAPER'S LABELS.
+// HOLD SHIFT TO SEE CELL EDGES AND THE PAPER'S LABELS.
 //
-// Shift alone was free: the page's own Shift meaning is on the CLICK (picking
-// the ends of a selection), not on the key. Typing in the mini-editor is
-// excluded the same way the zoom keys are — a capital letter in an equation is
-// not a request to see the cross-references.
+// Inside the mini-editor reveal only the cell edges. Leave capital letters
+// and Shift+Arrow selection to the textarea; showing reference badges there
+// would distract from typing. Paper edges use existing geometry and never
+// request a map warm or compilation.
 //
 // Releasing is three events, not one: keyup covers the ordinary case, `blur`
 // covers Cmd-Tab away with Shift still down (no keyup ever arrives), and
 // visibilitychange covers the panel being hidden. Without those the chips stay
 // on the page and the reader has to press Shift twice to clear them.
+const plainShift = e => e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey;
 window.addEventListener('keydown', (e) => {
+    // Shortcuts own modifier combinations, including when Shift was pressed
+    // first. Capture observes them even if a textarea handles the shortcut.
+    if (!plainShift(e)) {
+        if (state.labelsOn || state.cellBoundariesOn) hideLabels();
+        return;
+    }
+    if (e.key !== 'Shift' || e.repeat) return;
+    state.cellBoundariesOn = true;
+    paintEditCellBoundaries();
+    paintPaperCellBoundaries();
     if (e.target && e.target.tagName === 'TEXTAREA') return;
-    if (e.key !== 'Shift' || e.repeat || state.labelsOn) return;
     showLabels();
-});
-window.addEventListener('keyup', (e) => { if (e.key === 'Shift') hideLabels(); });
+}, { capture: true });
+window.addEventListener('keyup', (e) => { if (e.key === 'Shift') hideLabels(); }, { capture: true });
 window.addEventListener('blur', hideLabels);
 document.addEventListener('visibilitychange', () => {
     if (document.hidden) { hideLabels(); saveViewNow(); }
@@ -9056,11 +10581,11 @@ document.addEventListener('visibilitychange', () => {
 // the pointer whenever it is over the pages. Moving the mouse with Shift down
 // shows them; letting go — or leaving — puts them away.
 const trackShift = (ev) => {
-    if (ev.shiftKey && !state.labelsOn) showLabels();
-    else if (!ev.shiftKey && state.labelsOn) hideLabels();
+    if (plainShift(ev) && !state.labelsOn) showLabels();
+    else if (!plainShift(ev) && (state.labelsOn || state.cellBoundariesOn)) hideLabels();
 };
 for (const type of ['pointermove', 'pointerdown', 'pointerenter']) {
-    document.querySelector('main').addEventListener(type, trackShift, { passive: true });
+    document.querySelector('main').addEventListener(type, trackShift, { passive: true, capture: true });
 }
 document.querySelector('main').addEventListener('pointerleave', () => hideLabels(), { passive: true });
 
@@ -9215,11 +10740,13 @@ window.addEventListener('keydown', (e) => {
  */
 function fitWidth({ sticky = state.fitMode, live = false } = {}) {
     if (!state.doc) return;
+    const doc = state.doc;
     state.fitMode = !!sticky;
     document.body.classList.add('fitted');
     updateFitControl();
     const anchor = scrollAnchor();
-    return state.doc.getPage(1).then((p) => {
+    return doc.getPage(1).then((p) => {
+        if (state.doc !== doc) return;
         const main = document.querySelector('main');
         const cs = getComputedStyle(main);
         const pad = parseFloat(cs.paddingLeft || 0) + parseFloat(cs.paddingRight || 0);
@@ -9231,6 +10758,22 @@ function fitWidth({ sticky = state.fitMode, live = false } = {}) {
         const avail = main.clientWidth - pad;
         const base = p.getViewport({ scale: 1 });
         if (avail > 0) setScale(avail / base.width, anchor, true, { live });
+    });
+}
+
+let layoutFitPending = false;
+let layoutFitFrame = null;
+function fitViewerOnce() {
+    if (!layoutFitPending || state.layoutMode !== 'viewer' || !state.doc || state.openInFlight || layoutFitFrame != null) return;
+    // The host has moved the editor groups. Read the webview's final width
+    // after layout, and keep this a one-shot unless responsive Fit was on.
+    layoutFitFrame = requestAnimationFrame(() => {
+        layoutFitFrame = requestAnimationFrame(() => {
+            layoutFitFrame = null;
+            if (!layoutFitPending || state.layoutMode !== 'viewer' || !state.doc || state.openInFlight) return;
+            layoutFitPending = false;
+            fitWidth({ sticky:state.fitMode }).catch(() => {});
+        });
     });
 }
 
@@ -9246,7 +10789,63 @@ function fitWidth({ sticky = state.fitMode, live = false } = {}) {
 // `viewport.clone({offsetX, offsetY})` is pixel-identical to rendering the whole
 // page and cutting it out, at a fraction of the memory.
 
+// Thumbnails share a bounded lane. The equation under the pointer goes next,
+// ahead of queued review/background crops; copying a label never joins it.
+const fragmentCropQueue = [];
+const fragmentCropCache = new Map();
+let fragmentCropRunning = false;
+let fragmentCropBytes = 0;
+let fragmentCropDoc = null;
 async function cropFragment(msg) {
+    const doc = state.doc, generation = state.generation;
+    if (!doc) return { id:msg.id, error:'nothing to crop' };
+    if (fragmentCropDoc !== doc) {
+        fragmentCropCache.clear(); fragmentCropBytes = 0; fragmentCropDoc = doc;
+    }
+    const key = JSON.stringify([generation, msg.rects, msg.scale || 2, msg.pad ?? 3, !!msg.links]);
+    const hit = fragmentCropCache.get(key);
+    if (hit?.doc === doc) return { ...hit.value, id:msg.id };
+    return new Promise(resolve => {
+        const job = { msg, doc, generation, key, resolve };
+        if (msg.priority === 'hover' || ['hover','destination','bookmark'].includes(msg.id)) fragmentCropQueue.unshift(job);
+        else fragmentCropQueue.push(job);
+        drainFragmentCrops();
+    });
+}
+async function drainFragmentCrops() {
+    if (fragmentCropRunning) return;
+    fragmentCropRunning = true;
+    try {
+        while (fragmentCropQueue.length) {
+            const job = fragmentCropQueue.shift();
+            const current = () => state.doc === job.doc && state.generation === job.generation &&
+                (!job.msg.current || job.msg.current());
+            let value;
+            try {
+                if (!current()) value = { error:'preview superseded' };
+                else {
+                    const cached = fragmentCropCache.get(job.key);
+                    value = cached?.doc === job.doc ? cached.value : await renderFragmentCrop(job.msg);
+                    if (!current()) value = { error:'preview superseded' };
+                    else if (value?.dataUrl && !cached) {
+                        fragmentCropCache.set(job.key, { doc:job.doc, value });
+                        fragmentCropBytes += value.dataUrl.length;
+                        while (fragmentCropCache.size > 32 || fragmentCropBytes > 16 * 1024 * 1024) {
+                            const first = fragmentCropCache.keys().next().value;
+                            fragmentCropBytes -= fragmentCropCache.get(first).value.dataUrl.length;
+                            fragmentCropCache.delete(first);
+                        }
+                    }
+                }
+            } catch (error) { value = { error:error?.message || String(error) }; }
+            job.resolve({ ...value, id:job.msg.id });
+            // Yield to pointer/copy/edit events between background images.
+            await new Promise(resolve => setTimeout(resolve, 0));
+        }
+    } finally { fragmentCropRunning = false; }
+}
+
+async function renderFragmentCrop(msg) {
     const rects = (msg.rects || []).filter(r => r && Number.isFinite(r.x));
     if (!rects.length || !state.doc) return { id: msg.id, error: 'nothing to crop' };
     const page = rects[0].page;
@@ -9318,13 +10917,22 @@ window.addEventListener('message', async (ev) => {
     const msg = ev.data || {};
     switch (msg.type) {
         case 'pdfRange': pdfRanges.receive(msg); break;
-        case 'open': await openDocument(msg); findPageChanged(); break;
+        case 'open':
+            if (msg.paperRoot && state.paperRoot && msg.paperRoot!==state.paperRoot) break;
+            state.paperRoot=msg.paperRoot || state.paperRoot;
+            await openDocument(msg); fitViewerOnce(); findPageChanged(); break;
         // The interactive preview. Three messages and nothing else changes:
         // a page to draw, the end of a build (which is where a document that
         // lost pages drops their overlays), and the answer to an outline
         // request the renderer made.
         case 'liveStart': liveStart(msg); break;
         case 'inkCaret': setInkCaret(msg); break;
+        case 'selectionTypingFailed':
+            if (pendingPaperTyping?.id === msg.typingRequest) {
+                clearPaperTypingTarget(true,'selection typing failed');
+                if (msg.reason) status(msg.reason,'warn');
+            }
+            break;
         case 'picker': openPicker(msg); break;
         case 'inspireResults': activePicker?.onInspire(msg); break;
         case 'txdlPage': await drawTxdlPage(msg); tikzPageChanged(Number(msg.page)); findPageChanged(); break;
@@ -9380,7 +10988,8 @@ window.addEventListener('message', async (ev) => {
             break;
         }
         case 'viewerProbe': await probeViewer(msg); break;
-        case 'fullscreen':
+        case 'fullscreen': {
+            const previous = state.layoutMode;
             state.layoutMode = msg.mode === 'viewer' || msg.value ? 'viewer' : 'all';
             state.fullscreen = state.layoutMode !== 'all';
             setToolIcon(el('full'), state.layoutMode === 'all' ? 'layout-focus' : 'layout');
@@ -9390,7 +10999,33 @@ window.addEventListener('message', async (ev) => {
             el('full').setAttribute('aria-label', el('full').title);
             document.body.classList.toggle('fullscreen', state.fullscreen);
             if (state.fullscreen) window.focus();
+            if (state.layoutMode === 'viewer' && previous !== 'viewer' && msg.fit !== false) layoutFitPending = true;
+            if (state.layoutMode !== 'viewer') {
+                layoutFitPending = false;
+                if (layoutFitFrame != null) cancelAnimationFrame(layoutFitFrame);
+                layoutFitFrame = null;
+            }
+            fitViewerOnce();
             break;
+        }
+        case 'navigateTo': {
+            if (!state.doc || String(msg.generation)!==String(state.generation) ||
+                !Number.isInteger(msg.page) || msg.page<1 || msg.page>state.pageCount) break;
+            const epoch=state.navigationEpoch=(state.navigationEpoch || 0)+1,doc=state.doc;
+            state.navigationOwner='viewer';
+            await renderPage(msg.page);
+            if (epoch!==state.navigationEpoch || state.doc!==doc ||
+                String(msg.generation)!==String(state.generation)) break;
+            const rects=msg.rects || [],wrap=pagesEl().querySelector(`.page[data-page="${msg.page}"]`);
+            const main=document.querySelector('main');
+            if (wrap && main) {
+                const v=rects.length ? rectToViewport(msg.page,rects[0]) : null;
+                main.scrollTo({top:Math.max(0,wrap.offsetTop+(v?.y || 0)-main.clientHeight*.25),behavior:'smooth'});
+            }
+            state.highlight=rects.length ? {page:msg.page,rects,flag:msg.flag || 'approx'} : null;
+            paintHighlight();if(msg.label)el('where').textContent=msg.label;
+            break;
+        }
         case 'highlight': {
             let rects = msg.rects || [];
             // An EXACT highlight (the engine's own glyph boxes) is painted as
@@ -9431,6 +11066,8 @@ window.addEventListener('message', async (ev) => {
             break;
         }
         case 'selection':
+            if (msg.span && !selectionGeometryCurrent(msg.span)) break;
+            state.selectionGeometryPending = false;
             // A range replaces the cursor's wash: the two are answers to
             // different questions and showing both at once reads as neither.
             if (msg.span) {
@@ -9453,9 +11090,16 @@ window.addEventListener('message', async (ev) => {
             // list up would show a section as open that has just been folded.
             if (navVisible()) renderNav();
             break;
+        case 'cellBoundaries':
+            if (msg.generation !== state.generation) break;
+            state.cellBoundaries = { generation:msg.generation, items:msg.items || [] };
+            paintPaperCellBoundaries();
+            break;
         case 'labels':
             if (msg.generation !== state.generation) break;
             state.labels = { generation: msg.generation, items: msg.items || [], destinations: msg.destinations || [] };
+            if (Array.isArray(msg.cellBoundaries)) state.cellBoundaries = { generation:msg.generation,items:msg.cellBoundaries };
+            paintPaperCellBoundaries();
             state.labelFormat = msg.format || 'command';
             if (labelsVisible()) { paintLabels().catch(() => {}); if (state.labelsOn) hintLabels(); }
             if (hoveredPdfLink && hoveredPdfLink.isConnected) {
@@ -9474,12 +11118,47 @@ window.addEventListener('message', async (ev) => {
             vscode.postMessage({ type: 'cropped', ...out });
             break;
         }
+        case 'fieldPasteResult': finishFieldPaste(msg); break;
+        case 'restartPdfWorker':
+            // Keep the painted pages, editor DOM, focus and scroll. Supersede
+            // any old open before tearing down its worker on the next `open`.
+            state.openSeq++;
+            state.openInFlight = false;
+            state.workerDead = true;
+            state.nativeMapAvailable = false;
+            renderReview();renderEditNav();
+            for (const transport of [...pdfRanges.active.values()]) transport.abort();
+            status('restarting the PDF worker…', 'busy');
+            break;
         case 'status': status(msg.text, msg.kind || ''); break;
         case 'compileState': setCompileState(msg); break;
         case 'engine': setEngineBadge(msg); break;
+        case 'errorAnnotations': setErrorAnnotations(msg.items); break;
+        case 'retireLivePreview': {
+            if (String(msg.generation) !== String(state.generation)) break;
+            for (const [page, identity] of Object.entries(msg.pages || {})) {
+                const n = Number(page);
+                const identities = [state.txdlFragments?.get(n)?.msg?.mapIdentity,
+                    state.txdl?.pages?.get(n)?.identity, state.txdlPending?.get(n)?.msg?.identity,
+                    state.txdlDeferred?.get(n)?.identity, state.txdlFragmentDeferred?.get(n)?.mapIdentity]
+                    .filter(id=>id!=null);
+                // Include queued ink: a delayed retirement must not remove a
+                // newer preview that is waiting for the PDF or its fonts.
+                if (!identities.length || identities.some(id=>id!==identity)) continue;
+                state.txdlPending?.delete(n); state.txdlDeferred?.delete(n);
+                state.txdlFragmentDeferred?.delete(n);
+                removeTxdlOverlay(n); restorePdfLinks(n);
+                invalidateSelectionGeometry(n);
+            }
+            renderReview(); renderEditNav();
+            break;
+        }
         case 'nativeMapState':
-            if (msg.generation != null && String(msg.generation) === String(state.generation))
+            if (msg.generation != null && String(msg.generation) === String(state.generation)) {
+                const changed = state.nativeMapAvailable !== !!msg.available;
                 state.nativeMapAvailable = !!msg.available;
+                if (changed && state.review) paintReview();
+            }
             break;
         case 'traceState': setTraceState(msg); break;
         case 'sourceDirty': setSourceDirty(msg); break;
@@ -9497,6 +11176,7 @@ window.addEventListener('message', async (ev) => {
             break;
         }
         case 'editOpen': {
+            if (msg.selectionTyping && pendingPaperTyping?.id !== msg.typingRequest) break;
             // A compile/restore replay for the SAME session is not a request
             // for a new editor. Keep its DOM, undo history, composition, value,
             // caret and scroll exactly as they are, including unsent typing.
@@ -9513,6 +11193,8 @@ window.addEventListener('message', async (ev) => {
             closeEditCard(false);                  // one session at a time
             state.edit = {
                 id: msg.editId, text: msg.text || '', label: msg.label, native:!!msg.native,
+                stationaryEquation: isEquationEditCard(msg),
+                cellStarts: Array.isArray(msg.cellStarts) ? msg.cellStarts : [0],
                 file: msg.file, path: msg.path || null, startLine: msg.startLine, endLine: msg.endLine,
                 rects: msg.rects || [], page: Number(msg.page) ||
                     (msg.rects?.length ? msg.rects[msg.rects.length - 1].page : 1),
@@ -9542,7 +11224,9 @@ window.addEventListener('message', async (ev) => {
         }
         case 'editUpdate': {
             const e = state.edit;
-            if (!e || e.id !== msg.editId || e.conflict) break;
+            if (!e || e.id !== msg.editId || e.conflict || e._extendPending) break;
+            e.cellStarts = Array.isArray(msg.cellStarts) ? msg.cellStarts
+                : rebaseCellStarts(e.cellStarts, e.text, msg.text);
             e.text = msg.text;
             if (msg.startLine) { e.startLine = msg.startLine; e.endLine = msg.endLine; }
             const card = document.querySelector('.editcard');
@@ -9556,6 +11240,7 @@ window.addEventListener('message', async (ev) => {
                 card._tableRefresh?.();
                 card._figureRefresh?.();
             }
+            paintEditCellBoundaries(card);
             const ln = document.querySelector('.editcard .ec-lines');
             if (ln && msg.startLine) {
                 ln.textContent = `${e.file || ''} · ${e.startLine === e.endLine
@@ -9563,6 +11248,7 @@ window.addEventListener('message', async (ev) => {
             }
             break;
         }
+        case 'editExtended': finishEditExtension(msg); break;
         case 'mmaOpen': {
             closeEditCard(false);                  // one card at a time
             for (const c of document.querySelectorAll('.mmacard')) c.remove();
@@ -9628,10 +11314,17 @@ window.addEventListener('message', async (ev) => {
             // paper that finished parsing after `blank` could put itself back.
             state.openSeq++;
             state.openInFlight = false;
+            state.paperRoot=msg.paperRoot || null;
+            state.reviewStartKey = null;
+            state.navigationEpoch=(state.navigationEpoch || 0)+1;
+            state.navigationOwner='editor';
+            state.review=null;state.diff=null;state.editStack=null;
+            hideReviewControls();
             state.txdlDeferred = null;
             clearPages();
             state.generation = null;
             state.nativeMapAvailable = false;
+            renderReview();renderEditNav();
             state.restoreViewNext = true;
             setTraceState({ paused: false });
             setSourceDirty({ dirty: false });
@@ -9686,7 +11379,7 @@ window.addEventListener('message', async (ev) => {
             if (state.edit && state.edit.id === msg.editId) {
                 pinEditCard();
                 state.edit.rects = msg.rects || state.edit.rects;
-                followBlockBottom(state.edit);
+                followEditCardAnchor(state.edit);
                 paintEditCard();
             }
             break;
@@ -9709,8 +11402,27 @@ window.addEventListener('message', async (ev) => {
                 renderReview();
             }
             break;
+        case 'reviewPreloaded': void warmReviewPdfs(msg); break;
+        case 'reviewRendered':
+            if (msg.requestId === reviewPreview.seq && msg.revision === state.review?.renderRevision) {
+                reviewPreview.response = {...reviewPreview.response,...msg};
+                if (reviewPreview.mode === 'rendered') await paintReviewRendered(msg);
+            }
+            break;
+        case 'reviewRenderedMarks': paintReviewRenderedMarks(msg); break;
+        case 'reviewPageMarks':
+            if (msg.requestId === reviewInk.seq && msg.revision === state.review?.renderRevision &&
+                String(msg.generation) === String(state.generation) && reviewPlacementCurrent() &&
+                reviewHunks().some(h => h.id === msg.id)) {
+                reviewInk.pending.delete(msg.id); reviewInk.marks.set(msg.id, msg.marks || []); paintReview(msg.id);
+                const h=reviewHunks().find(h=>h.id===state.review.focus);
+                if(h?.id===msg.id && reviewPreview.mode==='rendered')paintReviewAfterFromPage(h);
+            }
+            break;
         case 'review':
+            if (msg.paperRoot && state.paperRoot && msg.paperRoot!==state.paperRoot) break;
             state.review = msg.session || null;
+            if (!state.review?.pending) state.reviewStartKey = null;
             renderReview();
             renderEditNav();
             if (state.tour) placeTourRing(state.tour.point);
@@ -9737,19 +11449,23 @@ window.addEventListener('message', async (ev) => {
             state.navigationEpoch = (state.navigationEpoch || 0) + 1;
             state.navigationOwner = ['review', 'viewer'].includes(msg.owner) ? msg.owner : 'editor';
             break;
+        case 'reviewSelection':
+            if(msg.paperRoot && state.paperRoot && msg.paperRoot!==state.paperRoot)break;
+            if(msg.file && msg.file!==state.review?.file)break;
+            selectReviewHunk(msg.id);
+            break;
         case 'reviewFocus':
+            if (msg.paperRoot && state.paperRoot && msg.paperRoot!==state.paperRoot) break;
             const reviewNavigationEpoch = state.navigationEpoch = (state.navigationEpoch || 0) + 1;
             state.navigationOwner = 'review';
             if (state.review) {
-                state.review.focus = msg.id;
-                renderReview();
+                selectReviewHunk(msg.id);
                 // Never navigate with coordinates from another PDF. The host
                 // retains the click and sends it again after `opened` and a
                 // fresh placement payload agree on one generation.
                 if (msg.generation == null || state.generation == null ||
                     String(msg.generation) !== String(state.generation) ||
                     !reviewPlacementCurrent()) {
-                    paintReview();
                     break;
                 }
                 if (msg.page) {
@@ -9765,7 +11481,6 @@ window.addEventListener('message', async (ev) => {
                         main.scrollTo({ top: y, behavior: 'smooth' });
                     }
                 }
-                paintReview();
             }
             break;
         case 'diff':
@@ -9802,12 +11517,16 @@ vscode.postMessage({ type: 'ready' });
 function clearPages() {
     pagesEl().innerHTML = '';
     state.pageCount = 0;
+    setErrorAnnotations([], false);
+    state.errorExpanded?.clear();
     clearTxdlOverlays();
     state.rendered.clear();
     state.pending.clear();
     textCache.clear();
     state.highlight = null;
     state.selection = null;
+    state.cellBoundaries = null;
+    state.cellBoundariesAsked = null;
     state.labels = null;
     state.sections = null;
     for (const el of document.querySelectorAll('.lbc, .lbcink, .wpa, .movecaret, .hl, .selfill')) el.remove();
@@ -10441,10 +12160,13 @@ function tikzFinishPolyline(page) {
 
 function tikzSend(edit) {
     status('TikZ: editing…');
-    vscode.postMessage({ type: 'tikzEdit', key: ++tikz.seq, snap: tikz.snap, ...edit });
+    const key=++tikz.seq;
+    vscode.postMessage({ type: 'tikzEdit', key, snap: tikz.snap, ...edit });
+    return key;
 }
 
 function tikzEdited(msg) {
+    if(msg.op==='source' && tikzSourceEdited(msg))return;
     if (!msg.ok) { status(`TikZ: ${msg.error || 'the edit did not apply'}`, 'warn'); return; }
     if (msg.op === 'copy') { status(`TikZ: copied ${msg.copied} statement${msg.copied === 1 ? '' : 's'}`, 'ok'); return; }
     status(`TikZ: ${msg.op === 'undo' ? 'undone' : msg.op === 'redo' ? 'redone' : 'edited'} — redrawing`, 'ok');
@@ -10551,6 +12273,7 @@ function tikzNudge(dxMm, dyMm) {
 
 /** The inspector: a single statement's name, coordinates, text and options. */
 function tikzInspector() {
+    tikzSourcePanel();
     const box = document.querySelector('#tikzpanel .tz-inspector');
     if (!box) return;
     const items = tikzSelected();
@@ -10598,6 +12321,102 @@ function tikzInspector() {
         const b = document.createElement('button'); b.textContent = label; b.addEventListener('click', fn); actions.appendChild(b);
     }
     box.appendChild(actions);
+}
+
+// The source editor is built once. Inspector/map refreshes update its state,
+// never replace the textarea or overwrite a draft, caret or native undo stack.
+function tikzSourcePanel() {
+    const area=document.querySelector('#tikzpanel .tz-source textarea');
+    if(!area)return;
+    const items=tikzSelected(),drafts=tikz.sourceDrafts ||= new Map();
+    let draft=null;
+    if(items.length===1) {
+        const it=items[0],pic=tikz.pages.get(tikz.selection.page)?.pictures.get(it.picture);
+        if(pic) {
+            const key=`${pic.file}:${it.stmt.start}`;
+            draft=drafts.get(key);
+            if(!draft) {
+                draft={key,file:pic.file,picture:tikzPicRef(pic),ref:tikzRef(it),original:it.stmt.text,value:it.stmt.text};
+                drafts.set(key,draft);
+                // Only evict clean entries: a redraw must not discard typing.
+                if(drafts.size>20)for(const [k,d]of drafts)if(!d.dirty && !d.pending && d!==draft){drafts.delete(k);break;}
+            } else if(draft.awaiting===it.stmt.text) {
+                draft.awaiting=null;draft.ref=tikzRef(it);draft.picture=tikzPicRef(pic);
+            } else if(!draft.awaiting && it.stmt.text!==draft.original) {
+                if(draft.dirty || draft.pending)draft.conflict=true;
+                else Object.assign(draft,{original:it.stmt.text,value:it.stmt.text,ref:tikzRef(it),picture:tikzPicRef(pic),conflict:false,error:null});
+            }
+            draft.latest={original:it.stmt.text,ref:tikzRef(it),picture:tikzPicRef(pic)};
+        }
+    }
+    const primary=items.find(it=>it.key===tikz.selection?.primary) || items[0];
+    const picture=primary && tikz.pages.get(tikz.selection.page)?.pictures.get(primary.picture);
+    const notice=picture ? `${picture.file}:${primary.stmt.start}:${primary.stmt.text}` : null;
+    if(tikz.sourceNotice!==notice) {
+        tikz.sourceNotice=notice;
+        if(primary && picture)vscode.postMessage({type:'tikzSelectSource',picture:tikzPicRef(picture),ref:tikzRef(primary)});
+    }
+    tikz.sourceCurrent=draft;
+    area.disabled=!draft;
+    if(draft && area.value!==draft.value)area.value=draft.value;
+    if(!draft && document.activeElement!==area)area.value='';
+    const meta=document.querySelector('#tikzpanel .tz-source-meta');
+    meta.textContent=!draft ? (items.length ? 'Select one element to edit its source.' : 'Select an element on the page.')
+        : draft.conflict ? 'Source changed elsewhere. Your draft is preserved; Reload reads the current element.'
+        : draft.error || (draft.pending ? 'Applying…' : draft.dirty ? 'Unapplied changes · ⌘/Ctrl+Enter to apply' : draft.awaiting ? 'Applied · refreshing the page…' : `${draft.file.split(/[\\/]/).pop()} · ${items[0].stmt.kind}`);
+    meta.classList.toggle('conflict',!!(draft?.conflict || draft?.error));
+    document.querySelector('#tikzpanel .tz-source-apply').disabled=!draft || !draft.dirty || !!draft.pending || !!draft.conflict;
+    document.querySelector('#tikzpanel .tz-source-reload').disabled=!draft || !!draft.pending;
+}
+
+function tikzApplySource() {
+    const d=tikz.sourceCurrent;
+    if(!d?.dirty || d.pending || d.conflict)return;
+    d.error=null;d.sent=d.value;
+    d.pending=tikzSend({op:'source',picture:d.picture,ref:d.ref,text:d.sent});
+    tikzSourcePanel();
+}
+
+function tikzSourceEdited(msg) {
+    const d=[...(tikz.sourceDrafts?.values() || [])].find(d=>d.pending===msg.key);
+    if(!d)return true; // late replies cannot select a different element/paper
+    d.pending=null;
+    if(!msg.ok) {d.error=msg.error || 'The edit could not be applied.';tikzSourcePanel();return true;}
+    if(msg.source) {
+        if(d.value===d.sent)d.value=msg.source.text;
+        d.original=msg.source.text;d.ref={start:msg.source.start,text:msg.source.text};
+        d.dirty=d.value!==d.original;d.conflict=false;d.error=null;d.awaiting=msg.source.text;
+    }
+    const current=tikz.sourceCurrent===d;
+    tikzSourcePanel();
+    return !current || !!msg.noChange; // retain a newer selection; otherwise use normal redraw selection
+}
+
+function tikzBuildSource(parent) {
+    const section=tikzSection(parent,'Source (selection)',true);
+    const form=document.createElement('div');form.className='tz-source';
+    const area=document.createElement('textarea');
+    area.setAttribute('aria-label','Selected TikZ element source');area.spellcheck=false;area.rows=7;
+    area.addEventListener('input',()=>{
+        const d=tikz.sourceCurrent;if(!d)return;
+        d.value=area.value;d.dirty=d.value!==d.original;d.error=null;tikzSourcePanel();
+    });
+    area.addEventListener('keydown',e=>{
+        e.stopPropagation();
+        if((e.metaKey || e.ctrlKey) && e.key==='Enter'){e.preventDefault();tikzApplySource();}
+    });
+    const meta=document.createElement('div');meta.className='tz-source-meta';meta.setAttribute('role','status');
+    const actions=document.createElement('div');actions.className='tz-actions';
+    const apply=document.createElement('button');apply.className='tz-source-apply';apply.textContent='Apply';
+    apply.title='Apply this element’s source (⌘/Ctrl+Enter)';apply.addEventListener('click',tikzApplySource);
+    const reload=document.createElement('button');reload.className='tz-source-reload';reload.textContent='Reload';
+    reload.title='Discard this draft and read the current element source';
+    reload.addEventListener('click',()=>{
+        const d=tikz.sourceCurrent;if(!d || d.pending)return;
+        const latest=d.awaiting ? {original:d.original,ref:d.ref,picture:d.picture} : d.latest;
+        Object.assign(d,{...latest,value:latest.original,dirty:false,conflict:false,error:null});tikzSourcePanel();
+    });
+    actions.append(apply,reload);form.append(area,meta,actions);section.appendChild(form);
 }
 
 // --- the panel ----------------------------------------------------------------
@@ -10682,6 +12501,8 @@ function tikzBuildPanel() {
     const body = document.createElement('div');
     body.className = 'tz-body';
     panel.appendChild(body);
+
+    tikzBuildSource(body);
 
     const tools = tikzSection(body, 'Draw');
     tools.appendChild(tikzButton('Select', 'select', () => tikzSetTool('select'), { tool: 'select', title: 'Select · move · Shift-click adds · drag on empty space selects an area' }));
@@ -10953,7 +12774,7 @@ function tikzPaletteArrived(msg) {
     if (tikz.on) tikzBuildPanel();
 }
 
-window.__wbTikzTest = { tikz, tikzDragTransform, tikzPath, tikzResolved, tikzEdited, tikzModel, tikzSelected, tikzArrange };
+window.__wbTikzTest = { tikz, tikzDragTransform, tikzPath, tikzResolved, tikzEdited, tikzModel, tikzSelected, tikzArrange, tikzInspector };
 
 // =============================================================================
 // FIND IN THE PAPER
@@ -10997,8 +12818,8 @@ async function findModel(n) {
         // the characters and the word gaps are only visible glyph by glyph.
         const renderer = txdlRendererInstance();
         let layer = [];
-        try { await renderer.prefetch(live); layer = renderer.glyphText(live); } catch (_) { /* no text */ }
-        items = layer.map(it => ({ str: it.str, x: it.x, y: it.baseline - 0.8 * it.h, w: it.w, h: it.h }));
+        try { await renderer.prefetch(live); layer = renderer.glyphText(live,undefined,{ink:true}); } catch (_) { /* no text */ }
+        items = layer.map(it => ({ str: it.str, x: it.x, y: it.baseline - 0.8 * it.h, w: it.w, h: it.h,charBoxes:it.charBoxes }));
     } else if (state.doc) {
         try {
             const page = await state.doc.getPage(n);
@@ -11008,7 +12829,7 @@ async function findModel(n) {
                 if (!it.str || !it.str.trim() || !it.transform) continue;
                 const t = mul(vp.transform, it.transform);
                 const fh = Math.hypot(t[2], t[3]) || Math.abs(t[3]) || 10;
-                items.push({ str: it.str, x: t[4], y: t[5] - fh, w: it.width || 0, h: fh });
+                items.push({ str: it.str, x: t[4], y: t[5] - fh, w: it.width || 0, h: fh,baseline:t[5] });
             }
         } catch (_) { /* a page that will not give its text has none */ }
     }
@@ -11082,10 +12903,17 @@ async function findRects(m) {
             x: geo.originX + r.x * scale, y: geo.originY + r.y * scale, w: r.w * scale, h: r.h * scale }));
     }
     if (!state.rendered.has(m.page) || entry.source !== state.doc) return null;
-    let items;
-    try { items = await textItems(m.page); } catch (_) { return null; }
-    if (items.length !== entry.items.length) return null;
-    return texFind.spanRects(items, spans);
+    // Measure only pages with visible matches, once at natural scale. Reuse
+    // their font/glyph geometry at every zoom instead of dividing line widths.
+    entry.measured ||= (async()=>{
+        const page=await entry.source.getPage(m.page),vp=page.getViewport({scale:1});
+        await measureReviewChars(await page.getTextContent(),vp,entry.items,{ink:true,fonts:page.commonObjs});
+    })().catch(()=>{});
+    await entry.measured;
+    const rendered=state.rendered.get(m.page);
+    if (!rendered || entry.source!==state.doc) return null;
+    const scale=rendered.viewport.scale || 1;
+    return texFind.spanRects(entry.items, spans).map(r=>({x:r.x*scale,y:r.y*scale,w:r.w*scale,h:r.h*scale}));
 }
 
 async function findPaintPage(n) {
@@ -11201,7 +13029,7 @@ window.addEventListener('keydown', e => {
     const key = String(e.key || '').toLowerCase();
     if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
     const t = e.target;
-    if (t && (t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    if (t && (t.tagName === 'TEXTAREA' || t.isContentEditable || t.closest?.('.compile-error'))) return;
     if (key === 'f' && !e.shiftKey) { e.preventDefault(); e.stopPropagation(); findOpen(); }
     else if (key === 'g' && findS().open) { e.preventDefault(); e.stopPropagation(); findStep(e.shiftKey ? -1 : 1); }
 }, true);

@@ -20,7 +20,7 @@ function member(root, name) {
     return file;
 }
 function digest(file) { return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'); }
-function readInstallation(root, target) {
+function inspectInstallation(root, target, verifyDigests = true) {
     const manifestFile = member(root, 'runtime.json');
     if (fs.statSync(manifestFile).size > 1024 * 1024) throw Error('WLaTeX runtime manifest is too large');
     const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
@@ -36,7 +36,7 @@ function readInstallation(root, target) {
         if (!entry || files.has(entry.path) || !/^[0-9a-f]{64}$/.test(entry.sha256))
             throw Error('Invalid WLaTeX runtime file digest');
         const file = member(root, entry.path);
-        if (digest(file) !== entry.sha256) throw Error(`WLaTeX runtime checksum mismatch: ${entry.path}`);
+        if (verifyDigests && digest(file) !== entry.sha256) throw Error(`WLaTeX runtime checksum mismatch: ${entry.path}`);
         files.set(entry.path, file);
     }
     const entry = key => {
@@ -67,12 +67,12 @@ function newestBuild(location, name) {
     }
     return newest || candidates[1];
 }
-function resolveNativeRuntime(directory, options = {}) {
+function inspectNativeRuntime(directory, options = {}, verifyDigests = true) {
     const location = directory || (options.env || process.env).WLATEX_HOME;
     if (!location) return null;
     const target = targetFor(options.platform, options.arch);
     if (!path.isAbsolute(location)) throw Error('WLaTeX installation path must be absolute');
-    if (fs.existsSync(path.join(location, 'runtime.json'))) return readInstallation(location, target);
+    if (fs.existsSync(path.join(location, 'runtime.json'))) return inspectInstallation(location, target, verifyDigests);
     // Retain the explicit development-checkout override. Ordinary extension
     // installs never search for or load an SDK from their own directory.
     const suffix = target.startsWith('win32-') ? '.exe' : '';
@@ -85,4 +85,11 @@ function resolveNativeRuntime(directory, options = {}) {
         fs.accessSync(file, target.startsWith('win32-') ? fs.constants.R_OK : fs.constants.X_OK);
     return result;
 }
-module.exports = { TARGETS, targetFor, readInstallation, resolveNativeRuntime, newestBuild, digest };
+// Presence probing is only a UI/fallback gate; it never loads an SDK or starts
+// an engine. Actual runtime resolution always verifies the full file digests.
+function hasNativeRuntime(directory, options = {}) {
+    try { return !!inspectNativeRuntime(directory, options, false); } catch (_) { return false; }
+}
+function readInstallation(root, target) { return inspectInstallation(root, target); }
+function resolveNativeRuntime(directory, options = {}) { return inspectNativeRuntime(directory, options); }
+module.exports = { hasNativeRuntime, TARGETS, targetFor, readInstallation, resolveNativeRuntime, newestBuild, digest };
